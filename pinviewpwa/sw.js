@@ -1,9 +1,9 @@
 var cacheName = 'pinview-pwa';
 var filesToCache = [
-  '/',
-  '/index.html',
-  '/css/style.css',
-  '/js/main.js'
+  '/pinviewpwa/',
+  '/pinviewpwa/index.html',
+  '/pinviewpwa/css/style.css',
+  '/pinviewpwa/js/main.js'
 ];
 
 /* Start the service worker and cache all of the app's content */
