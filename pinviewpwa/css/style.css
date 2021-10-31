@@ -14,8 +14,7 @@ html,
 
 /* Center the content in the browser window */
 .container {
-  margin: auto;
-  text-align: center;
+  margin: 1em;
 }
 
 .title {
