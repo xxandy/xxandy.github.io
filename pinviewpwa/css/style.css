@@ -1,5 +1,6 @@
 body {
   font-family: sans-serif;
+  background-color: #6060A0;
 }
 
 /* Make content area fill the entire browser window */
@@ -15,8 +16,10 @@ html,
 /* Center the content in the browser window */
 .container {
   margin: 1em;
+  width: 100%;
 }
 
 .title {
   font-size: 3rem;
 }
+
