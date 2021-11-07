@@ -29,6 +29,6 @@
   "lang": "en-US",
   "start_url": "/pinviewpwa/index.html",
   "display": "standalone",
-  "background_color": "white",
-  "theme_color": "white"
+  "background_color": "#6060A0",
+  "theme_color": "#6060A0"
 }
