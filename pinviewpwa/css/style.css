@@ -38,17 +38,9 @@ html,
 }
 
 .showguide {
-  position: absolute;
-  margin: 1em;
-  left: 0px;
-  top: 0px;
   display: block;
 }
 
 .hideguide {
-  position: absolute;
-  margin: 1em;
-  left: 0px;
-  top: 0px;
   display: none;
 }
