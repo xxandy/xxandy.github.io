@@ -27,11 +27,11 @@
     function openNative(proto, url) {
       var osdef = detectOSType();
       if (osdef == "Android") {
-        window.open('intent://" + url + "#Intent;scheme=' + proto + ';package=com.android.chrome;end;');
+        window.open('intent://' + url + '#Intent;scheme=' + proto + ';package=com.android.chrome;end;');
       } else if (osdef == "iOS") {
         window.open('x-safari-' + proto + '://' + url, '_blank');
       } else {
-        window.open(proto + "://" + url);
+        location = proto + "://" + url;
       }
     }
     </script>
@@ -39,7 +39,7 @@
   </head>
   <body>
     
-    <h1>Redirect to system browser v10</h1>
+    <h1>Redirect to system browser v11</h1>
     <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
 
   </body>
