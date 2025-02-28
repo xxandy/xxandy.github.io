@@ -3,12 +3,44 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <script type="text/javascript">
+    function detectOSType() {
+      var userAgent = navigator.userAgent || navigator.vendor || window.opera;
+  
+      // Windows Phone must come first because its UA also contains "Android"
+      if (/windows phone/i.test(userAgent)) {
+          return "Windows Phone";
+      }
+  
+      if (/android/i.test(userAgent)) {
+          return "Android";
+      }
+  
+      // iOS detection from: http://stackoverflow.com/a/9039885/177710
+      if (/iPad|iPhone|iPod/.test(userAgent) && !window.MSStream) {
+          return "iOS";
+      }
+  
+      return "unknown";
+    }
+    function openNative(proto, url) {
+      var osdef = detectOSType();
+      if (osdef == "Android") {
+        window.open('intent://" + url + "#Intent;scheme=' + proto + ';package=com.android.chrome;end;');
+      } else if (osdef == "iOS") {
+        window.open('x-safari-' + proto + '://' + url, '_blank');
+      } else {
+        window.open(proto + "://" + url);
+      }
+    }
+    </script>
+   
   </head>
   <body>
     
-    <h1>Redirect to system browser v9</h1>
-    <p> <button type="button"  onclick="window.open('x-safari-https://urikiregomen-now.livecall.net/', '_blank');" > Livecall from iPhone</button>  </p>
-    <p> <button type="button"  onclick="window.open('intent://urikiregomen-now.livecall.net/#Intent;scheme=https;package=com.android.chrome;end;');" > Livecall from Android</button>  </p>
+    <h1>Redirect to system browser v10</h1>
+    <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
 
   </body>
 </html>
