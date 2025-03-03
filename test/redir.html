@@ -6,31 +6,47 @@
 
     <script type="text/javascript">
     function detectOSType() {
-      var userAgent = navigator.userAgent || navigator.vendor || window.opera;
+      var userAgent =  "";
+
+      document.getElementById('xdbgstat').innerText += "a";
+
+      userAgent = navigator.userAgent || navigator.vendor || window.opera;
+
+      document.getElementById('xdbgstat').innerText += "b";
+      document.getElementById('xdbguser').innerText = userAgent;
   
       // Windows Phone must come first because its UA also contains "Android"
       if (/windows phone/i.test(userAgent)) {
+          document.getElementById('xdbgstat').innerText += "c";
           return "Windows Phone";
       }
   
       if (/android/i.test(userAgent)) {
+          document.getElementById('xdbgstat').innerText += "d";
           return "Android";
       }
   
       // iOS detection from: http://stackoverflow.com/a/9039885/177710
       if (/iPad|iPhone|iPod/.test(userAgent) && !window.MSStream) {
+          document.getElementById('xdbgstat').innerText += "e";
           return "iOS";
       }
   
+      document.getElementById('xdbgstat').innerText += "f";
       return "unknown";
     }
     function openNative(proto, url) {
       var osdef = detectOSType();
+      document.getElementById('xdbgdef').innerText = osdef;
+      
       if (osdef == "Android") {
+        document.getElementById('xdbgstat').innerText += "g";
         window.open('intent://' + url + '#Intent;scheme=' + proto + ';package=com.android.chrome;end;');
       } else if (osdef == "iOS") {
+        document.getElementById('xdbgstat').innerText += "h";
         window.open('x-safari-' + proto + '://' + url, '_blank');
       } else {
+        document.getElementById('xdbgstat').innerText += "i";
         location = proto + "://" + url;
       }
     }
@@ -41,6 +57,16 @@
     
     <h1>Redirect to system browser v11</h1>
     <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
+
+    <p>
+      user agent is <span id="xdbguser">unset</span>
+    </p>
+    <p>
+      debug status is <span id="xdbgstat">unset</span>
+    </p>
+    <p>
+      osdef is <span id="xdbgdef">unset</span>
+    </p>
 
   </body>
 </html>
