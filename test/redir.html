@@ -50,25 +50,35 @@
       document.getElementById('xdbgstat').innerText += "f";
       return "unknown";
     }
-    function openNative(proto, url) {
+   function getNativeLink(proto, url) {
       var osdef = detectOSType();
       document.getElementById('xdbgdef').innerText = osdef;
       
       if (osdef == "Android") {
         document.getElementById('xdbgstat').innerText += "g";
-        window.open('intent://' + url + '#Intent;scheme=' + proto + ';package=com.android.chrome;end;');
+        return 'intent://' + url + '#Intent;scheme=' + proto + ';package=com.android.chrome;end;';
       } else if (osdef == "iOS") {
         document.getElementById('xdbgstat').innerText += "h";
-        window.open('x-safari-' + proto + '://' + url, '_blank');
+         return 'x-safari-' + proto + '://' + url, '_blank';
       } else if (osdef == "PhoneOnly") {
         document.getElementById('xdbgstat').innerText += "i";
-        // add phone only
-        location = "https://phone.com";
+        // TODO: add phone only
+        return "https://phone.com";
       } else {
         document.getElementById('xdbgstat').innerText += "j";
-        location = proto + "://" + url;
+        return proto + "://" + url;
       }
+   }
+    
+    function openNative(proto, url) {
+       location = getNativeLink(proto, url);
     }
+    function atStartUp() {
+        document.getElementById('xdbgstat').innerText += "u";
+        document.getElementById('at_start_link').href = getNativeLink('https','urikiregomen-now.livecall.net/');
+        document.getElementById('at_start_link').innerText = "Click Post";
+    }
+    object.addEventListener("load",  atStartUp);
     </script>
    
   </head>
@@ -76,6 +86,8 @@
     
     <h1>Redirect to system browser v11</h1>
     <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
+
+    <p> <a href="https://amazon.co.jp" id="at_start_link">Click Pre</a></p>
 
     <p>
       user agent is <span id="xdbguser">unset</span>
