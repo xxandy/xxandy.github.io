@@ -32,18 +32,18 @@
   
       if (/android/i.test(userAgent)) {
           document.getElementById('xdbgstat').innerText += "d";
-          if ( inAppBrowser == "X" ) {
-            return "PhoneOnly";
-          }
+          //if ( inAppBrowser == "X" ) {
+          //  return "PhoneOnly";
+          //}
           return "Android";
       }
   
       // iOS detection from: http://stackoverflow.com/a/9039885/177710
       if (/iPad|iPhone|iPod/.test(userAgent) && !window.MSStream) {
           document.getElementById('xdbgstat').innerText += "e";
-          if ( inAppBrowser == "TikTok" ) {
-            return "PhoneOnly";
-          }
+          //if ( inAppBrowser == "TikTok" ) {
+          //  return "PhoneOnly";
+          //}
           return "iOS";
       }
   
@@ -85,7 +85,7 @@
   </head>
   <body>
     
-    <h1>Redirect to system browser v16</h1>
+    <h1>Redirect to system browser v17</h1>
     <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
 
     <p> <a href="https://amazon.co.jp" id="at_start_link">Click Pre</a></p>
