@@ -74,17 +74,18 @@
        location = getNativeLink(proto, url);
     }
     function atStartUp() {
-        document.getElementById('xdbgstat').innerText += "u";
+        document.getElementById('xdbgstat').innerText = "u";
         document.getElementById('at_start_link').href = getNativeLink('https','urikiregomen-now.livecall.net/');
+        document.getElementById('xdbgstat').innerText = "x";
         document.getElementById('at_start_link').innerText = "Click Post";
     }
-    object.addEventListener("load",  atStartUp);
+    document.addEventListener("load",  atStartUp);
     </script>
    
   </head>
   <body>
     
-    <h1>Redirect to system browser v11</h1>
+    <h1>Redirect to system browser v15</h1>
     <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
 
     <p> <a href="https://amazon.co.jp" id="at_start_link">Click Pre</a></p>
