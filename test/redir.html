@@ -59,7 +59,7 @@
         return 'intent://' + url + '#Intent;scheme=' + proto + ';package=com.android.chrome;end;';
       } else if (osdef == "iOS") {
         document.getElementById('xdbgstat').innerText += "h";
-         return 'x-safari-' + proto + '://' + url, '_blank';
+         return 'x-safari-' + proto + '://' + url;
       } else if (osdef == "PhoneOnly") {
         document.getElementById('xdbgstat').innerText += "i";
         // TODO: add phone only
@@ -85,7 +85,7 @@
   </head>
   <body>
     
-    <h1>Redirect to system browser v17</h1>
+    <h1>Redirect to system browser v18</h1>
     <p> <button type="button"  onclick="openNative('https','urikiregomen-now.livecall.net/');" >To Livecall</button>  </p>
 
     <p> <a href="https://amazon.co.jp" id="at_start_link">Click Pre</a></p>
