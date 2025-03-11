@@ -32,18 +32,18 @@
   
       if (/android/i.test(userAgent)) {
           document.getElementById('xdbgstat').innerText += "d";
-          //if ( inAppBrowser == "X" ) {
-          //  return "PhoneOnly";
-          //}
+          if ( inAppBrowser == "X" ) {
+            return "PhoneOnly";
+          }
           return "Android";
       }
   
       // iOS detection from: http://stackoverflow.com/a/9039885/177710
       if (/iPad|iPhone|iPod/.test(userAgent) && !window.MSStream) {
           document.getElementById('xdbgstat').innerText += "e";
-          //if ( inAppBrowser == "TikTok" ) {
-          //  return "PhoneOnly";
-          //}
+          if ( inAppBrowser == "TikTok" ) {
+            return "PhoneOnly";
+          }
           return "iOS";
       }
   
