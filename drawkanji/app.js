@@ -248,7 +248,7 @@ async function initApp() {
     // GUI state
     const controls = {
       glowIntensity: 1.5,
-      zoom: 1.0
+      zoom: 1.4
     };
 
     // Bind controls
@@ -679,9 +679,9 @@ async function initApp() {
       controls.glowIntensity = 1.5;
       valGlow.innerText = '1.5';
       
-      elZoom.value = 1.0;
-      controls.zoom = 1.0;
-      valZoom.innerText = '1.0';
+      elZoom.value = 1.4;
+      controls.zoom = 1.4;
+      valZoom.innerText = '1.4';
 
       elTipSize.value = 80;
       tipSizePercent = 80;

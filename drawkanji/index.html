@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
   
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=3">
 </head>
 <body>
   <div class="app-container">
@@ -59,7 +59,6 @@
       <!-- Sidebar Controls & Server Instructions -->
       <aside class="control-panel">
         <div class="control-card glass">
-          <h2>Stroke Controls</h2>
           <div class="playback-grid">
             <button id="btn-stop" class="btn-secondary" disabled>Stop</button>
             <button id="btn-one-stroke" class="btn-secondary"><span class="desktop-label">One Stroke</span><span class="mobile-label">1 Stroke</span></button>
@@ -119,9 +118,9 @@
           <div class="control-group">
             <div class="label-val-row">
               <label for="zoom">Scale / Zoom</label>
-              <span id="zoom-val" class="control-val">1.0</span>
+              <span id="zoom-val" class="control-val">1.4</span>
             </div>
-            <input type="range" id="zoom" min="0.5" max="2.0" step="0.1" value="1.0">
+            <input type="range" id="zoom" min="0.5" max="2.0" step="0.1" value="1.4">
           </div>
 
           <div class="control-actions">
