@@ -714,6 +714,36 @@ async function initApp() {
       updateControlsState();
     });
 
+    // Add no-op click handlers to container divs (just register presence for touch action)
+    const playbackGrid = document.querySelector('.playback-grid');
+    const headerInputRow = document.querySelector('.header-input-row');
+    const inputRows = document.querySelectorAll('.input-row');
+    const headerInputCard = document.querySelector('.header-input-card');
+
+    if (playbackGrid) {
+      playbackGrid.addEventListener('click', () => {
+        // No-op: just intercepts disabled button taps that bubble through
+      });
+    }
+
+    if (headerInputRow) {
+      headerInputRow.addEventListener('click', () => {
+        // No-op: just intercepts disabled button taps that bubble through
+      });
+    }
+
+    inputRows.forEach((row) => {
+      row.addEventListener('click', () => {
+        // No-op: just intercepts disabled element taps that bubble through
+      });
+    });
+
+    if (headerInputCard) {
+      headerInputCard.addEventListener('click', () => {
+        // No-op: just intercepts disabled element taps that bubble through
+      });
+    }
+
     // Load initial Kanji SVG ("愛") and auto-start animation
     await loadKanjiSVG('愛');
     startAnimation();
