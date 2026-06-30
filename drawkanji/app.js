@@ -277,15 +277,24 @@ async function initApp() {
     const btnBackStroke = document.getElementById('btn-back-stroke');
     const btnReset = document.getElementById('btn-reset');
 
+    const mobileMediaQuery = window.matchMedia('(max-width: 1024px)');
+    function isMobileDisplay() {
+      return mobileMediaQuery.matches;
+    }
+
     // UI State Display
     function updateStrokeDisplay() {
       if (currentStrokeCount === 0) {
         elStrokeDisplay.innerText = 'No strokes';
       } else {
         const displayIndex = Math.min(currentStrokeIndex + 1, currentStrokeCount);
-        elStrokeDisplay.innerText = `Stroke ${displayIndex} / ${currentStrokeCount}`;
+        elStrokeDisplay.innerText = isMobileDisplay()
+          ? `${displayIndex} / ${currentStrokeCount}`
+          : `Stroke ${displayIndex} / ${currentStrokeCount}`;
       }
     }
+
+    mobileMediaQuery.addEventListener?.('change', updateStrokeDisplay);
 
     // Canvas rendering (Strokes grown dynamically, and colored)
     function drawStrokesToCanvas() {

@@ -22,6 +22,18 @@
           <p>Real-time 3D Shader Rendering</p>
         </div>
       </div>
+
+      <div class="header-input-card glass">
+        <div class="header-input-row">
+          <label for="char-input">Kanji Input</label>
+          <button id="btn-animate" class="btn-primary header-animate-btn"><span class="desktop-label">&gt;</span><span class="mobile-label">&gt;</span></button>
+        </div>
+        <div class="input-row">
+          <input type="text" id="char-input" maxlength="1" value="愛" autocomplete="off" autofocus>
+          <div class="stroke-badge" id="stroke-display">Stroke 1 / 3</div>
+        </div>
+      </div>
+
       <div class="gpu-status-badge" id="gpu-status">
         <span class="status-dot"></span>
         <span class="status-text">Initializing WebGPU...</span>
@@ -47,16 +59,13 @@
       <!-- Sidebar Controls & Server Instructions -->
       <aside class="control-panel">
         <div class="control-card glass">
-          <h2>Kanji Input</h2>
-          <div class="control-group">
-            <label for="char-input">Japanese Character</label>
-            <div class="input-row">
-              <input type="text" id="char-input" maxlength="1" value="愛" autocomplete="off" autofocus>
-              <div class="stroke-badge" id="stroke-display">Stroke 1 / 3</div>
-            </div>
+          <h2>Stroke Controls</h2>
+          <div class="playback-grid">
+            <button id="btn-stop" class="btn-secondary" disabled>Stop</button>
+            <button id="btn-one-stroke" class="btn-secondary"><span class="desktop-label">One Stroke</span><span class="mobile-label">1 Stroke</span></button>
+            <button id="btn-back-stroke" class="btn-secondary"><span class="desktop-label">Back Stroke</span><span class="mobile-label">Back</span></button>
           </div>
 
-          <h2>Stroke Controls</h2>
           <div class="control-group">
             <div class="label-val-row">
               <label for="anim-speed">Drawing Speed</label>
@@ -71,13 +80,6 @@
               <span id="pause-dur-val" class="control-val">300ms</span>
             </div>
             <input type="range" id="pause-dur" min="50" max="500" step="50" value="300">
-          </div>
-
-          <div class="playback-grid">
-            <button id="btn-animate" class="btn-primary">Animate</button>
-            <button id="btn-stop" class="btn-secondary" disabled>Stop</button>
-            <button id="btn-one-stroke" class="btn-secondary">One Stroke</button>
-            <button id="btn-back-stroke" class="btn-secondary">Back Stroke</button>
           </div>
 
           <h2 style="margin-top: 1.5rem;">Visual Customization</h2>
