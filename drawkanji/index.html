@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Kanji Renderer - 愛</title>
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <div class="logo-area">
+        <span class="jp-logo">愛</span>
+        <div class="logo-text">
+          <h1>WebGPU Kanji</h1>
+          <p>Real-time 3D Shader Rendering</p>
+        </div>
+      </div>
+      <div class="gpu-status-badge" id="gpu-status">
+        <span class="status-dot"></span>
+        <span class="status-text">Initializing WebGPU...</span>
+      </div>
+    </header>
+
+    <main class="app-body">
+      <!-- WebGPU Canvas Viewport -->
+      <section class="viewport-section">
+        <div class="canvas-container">
+          <canvas id="gpu-canvas"></canvas>
+          <div id="webgpu-error" class="error-overlay hidden">
+            <div class="error-card">
+              <span class="error-icon">⚠️</span>
+              <h2 id="error-title">WebGPU Not Supported</h2>
+              <p id="error-details">Your browser or hardware does not seem to support WebGPU. Please ensure you are using a modern browser (Chrome 113+, Edge 113+, Safari 18+, or Firefox Nightly) with WebGPU enabled.</p>
+              <a href="https://caniuse.com/webgpu" target="_blank" rel="noopener noreferrer" class="btn-primary">Check Compatibility</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sidebar Controls & Server Instructions -->
+      <aside class="control-panel">
+        <div class="control-card glass">
+          <h2>Kanji Input</h2>
+          <div class="control-group">
+            <label for="char-input">Japanese Character</label>
+            <div class="input-row">
+              <input type="text" id="char-input" maxlength="1" value="愛" autocomplete="off" autofocus>
+              <div class="stroke-badge" id="stroke-display">Stroke 1 / 3</div>
+            </div>
+          </div>
+
+          <h2>Stroke Controls</h2>
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="anim-speed">Drawing Speed</label>
+              <span id="anim-speed-val" class="control-val">80/s</span>
+            </div>
+            <input type="range" id="anim-speed" min="30" max="300" step="10" value="80">
+          </div>
+
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="pause-dur">Pause Between Strokes</label>
+              <span id="pause-dur-val" class="control-val">300ms</span>
+            </div>
+            <input type="range" id="pause-dur" min="50" max="500" step="50" value="300">
+          </div>
+
+          <div class="playback-grid">
+            <button id="btn-animate" class="btn-primary">Animate</button>
+            <button id="btn-stop" class="btn-secondary" disabled>Stop</button>
+            <button id="btn-one-stroke" class="btn-secondary">One Stroke</button>
+            <button id="btn-back-stroke" class="btn-secondary">Back Stroke</button>
+          </div>
+
+          <h2 style="margin-top: 1.5rem;">Visual Customization</h2>
+
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="glow-intensity">Glow Intensity</label>
+              <span id="glow-intensity-val" class="control-val">1.5</span>
+            </div>
+            <input type="range" id="glow-intensity" min="0.5" max="3.0" step="0.1" value="1.5">
+          </div>
+
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="tip-size">Tip Size</label>
+              <span id="tip-size-val" class="control-val">80%</span>
+            </div>
+            <input type="range" id="tip-size" min="50" max="90" step="5" value="80">
+          </div>
+
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="line-weight">Line Weight</label>
+              <span id="line-weight-val" class="control-val">5.0</span>
+            </div>
+            <input type="range" id="line-weight" min="3.0" max="8.0" step="0.5" value="5.0">
+          </div>
+
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="trail-length">Trail Length</label>
+              <span id="trail-length-val" class="control-val">140</span>
+            </div>
+            <input type="range" id="trail-length" min="5" max="200" step="1" value="140">
+          </div>
+
+          <div class="control-group">
+            <div class="label-val-row">
+              <label for="zoom">Scale / Zoom</label>
+              <span id="zoom-val" class="control-val">1.0</span>
+            </div>
+            <input type="range" id="zoom" min="0.5" max="2.0" step="0.1" value="1.0">
+          </div>
+
+          <div class="control-actions">
+            <button id="btn-reset" class="btn-secondary">Reset View</button>
+          </div>
+        </div>
+
+
+      </aside>
+    </main>
+  </div>
+
+  <svg id="svg-helper" style="position: absolute; width: 0; height: 0; pointer-events: none; opacity: 0;"></svg>
+  <script src="app.js"></script>
+
+</body>
+</html>
