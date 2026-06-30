@@ -457,6 +457,8 @@ button, .btn-primary {
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
   transition: all 0.2s ease;
   border: 1px solid transparent;
   text-align: center;
@@ -618,6 +620,8 @@ code {
   text-align: center;
   outline: none;
   transition: all 0.2s ease;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 #char-input:focus {
@@ -638,6 +642,8 @@ code {
   flex: 0 0 auto;
   text-align: center;
   letter-spacing: -0.01em;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Playback Control Grid */
