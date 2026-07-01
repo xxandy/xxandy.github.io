@@ -19,6 +19,8 @@ let strokeCompletionTimes = []; // Completion animTime for completed strokes
 let trailLength = 140;
 let animTime = 0;
 
+const GLOW_RADIUS_MULTIPLIER = 4.5;
+
 // Rendering Pipeline State (WebGPU or 2D Fallback)
 let webgpuSupported = false;
 let webgpuEnabled = false;
@@ -117,8 +119,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   // Glow for the stroke lines (multiplying color by glow parameters)
   let finalGlyphColor = strokeColor * (1.2 + uniforms.glowIntensity * 1.0);
   
-  // Final compositing
-  let finalRGB = mix(glassBody, finalGlyphColor, strokeMask);
+  // Final compositing (using pre-multiplied alpha blending to prevent alpha squaring)
+  let finalRGB = glassBody * (1.0 - strokeMask) + finalGlyphColor;
   let finalAlpha = mix(0.72 + borderMask * 0.28, 0.96, strokeMask);
   
   return vec4<f32>(finalRGB, finalAlpha);
@@ -590,6 +592,51 @@ function appendCircleGeometry(cx, cy, r, color, vertexArray) {
   }
 }
 
+function appendGlowCircleGeometry(cx, cy, r, color, vertexArray) {
+  const segments = 16;
+  const rMid = r * 0.5;
+  const rOuter = r;
+
+  const aCenter = color.a;
+  const aMid = color.a * 0.25;
+  const aOuter = 0.0;
+
+  const midVertices = [];
+  const outerVertices = [];
+
+  for (let i = 0; i <= segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    const cosVal = Math.cos(angle);
+    const sinVal = Math.sin(angle);
+    midVertices.push({
+      x: cx + cosVal * rMid,
+      y: cy + sinVal * rMid
+    });
+    outerVertices.push({
+      x: cx + cosVal * rOuter,
+      y: cy + sinVal * rOuter
+    });
+  }
+
+  for (let i = 0; i < segments; i++) {
+    // 1. Inner Triangle: Center, Mid[i], Mid[i+1]
+    vertexArray.push(cx, cy, color.r, color.g, color.b, aCenter);
+    vertexArray.push(midVertices[i].x, midVertices[i].y, color.r, color.g, color.b, aMid);
+    vertexArray.push(midVertices[i+1].x, midVertices[i+1].y, color.r, color.g, color.b, aMid);
+
+    // 2. Outer Quad (split into two triangles):
+    // Triangle A: Mid[i], Outer[i], Outer[i+1]
+    vertexArray.push(midVertices[i].x, midVertices[i].y, color.r, color.g, color.b, aMid);
+    vertexArray.push(outerVertices[i].x, outerVertices[i].y, color.r, color.g, color.b, aOuter);
+    vertexArray.push(outerVertices[i+1].x, outerVertices[i+1].y, color.r, color.g, color.b, aOuter);
+
+    // Triangle B: Mid[i], Outer[i+1], Mid[i+1]
+    vertexArray.push(midVertices[i].x, midVertices[i].y, color.r, color.g, color.b, aMid);
+    vertexArray.push(outerVertices[i+1].x, outerVertices[i+1].y, color.r, color.g, color.b, aOuter);
+    vertexArray.push(midVertices[i+1].x, midVertices[i+1].y, color.r, color.g, color.b, aMid);
+  }
+}
+
 function parseRGBColor(colStr) {
   if (colStr.startsWith('rgba')) {
     const parts = colStr.substring(5, colStr.length - 1).split(',');
@@ -1040,11 +1087,13 @@ async function initApp() {
           });
         }
 
-        // Active stroke tip comet trail
+        // Active stroke tip glow & comet trail (Bottom-to-Top: Trail except tip -> Glow -> Tip)
         const L = strokeTipHistory.length;
-        if (L > 0) {
-          for (let j = 0; j < L; j++) {
-            let t = L > 1 ? j / (L - 1) : 1.0;
+
+        // 1. Comet trail *except* the very tip (index 0 to L-2)
+        if (L > 1) {
+          for (let j = 0; j < L - 1; j++) {
+            let t = j / (L - 1);
             t = t * (1.0 - pauseProgress);
             const r = radius * (0.35 + 0.65 * t);
             const pt = strokeTipHistory[j];
@@ -1061,6 +1110,39 @@ async function initApp() {
             };
             appendCircleGeometry(ptCanvas.x, ptCanvas.y, r, col, vertexArray);
           }
+        }
+
+        // 2. Glow circle (centered at the tip point)
+        const tipPt = L > 0 ? strokeTipHistory[L - 1] : pathEl.getPointAtLength(currentLength);
+        const tipRadius = L > 0 ? radius * (0.35 + 0.65 * (1.0 - pauseProgress)) : radius;
+        const glowRadius = tipRadius * GLOW_RADIUS_MULTIPLIER;
+        const glowAlpha = 1.0 - pauseProgress;
+
+        if (glowRadius > 0 && glowAlpha > 0) {
+          const ptCanvas = {
+            x: padding + tipPt.x * scale,
+            y: padding + tipPt.y * scale
+          };
+          const glowColor = { r: cYellow.r, g: cYellow.g, b: cYellow.b, a: glowAlpha };
+          appendGlowCircleGeometry(ptCanvas.x, ptCanvas.y, glowRadius, glowColor, vertexArray);
+        }
+
+        // 3. Very tip circle (index L-1 if L > 0, or fallback if L === 0)
+        if (L > 0) {
+          const pt = strokeTipHistory[L - 1];
+          const ptCanvas = {
+            x: padding + pt.x * scale,
+            y: padding + pt.y * scale
+          };
+          let t = 1.0 * (1.0 - pauseProgress);
+          const cRed = { r: 239/255, g: 68/255, b: 68/255, a: 1.0 };
+          const col = {
+            r: cYellow.r + (cRed.r - cYellow.r) * t,
+            g: cYellow.g + (cRed.g - cYellow.g) * t,
+            b: cYellow.b + (cRed.b - cYellow.b) * t,
+            a: 1.0
+          };
+          appendCircleGeometry(ptCanvas.x, ptCanvas.y, tipRadius, col, vertexArray);
         } else {
           // Fallback: single circle
           const point = pathEl.getPointAtLength(currentLength);
@@ -1214,10 +1296,12 @@ async function initApp() {
         const cRed = { r: 239, g: 68, b: 68 };     // #ef4444
 
         const L = strokeTipHistory.length;
-        if (L > 0) {
-          // Draw the history of tip positions as a fading comet trail
-          for (let i = 0; i < L; i++) {
-            let t = L > 1 ? i / (L - 1) : 1.0;
+
+        // Active stroke tip glow & comet trail (Bottom-to-Top: Trail except tip -> Glow -> Tip)
+        // 1. Comet trail *except* the very tip (index 0 to L-2)
+        if (L > 1) {
+          for (let i = 0; i < L - 1; i++) {
+            let t = i / (L - 1);
             t = t * (1.0 - pauseProgress); // Fade color to yellow over pause
 
             const r = radius * (0.35 + 0.65 * t);
@@ -1228,6 +1312,36 @@ async function initApp() {
             glyphCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
             glyphCtx.fill();
           }
+        }
+
+        // 2. Glow circle (centered at the tip point)
+        const tipPt = L > 0 ? strokeTipHistory[L - 1] : pathEl.getPointAtLength(currentLength);
+        const tipRadius = L > 0 ? radius * (0.35 + 0.65 * (1.0 - pauseProgress)) : radius;
+        const glowRadius = tipRadius * GLOW_RADIUS_MULTIPLIER;
+        const glowAlpha = 1.0 - pauseProgress;
+
+        if (glowRadius > 0 && glowAlpha > 0) {
+          const grad = glyphCtx.createRadialGradient(tipPt.x, tipPt.y, 0, tipPt.x, tipPt.y, glowRadius);
+          grad.addColorStop(0.0, `rgba(250, 204, 21, ${1.0 * glowAlpha})`);
+          grad.addColorStop(0.25, `rgba(250, 204, 21, ${0.5625 * glowAlpha})`);
+          grad.addColorStop(0.5, `rgba(250, 204, 21, ${0.25 * glowAlpha})`);
+          grad.addColorStop(0.75, `rgba(250, 204, 21, ${0.0625 * glowAlpha})`);
+          grad.addColorStop(1.0, `rgba(250, 204, 21, 0.0)`);
+
+          glyphCtx.fillStyle = grad;
+          glyphCtx.beginPath();
+          glyphCtx.arc(tipPt.x, tipPt.y, glowRadius, 0, Math.PI * 2);
+          glyphCtx.fill();
+        }
+
+        // 3. Very tip circle (index L-1 if L > 0, or fallback if L === 0)
+        if (L > 0) {
+          const pt = strokeTipHistory[L - 1];
+          let t = 1.0 * (1.0 - pauseProgress);
+          glyphCtx.fillStyle = lerpColor(cYellow, cRed, t);
+          glyphCtx.beginPath();
+          glyphCtx.arc(pt.x, pt.y, tipRadius, 0, Math.PI * 2);
+          glyphCtx.fill();
         } else {
           // Fallback: draw single red tip circle at current length
           const point = pathEl.getPointAtLength(currentLength);
