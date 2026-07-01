@@ -38,6 +38,7 @@ let glyphCanvas = null;
 let glyphCtx = null;
 let statusBadge = null;
 let resizeObserverInstance = null;
+let elGlowControl = null;
 
 // WGSL Shaders code (Static Card, Front-facing layout, RGB texture input)
 const wgslShaders = `
@@ -119,6 +120,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 async function initApp() {
   statusBadge = document.getElementById('gpu-status');
   canvas = document.getElementById('gpu-canvas');
+  elGlowControl = document.getElementById('glow-intensity-control');
 
   // 2D Offscreen Canvas for Stroke Vector Rendering (ALWAYS initialized)
   const glyphSize = 512;
@@ -291,7 +293,6 @@ async function initApp() {
 
     // Bind controls
     const elGlow = document.getElementById('glow-intensity');
-    const elGlowControl = document.getElementById('glow-intensity-control');
     const elTipSize = document.getElementById('tip-size');
     const elLineWeight = document.getElementById('line-weight');
     const elTrailLength = document.getElementById('trail-length');
