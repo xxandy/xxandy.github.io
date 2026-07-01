@@ -18,6 +18,27 @@ let strokeCompletionTimes = []; // Completion animTime for completed strokes
 let trailLength = 140;
 let animTime = 0;
 
+// Rendering Pipeline State (WebGPU or 2D Fallback)
+let webgpuSupported = false;
+let webgpuEnabled = false;
+let device = null;
+let context = null;
+let pipeline = null;
+let bindGroup = null;
+let vertexBuffer = null;
+let indexBuffer = null;
+let uniformBuffer = null;
+let uniformData = null;
+let uniformFloatView = null;
+let glyphTexture = null;
+let presentationFormat = null;
+let canvas = null;
+let visibleCtx = null;
+let glyphCanvas = null;
+let glyphCtx = null;
+let statusBadge = null;
+let resizeObserverInstance = null;
+
 // WGSL Shaders code (Static Card, Front-facing layout, RGB texture input)
 const wgslShaders = `
 struct Uniforms {
@@ -96,50 +117,49 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 // Application Setup
 async function initApp() {
-  const statusBadge = document.getElementById('gpu-status');
-  const errorOverlay = document.getElementById('webgpu-error');
-  const errorDetails = document.getElementById('error-details');
-  const canvas = document.getElementById('gpu-canvas');
+  statusBadge = document.getElementById('gpu-status');
+  canvas = document.getElementById('gpu-canvas');
+
+  // 2D Offscreen Canvas for Stroke Vector Rendering (ALWAYS initialized)
+  const glyphSize = 512;
+  glyphCanvas = document.createElement('canvas');
+  glyphCanvas.width = glyphSize;
+  glyphCanvas.height = glyphSize;
+  glyphCtx = glyphCanvas.getContext('2d');
 
   // WebGPU Support Verification
   if (!navigator.gpu) {
     statusBadge.classList.add('error');
     statusBadge.querySelector('.status-text').innerText = 'WebGPU Unsupported';
-    errorDetails.innerText = 'navigator.gpu is undefined. Your browser does not support WebGPU, or WebGPU is disabled. Secure context (localhost/127.0.0.1/https) is required.';
-    errorOverlay.classList.remove('hidden');
-    return;
-  }
+    initCanvasFallback();
+  } else {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        throw new Error('No appropriate GPU adapter found');
+      }
+      device = await adapter.requestDevice();
+      webgpuSupported = true;
+      webgpuEnabled = true;
 
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-      throw new Error('No appropriate GPU adapter found');
-    }
-    const device = await adapter.requestDevice();
-    
-    statusBadge.classList.add('connected');
-    statusBadge.querySelector('.status-text').innerText = 'WebGPU Connected';
+      statusBadge.classList.add('connected');
+      statusBadge.querySelector('.status-text').innerText = 'WebGPU Connected';
 
-    // Configure WebGPU Canvas Context
-    const context = canvas.getContext('webgpu');
-    const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-    
-    resizeCanvas(canvas);
+      // Configure WebGPU Canvas Context
+      context = canvas.getContext('webgpu');
+      presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
-    context.configure({
-      device: device,
-      format: presentationFormat,
-      alphaMode: 'premultiplied'
-    });
+      resizeCanvas(canvas);
 
-    // 2D Offscreen Canvas for Stroke Vector Rendering
-    const glyphSize = 512;
-    const glyphCanvas = document.createElement('canvas');
-    glyphCanvas.width = glyphSize;
-    glyphCanvas.height = glyphSize;
-    const glyphCtx = glyphCanvas.getContext('2d');
+      context.configure({
+        device: device,
+        format: presentationFormat,
+        alphaMode: 'premultiplied'
+      });
 
-    const glyphTexture = device.createTexture({
+
+
+    glyphTexture = device.createTexture({
       size: [glyphSize, glyphSize, 1],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
@@ -158,7 +178,7 @@ async function initApp() {
        0.85, -0.85, 0.0,  1.0, 1.0,
     ]);
 
-    const vertexBuffer = device.createBuffer({
+    vertexBuffer = device.createBuffer({
       size: vertexData.byteLength,
       usage: GPUBufferUsage.VERTEX,
       mappedAtCreation: true
@@ -171,7 +191,7 @@ async function initApp() {
       2, 1, 3
     ]);
 
-    const indexBuffer = device.createBuffer({
+    indexBuffer = device.createBuffer({
       size: indexData.byteLength,
       usage: GPUBufferUsage.INDEX,
       mappedAtCreation: true
@@ -181,20 +201,20 @@ async function initApp() {
 
     // Uniform Buffer Setup (16 bytes aligned)
     const uniformBufferSize = 16;
-    const uniformBuffer = device.createBuffer({
+    uniformBuffer = device.createBuffer({
       size: uniformBufferSize,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
-    const uniformData = new ArrayBuffer(uniformBufferSize);
-    const uniformFloatView = new Float32Array(uniformData);
+    uniformData = new ArrayBuffer(uniformBufferSize);
+    uniformFloatView = new Float32Array(uniformData);
 
     // Build Render Pipeline
     const shaderModule = device.createShaderModule({
       code: wgslShaders
     });
 
-    const pipeline = device.createRenderPipeline({
+    pipeline = device.createRenderPipeline({
       layout: 'auto',
       vertex: {
         module: shaderModule,
@@ -236,7 +256,7 @@ async function initApp() {
       }
     });
 
-    const bindGroup = device.createBindGroup({
+    bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
@@ -244,6 +264,24 @@ async function initApp() {
         { binding: 2, resource: sampler }
       ]
     });
+    } catch (err) {
+      console.error('WebGPU initialization error:', err);
+      webgpuSupported = false;
+      webgpuEnabled = false;
+      statusBadge.className = 'gpu-status-badge error';
+      statusBadge.querySelector('.status-text').innerText = 'Initialization Error';
+      initCanvasFallback();
+    }
+  }
+
+  // Handle toggle click
+  statusBadge.addEventListener('click', () => {
+    if (webgpuSupported) {
+      setRenderingMode(!webgpuEnabled);
+    } else {
+      showToast("Not available");
+    }
+  });
 
     // GUI state
     const controls = {
@@ -253,6 +291,7 @@ async function initApp() {
 
     // Bind controls
     const elGlow = document.getElementById('glow-intensity');
+    const elGlowControl = document.getElementById('glow-intensity-control');
     const elTipSize = document.getElementById('tip-size');
     const elLineWeight = document.getElementById('line-weight');
     const elTrailLength = document.getElementById('trail-length');
@@ -401,12 +440,14 @@ async function initApp() {
 
       glyphCtx.restore();
 
-      // Copy offscreen canvas to WebGPU texture
-      device.queue.copyExternalImageToTexture(
-        { source: glyphCanvas, flipY: false },
-        { texture: glyphTexture },
-        [glyphSize, glyphSize]
-      );
+      // Copy offscreen canvas to WebGPU texture if active
+      if (webgpuEnabled && webgpuSupported && device && glyphTexture) {
+        device.queue.copyExternalImageToTexture(
+          { source: glyphCanvas, flipY: false },
+          { texture: glyphTexture },
+          [glyphSize, glyphSize]
+        );
+      }
     }
 
     async function loadKanjiSVG(char) {
@@ -497,13 +538,11 @@ async function initApp() {
     }
 
     function showLocalError(title, msg) {
-      document.getElementById('error-title').innerText = title;
-      errorDetails.innerText = msg;
-      errorOverlay.classList.remove('hidden');
+      showToast(`${title}: ${msg}`);
     }
 
     function clearError() {
-      errorOverlay.classList.add('hidden');
+      // No-op: toast handles itself
     }
 
     // Playback state updates
@@ -749,10 +788,10 @@ async function initApp() {
     startAnimation();
 
     // Resize handling
-    const resizeObserver = new ResizeObserver(() => {
+    resizeObserverInstance = new ResizeObserver(() => {
       resizeCanvas(canvas);
     });
-    resizeObserver.observe(canvas.parentElement);
+    resizeObserverInstance.observe(canvas.parentElement);
 
     // Frame/Time Render Loop
     let lastTime = performance.now();
@@ -834,51 +873,125 @@ async function initApp() {
         drawStrokesToCanvas();
       }
 
-      // Pack uniform properties
-      uniformFloatView[0] = controls.glowIntensity;
-      uniformFloatView[1] = controls.zoom;
-      uniformFloatView[2] = animTime;
-      uniformFloatView[3] = canvas.width / canvas.height;
+      if (webgpuEnabled && webgpuSupported && device && context) {
+        // Pack uniform properties
+        uniformFloatView[0] = controls.glowIntensity;
+        uniformFloatView[1] = controls.zoom;
+        uniformFloatView[2] = animTime;
+        uniformFloatView[3] = canvas.width / canvas.height;
 
-      device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+        device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-      // Rendering pass
-      const commandEncoder = device.createCommandEncoder();
-      const textureView = context.getCurrentTexture().createView();
+        // Rendering pass
+        const commandEncoder = device.createCommandEncoder();
+        const textureView = context.getCurrentTexture().createView();
 
-      const renderPassDescriptor = {
-        colorAttachments: [
-          {
-            view: textureView,
-            clearValue: { r: 0.0392, g: 0.0549, b: 0.0902, a: 1.0 },
-            loadOp: 'clear',
-            storeOp: 'store'
-          }
-        ]
-      };
+        const renderPassDescriptor = {
+          colorAttachments: [
+            {
+              view: textureView,
+              clearValue: { r: 0.0392, g: 0.0549, b: 0.0902, a: 1.0 },
+              loadOp: 'clear',
+              storeOp: 'store'
+            }
+          ]
+        };
 
-      const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
-      passEncoder.setPipeline(pipeline);
-      passEncoder.setBindGroup(0, bindGroup);
-      passEncoder.setVertexBuffer(0, vertexBuffer);
-      passEncoder.setIndexBuffer(indexBuffer, 'uint16');
-      passEncoder.drawIndexed(6);
-      passEncoder.end();
+        const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+        passEncoder.setPipeline(pipeline);
+        passEncoder.setBindGroup(0, bindGroup);
+        passEncoder.setVertexBuffer(0, vertexBuffer);
+        passEncoder.setIndexBuffer(indexBuffer, 'uint16');
+        passEncoder.drawIndexed(6);
+        passEncoder.end();
 
-      device.queue.submit([commandEncoder.finish()]);
+        device.queue.submit([commandEncoder.finish()]);
+      } else {
+        if (visibleCtx) {
+          visibleCtx.clearRect(0, 0, canvas.width, canvas.height);
+          
+          // Apply matching center-anchored zoom scale factor (using baseline 0.85 scale to match WebGPU quad layout)
+          const scaleFactor = controls.zoom * 0.85;
+          visibleCtx.translate(canvas.width / 2, canvas.height / 2);
+          visibleCtx.scale(scaleFactor, scaleFactor);
+          visibleCtx.drawImage(glyphCanvas, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+          visibleCtx.setTransform(1, 0, 0, 1, 0, 0); // Restore default transform context
+        }
+      }
 
       requestAnimationFrame(frame);
     }
 
-    requestAnimationFrame(frame);
+    function initCanvasFallback() {
+      webgpuEnabled = false;
+      visibleCtx = canvas.getContext('2d');
+      canvas.classList.add('fallback-mode');
+      
+      statusBadge.className = 'gpu-status-badge disabled';
+      statusBadge.querySelector('.status-text').innerText = webgpuSupported ? 'WebGPU Disabled' : '2D Fallback';
 
-  } catch (err) {
-    console.error('WebGPU initialization error:', err);
-    statusBadge.classList.add('error');
-    statusBadge.querySelector('.status-text').innerText = 'Initialization Error';
-    showLocalError('WebGPU Initialization Error', `WebGPU initialization failed with error: ${err.message || err}`);
+      if (elGlowControl) {
+        elGlowControl.classList.add('hidden');
+      }
+    }
+
+    function setRenderingMode(useWebGPU) {
+      if (useWebGPU && webgpuSupported) {
+        webgpuEnabled = true;
+        resetCanvasContext('webgpu');
+        statusBadge.className = 'gpu-status-badge connected';
+        statusBadge.querySelector('.status-text').innerText = 'WebGPU Connected';
+        if (elGlowControl) {
+          elGlowControl.classList.remove('hidden');
+        }
+      } else {
+        webgpuEnabled = false;
+        resetCanvasContext('2d');
+        statusBadge.className = 'gpu-status-badge disabled';
+        statusBadge.querySelector('.status-text').innerText = webgpuSupported ? 'WebGPU Disabled' : '2D Fallback';
+        if (elGlowControl) {
+          elGlowControl.classList.add('hidden');
+        }
+      }
+      drawStrokesToCanvas();
+    }
+
+    function resetCanvasContext(type) {
+      const oldCanvas = document.getElementById('gpu-canvas');
+      const newCanvas = oldCanvas.cloneNode(true);
+      
+      if (type === 'webgpu') {
+        newCanvas.classList.remove('fallback-mode');
+      } else {
+        newCanvas.classList.add('fallback-mode');
+      }
+      
+      oldCanvas.parentNode.replaceChild(newCanvas, oldCanvas);
+      canvas = newCanvas;
+      
+      if (resizeObserverInstance) {
+        resizeObserverInstance.disconnect();
+        resizeObserverInstance.observe(canvas.parentElement);
+      }
+      
+      resizeCanvas(canvas);
+      
+      if (type === 'webgpu') {
+        context = canvas.getContext('webgpu');
+        context.configure({
+          device: device,
+          format: presentationFormat,
+          alphaMode: 'premultiplied'
+        });
+        visibleCtx = null;
+      } else {
+        visibleCtx = canvas.getContext('2d');
+        context = null;
+      }
+    }
+
+    requestAnimationFrame(frame);
   }
-}
 
 function resizeCanvas(canvas) {
   const devicePixelRatio = window.devicePixelRatio || 1;
@@ -889,6 +1002,25 @@ function resizeCanvas(canvas) {
     canvas.width = targetWidth;
     canvas.height = targetHeight;
   }
+}
+
+function showToast(message) {
+  let toast = document.querySelector('.toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  toast.innerText = message;
+  toast.classList.add('show');
+  
+  if (toast.timeoutId) {
+    clearTimeout(toast.timeoutId);
+  }
+  
+  toast.timeoutId = setTimeout(() => {
+    toast.classList.remove('show');
+  }, 2500);
 }
 
 window.addEventListener('DOMContentLoaded', initApp);

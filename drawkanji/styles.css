@@ -151,6 +151,18 @@ body {
   padding: 0.5rem 1rem;
   border-radius: 9999px;
   font-size: 0.875rem;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+
+.gpu-status-badge:hover {
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-1px);
+}
+
+.gpu-status-badge:active {
+  transform: translateY(0);
 }
 
 .status-dot {
@@ -167,9 +179,38 @@ body {
   box-shadow: 0 0 8px var(--success);
 }
 
+.gpu-status-badge.disabled .status-dot {
+  background-color: #64748b;
+  box-shadow: none;
+}
+
 .gpu-status-badge.error .status-dot {
   background-color: var(--danger);
   box-shadow: 0 0 8px var(--danger);
+}
+
+/* Toast Notification */
+.toast {
+  position: fixed;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid var(--card-border);
+  color: #fff;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-family: 'Outfit', sans-serif;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  opacity: 0;
+  transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.3s ease;
+  pointer-events: none;
+}
+.toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
 }
 
 /* Main Layout */
@@ -260,6 +301,7 @@ body {
   flex-direction: column;
   justify-content: flex-start;
   align-items: center;
+  background: #0a0e17;
 }
 
 #gpu-canvas {
@@ -271,6 +313,10 @@ body {
   display: block;
   border-radius: 16px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.hidden {
+  display: none !important;
 }
 
 /* Error Overlay */
