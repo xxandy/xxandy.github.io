@@ -1,5 +1,6 @@
 // Application State
 let strokePaths = [];
+let strokePolylines = [];
 let strokeElements = [];
 let currentStrokeIndex = 0; // Index of the active drawing stroke (starts at 0)
 let currentStrokeCount = 0;
@@ -31,7 +32,10 @@ let uniformBuffer = null;
 let uniformData = null;
 let uniformFloatView = null;
 let glyphTexture = null;
+let glyphTextureView = null;
 let presentationFormat = null;
+let sampler = null;
+let antiAliasingFactor = 4;
 let canvas = null;
 let visibleCtx = null;
 let glyphCanvas = null;
@@ -39,6 +43,11 @@ let glyphCtx = null;
 let statusBadge = null;
 let resizeObserverInstance = null;
 let elGlowControl = null;
+let elAAControl = null;
+let drawPipeline = null;
+let drawVertexBuffer = null;
+let drawUniformBuffer = null;
+let drawBindGroup = null;
 
 // WGSL Shaders code (Static Card, Front-facing layout, RGB texture input)
 const wgslShaders = `
@@ -116,11 +125,517 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 `;
 
+const drawShaderCode = `
+struct Uniforms {
+  aspectRatio: f32,
+  textureSize: f32,
+};
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+  @location(0) position: vec2<f32>,
+  @location(1) color: vec4<f32>,
+};
+
+struct VertexOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+  var out: VertexOutput;
+  
+  let halfSize = uniforms.textureSize / 2.0;
+  var pos = vec2<f32>(
+    (input.position.x / halfSize) - 1.0,
+    1.0 - (input.position.y / halfSize)
+  );
+
+  if (uniforms.aspectRatio > 0.0) {
+    pos.x = pos.x / uniforms.aspectRatio;
+  }
+  
+  out.position = vec4<f32>(pos, 0.0, 1.0);
+  out.color = input.color;
+  return out;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+  return input.color;
+}
+`;
+
+class SVGPathInterpreter {
+  static tokenize(d) {
+    const commands = new Set(['M', 'm', 'L', 'l', 'H', 'h', 'V', 'v', 'C', 'c', 'S', 's', 'Q', 'q', 'T', 't', 'Z', 'z']);
+    const tokens = [];
+    let i = 0;
+    while (i < d.length) {
+      const char = d[i];
+      if (commands.has(char)) {
+        tokens.push({ type: 'cmd', value: char });
+        i++;
+      } else if (char === ',' || char === ' ' || char === '\r' || char === '\n' || char === '\t') {
+        i++;
+      } else {
+        let start = i;
+        if (d[i] === '-') i++;
+        let hasDot = false;
+        while (i < d.length) {
+          const c = d[i];
+          if (c >= '0' && c <= '9') {
+            i++;
+          } else if (c === '.' && !hasDot) {
+            hasDot = true;
+            i++;
+          } else {
+            break;
+          }
+        }
+        const numStr = d.substring(start, i);
+        if (numStr.length > 0) {
+          tokens.push({ type: 'num', value: parseFloat(numStr) });
+        } else {
+          i++;
+        }
+      }
+    }
+    return tokens;
+  }
+
+  static getSteps(x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    return Math.max(3, Math.min(24, Math.round(dist / 1.5)));
+  }
+
+  static parseToPolylines(d) {
+    const tokens = this.tokenize(d);
+    const polylines = [];
+    let currentPolyline = [];
+    
+    let cx = 0, cy = 0;
+    let sx = 0, sy = 0;
+    let cpx = 0, cpy = 0;
+    let qpx = 0, qpy = 0;
+    
+    let tIdx = 0;
+    let lastCmd = '';
+    
+    function addPoint(x, y) {
+      currentPolyline.push({ x, y });
+      cx = x;
+      cy = y;
+    }
+
+    while (tIdx < tokens.length) {
+      let token = tokens[tIdx];
+      let cmd = '';
+      if (token.type === 'cmd') {
+        cmd = token.value;
+        tIdx++;
+      } else {
+        cmd = lastCmd;
+      }
+      
+      if (!cmd) break;
+      
+      switch (cmd) {
+        case 'M':
+        case 'm': {
+          const px = tokens[tIdx++].value;
+          const py = tokens[tIdx++].value;
+          const targetX = cmd === 'M' ? px : cx + px;
+          const targetY = cmd === 'M' ? py : cy + py;
+          
+          if (currentPolyline.length > 0) {
+            polylines.push(currentPolyline);
+          }
+          currentPolyline = [];
+          sx = targetX;
+          sy = targetY;
+          addPoint(targetX, targetY);
+          cpx = targetX; cpy = targetY;
+          qpx = targetX; qpy = targetY;
+          lastCmd = cmd === 'M' ? 'L' : 'l';
+          break;
+        }
+        case 'L':
+        case 'l': {
+          const px = tokens[tIdx++].value;
+          const py = tokens[tIdx++].value;
+          const targetX = cmd === 'L' ? px : cx + px;
+          const targetY = cmd === 'L' ? py : cy + py;
+          addPoint(targetX, targetY);
+          cpx = targetX; cpy = targetY;
+          qpx = targetX; qpy = targetY;
+          lastCmd = cmd;
+          break;
+        }
+        case 'H':
+        case 'h': {
+          const px = tokens[tIdx++].value;
+          const targetX = cmd === 'H' ? px : cx + px;
+          addPoint(targetX, cy);
+          cpx = targetX; cpy = cy;
+          qpx = targetX; qpy = cy;
+          lastCmd = cmd;
+          break;
+        }
+        case 'V':
+        case 'v': {
+          const py = tokens[tIdx++].value;
+          const targetY = cmd === 'V' ? py : cy + py;
+          addPoint(cx, targetY);
+          cpx = cx; cpy = targetY;
+          qpx = cx; qpy = targetY;
+          lastCmd = cmd;
+          break;
+        }
+        case 'C':
+        case 'c': {
+          const x1 = tokens[tIdx++].value;
+          const y1 = tokens[tIdx++].value;
+          const x2 = tokens[tIdx++].value;
+          const y2 = tokens[tIdx++].value;
+          const x = tokens[tIdx++].value;
+          const y = tokens[tIdx++].value;
+          
+          const ctrl1X = cmd === 'C' ? x1 : cx + x1;
+          const ctrl1Y = cmd === 'C' ? y1 : cy + y1;
+          const ctrl2X = cmd === 'C' ? x2 : cx + x2;
+          const ctrl2Y = cmd === 'C' ? y2 : cy + y2;
+          const targetX = cmd === 'C' ? x : cx + x;
+          const targetY = cmd === 'C' ? y : cy + y;
+          
+          const steps = SVGPathInterpreter.getSteps(cx, cy, targetX, targetY);
+          this.subdivideCubic(cx, cy, ctrl1X, ctrl1Y, ctrl2X, ctrl2Y, targetX, targetY, currentPolyline, steps);
+          cx = targetX;
+          cy = targetY;
+          cpx = ctrl2X;
+          cpy = ctrl2Y;
+          qpx = targetX;
+          qpy = targetY;
+          lastCmd = cmd;
+          break;
+        }
+        case 'S':
+        case 's': {
+          const x2 = tokens[tIdx++].value;
+          const y2 = tokens[tIdx++].value;
+          const x = tokens[tIdx++].value;
+          const y = tokens[tIdx++].value;
+          
+          let ctrl1X = cx;
+          let ctrl1Y = cy;
+          if (lastCmd === 'C' || lastCmd === 'c' || lastCmd === 'S' || lastCmd === 's') {
+            ctrl1X = 2 * cx - cpx;
+            ctrl1Y = 2 * cy - cpy;
+          }
+          
+          const ctrl2X = cmd === 'S' ? x2 : cx + x2;
+          const ctrl2Y = cmd === 'S' ? y2 : cy + y2;
+          const targetX = cmd === 'S' ? x : cx + x;
+          const targetY = cmd === 'S' ? y : cy + y;
+          
+          const steps = SVGPathInterpreter.getSteps(cx, cy, targetX, targetY);
+          this.subdivideCubic(cx, cy, ctrl1X, ctrl1Y, ctrl2X, ctrl2Y, targetX, targetY, currentPolyline, steps);
+          cx = targetX;
+          cy = targetY;
+          cpx = ctrl2X;
+          cpy = ctrl2Y;
+          qpx = targetX;
+          qpy = targetY;
+          lastCmd = cmd;
+          break;
+        }
+        case 'Q':
+        case 'q': {
+          const x1 = tokens[tIdx++].value;
+          const y1 = tokens[tIdx++].value;
+          const x = tokens[tIdx++].value;
+          const y = tokens[tIdx++].value;
+          
+          const ctrlX = cmd === 'Q' ? x1 : cx + x1;
+          const ctrlY = cmd === 'Q' ? y1 : cy + y1;
+          const targetX = cmd === 'Q' ? x : cx + x;
+          const targetY = cmd === 'Q' ? y : cy + y;
+          
+          const steps = SVGPathInterpreter.getSteps(cx, cy, targetX, targetY);
+          this.subdivideQuadratic(cx, cy, ctrlX, ctrlY, targetX, targetY, currentPolyline, steps);
+          cx = targetX;
+          cy = targetY;
+          qpx = ctrlX;
+          qpy = ctrlY;
+          cpx = targetX;
+          cpy = targetY;
+          lastCmd = cmd;
+          break;
+        }
+        case 'T':
+        case 't': {
+          const x = tokens[tIdx++].value;
+          const y = tokens[tIdx++].value;
+          
+          let ctrlX = cx;
+          let ctrlY = cy;
+          if (lastCmd === 'Q' || lastCmd === 'q' || lastCmd === 'T' || lastCmd === 't') {
+            ctrlX = 2 * cx - qpx;
+            ctrlY = 2 * cy - qpy;
+          }
+          
+          const targetX = cmd === 'T' ? x : cx + x;
+          const targetY = cmd === 'T' ? y : cy + y;
+          
+          const steps = SVGPathInterpreter.getSteps(cx, cy, targetX, targetY);
+          this.subdivideQuadratic(cx, cy, ctrlX, ctrlY, targetX, targetY, currentPolyline, steps);
+          cx = targetX;
+          cy = targetY;
+          qpx = ctrlX;
+          qpy = ctrlY;
+          cpx = targetX;
+          cpy = targetY;
+          lastCmd = cmd;
+          break;
+        }
+        case 'Z':
+        case 'z': {
+          if (cx !== sx || cy !== sy) {
+            addPoint(sx, sy);
+          }
+          cpx = sx; cpy = sy;
+          qpx = sx; qpy = sy;
+          lastCmd = cmd;
+          break;
+        }
+        default:
+          console.warn('Unknown SVG command:', cmd);
+          tIdx++;
+          break;
+      }
+    }
+    
+    if (currentPolyline.length > 0) {
+      polylines.push(currentPolyline);
+    }
+    return polylines;
+  }
+
+  static subdivideCubic(x0, y0, x1, y1, x2, y2, x3, y3, points, steps = 24) {
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      const mt = 1 - t;
+      const w0 = mt * mt * mt;
+      const w1 = 3 * mt * mt * t;
+      const w2 = 3 * mt * t * t;
+      const w3 = t * t * t;
+      points.push({
+        x: w0 * x0 + w1 * x1 + w2 * x2 + w3 * x3,
+        y: w0 * y0 + w1 * y1 + w2 * y2 + w3 * y3
+      });
+    }
+  }
+
+  static subdivideQuadratic(x0, y0, x1, y1, x2, y2, points, steps = 24) {
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      const mt = 1 - t;
+      const w0 = mt * mt;
+      const w1 = 2 * mt * t;
+      const w2 = t * t;
+      points.push({
+        x: w0 * x0 + w1 * x1 + w2 * x2,
+        y: w0 * y0 + w1 * y1 + w2 * y2
+      });
+    }
+  }
+}
+
+function computePolylineLengths(polyline) {
+  let len = 0;
+  polyline[0].len = 0;
+  for (let i = 1; i < polyline.length; i++) {
+    const dx = polyline[i].x - polyline[i-1].x;
+    const dy = polyline[i].y - polyline[i-1].y;
+    len += Math.sqrt(dx * dx + dy * dy);
+    polyline[i].len = len;
+  }
+  return len;
+}
+
+function cleanPolyline(polyline) {
+  if (polyline.length < 2) return polyline;
+  const result = [polyline[0]];
+  for (let i = 1; i < polyline.length; i++) {
+    const prev = result[result.length - 1];
+    const curr = polyline[i];
+    const dx = curr.x - prev.x;
+    const dy = curr.y - prev.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len >= 1e-4) { // Filter out sub-pixel noise points
+      result.push(curr);
+    }
+  }
+  // Ensure we preserve at least the end point if the path was collapsed
+  if (result.length < 2 && polyline.length >= 2) {
+    result.push(polyline[polyline.length - 1]);
+  }
+  return result;
+}
+
+function truncatePolyline(polyline, targetLen) {
+  if (targetLen <= 0) return [];
+  const total = polyline[polyline.length - 1].len;
+  if (targetLen >= total) return polyline;
+  
+  const result = [];
+  for (let i = 0; i < polyline.length; i++) {
+    if (polyline[i].len <= targetLen) {
+      result.push(polyline[i]);
+    } else {
+      const prev = polyline[i-1];
+      const next = polyline[i];
+      const ratio = (targetLen - prev.len) / (next.len - prev.len);
+      result.push({
+        x: prev.x + ratio * (next.x - prev.x),
+        y: prev.y + ratio * (next.y - prev.y),
+        len: targetLen
+      });
+      break;
+    }
+  }
+  return result;
+}
+
+function tessellateStroke(polyline, W, color, vertexArray) {
+  if (polyline.length < 2) return;
+  
+  const R = W / 2;
+  
+  function pushVertex(x, y) {
+    vertexArray.push(x, y, color.r, color.g, color.b, color.a);
+  }
+  
+  function pushTriangle(x1, y1, x2, y2, x3, y3) {
+    pushVertex(x1, y1);
+    pushVertex(x2, y2);
+    pushVertex(x3, y3);
+  }
+
+  // 1. Draw quads for each segment
+  const normals = [];
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const p1 = polyline[i];
+    const p2 = polyline[i+1];
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1e-6) {
+      normals.push({ nx: 0, ny: 0, ux: 0, uy: 0 });
+    } else {
+      const nx = dx / len;
+      const ny = dy / len;
+      normals.push({ nx, ny, ux: -ny, uy: nx });
+    }
+  }
+
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const p1 = polyline[i];
+    const p2 = polyline[i+1];
+    const norm = normals[i];
+    if (norm.nx === 0 && norm.ny === 0) continue;
+    
+    const ox = norm.ux * R;
+    const oy = norm.uy * R;
+    
+    const L1_x = p1.x + ox, L1_y = p1.y + oy;
+    const R1_x = p1.x - ox, R1_y = p1.y - oy;
+    const L2_x = p2.x + ox, L2_y = p2.y + oy;
+    const R2_x = p2.x - ox, R2_y = p2.y - oy;
+    
+    pushTriangle(L1_x, L1_y, R1_x, R1_y, L2_x, L2_y);
+    pushTriangle(R1_x, R1_y, R2_x, R2_y, L2_x, L2_y);
+  }
+
+  // 2. Draw solid disk joints at all intermediate vertices
+  for (let i = 1; i < polyline.length - 1; i++) {
+    const pt = polyline[i];
+    appendCircleGeometry(pt.x, pt.y, R, color, vertexArray);
+  }
+
+  // 3. Draw start and end caps
+  if (normals.length > 0) {
+    const firstNorm = normals[0];
+    if (firstNorm.nx !== 0 || firstNorm.ny !== 0) {
+      appendCircleGeometry(polyline[0].x, polyline[0].y, R, color, vertexArray);
+    }
+    const lastNorm = normals[normals.length - 1];
+    if (lastNorm.nx !== 0 || lastNorm.ny !== 0) {
+      appendCircleGeometry(polyline[polyline.length - 1].x, polyline[polyline.length - 1].y, R, color, vertexArray);
+    }
+  }
+}
+
+function appendCircleGeometry(cx, cy, r, color, vertexArray) {
+  const segments = 16;
+  for (let i = 0; i < segments; i++) {
+    const a1 = (i / segments) * Math.PI * 2;
+    const a2 = ((i + 1) / segments) * Math.PI * 2;
+    vertexArray.push(cx, cy, color.r, color.g, color.b, color.a);
+    vertexArray.push(cx + Math.cos(a1) * r, cy + Math.sin(a1) * r, color.r, color.g, color.b, color.a);
+    vertexArray.push(cx + Math.cos(a2) * r, cy + Math.sin(a2) * r, color.r, color.g, color.b, color.a);
+  }
+}
+
+function parseRGBColor(colStr) {
+  if (colStr.startsWith('rgba')) {
+    const parts = colStr.substring(5, colStr.length - 1).split(',');
+    return {
+      r: parseInt(parts[0]) / 255,
+      g: parseInt(parts[1]) / 255,
+      b: parseInt(parts[2]) / 255,
+      a: parseFloat(parts[3])
+    };
+  } else if (colStr.startsWith('rgb')) {
+    const parts = colStr.substring(4, colStr.length - 1).split(',');
+    return {
+      r: parseInt(parts[0]) / 255,
+      g: parseInt(parts[1]) / 255,
+      b: parseInt(parts[2]) / 255,
+      a: 1.0
+    };
+  } else if (colStr.startsWith('#')) {
+    const hex = colStr.substring(1);
+    if (hex.length === 6) {
+      return {
+        r: parseInt(hex.substring(0, 2), 16) / 255,
+        g: parseInt(hex.substring(2, 4), 16) / 255,
+        b: parseInt(hex.substring(4, 6), 16) / 255,
+        a: 1.0
+      };
+    }
+  }
+  return { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+}
+
+function lerpColorRGB(c1, c2, t) {
+  return {
+    r: c1.r + (c2.r - c1.r) * t,
+    g: c1.g + (c2.g - c1.g) * t,
+    b: c1.b + (c2.b - c1.b) * t,
+    a: c1.a + (c2.a - c1.a) * t
+  };
+}
+
 // Application Setup
 async function initApp() {
   statusBadge = document.getElementById('gpu-status');
   canvas = document.getElementById('gpu-canvas');
   elGlowControl = document.getElementById('glow-intensity-control');
+  elAAControl = document.getElementById('anti-aliasing-control');
 
   // 2D Offscreen Canvas for Stroke Vector Rendering (ALWAYS initialized)
   const glyphSize = 512;
@@ -141,6 +656,12 @@ async function initApp() {
         throw new Error('No appropriate GPU adapter found');
       }
       device = await adapter.requestDevice();
+      device.lost.then((info) => {
+        console.error(`WebGPU device was lost: ${info.message}`);
+      });
+      device.addEventListener('uncaughterror', (event) => {
+        console.error('WebGPU uncaught error:', event.error.message);
+      });
       webgpuSupported = true;
       webgpuEnabled = true;
 
@@ -162,12 +683,13 @@ async function initApp() {
 
 
     glyphTexture = device.createTexture({
-      size: [glyphSize, glyphSize, 1],
+      size: [glyphSize * antiAliasingFactor, glyphSize * antiAliasingFactor, 1],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
     });
+    glyphTextureView = glyphTexture.createView();
 
-    const sampler = device.createSampler({
+    sampler = device.createSampler({
       magFilter: 'linear',
       minFilter: 'linear'
     });
@@ -215,6 +737,12 @@ async function initApp() {
     const shaderModule = device.createShaderModule({
       code: wgslShaders
     });
+    const presentationCompilation = await shaderModule.getCompilationInfo();
+    for (const message of presentationCompilation.messages) {
+      if (message.type === 'error') {
+        console.error('WGSL presentation compilation error:', message.message, 'at line', message.lineNum);
+      }
+    }
 
     pipeline = device.createRenderPipeline({
       layout: 'auto',
@@ -262,8 +790,82 @@ async function initApp() {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: glyphTexture.createView() },
+        { binding: 1, resource: glyphTextureView },
         { binding: 2, resource: sampler }
+      ]
+    });
+
+    // 1. Create a Large Vertex Buffer for Tessellated Geometry (Dynamic Uploads)
+    drawVertexBuffer = device.createBuffer({
+      size: 50000 * 24,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+    });
+
+    // 2. Create Pass 1 Uniform Buffer
+    drawUniformBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    // 3. Compile Pass 1 Shader Module
+    const drawShaderModule = device.createShaderModule({
+      code: drawShaderCode
+    });
+    const drawCompilation = await drawShaderModule.getCompilationInfo();
+    for (const message of drawCompilation.messages) {
+      if (message.type === 'error') {
+        console.error('WGSL drawing compilation error:', message.message, 'at line', message.lineNum);
+      }
+    }
+
+    // 4. Create Pass 1 Render Pipeline
+    drawPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: {
+        module: drawShaderModule,
+        entryPoint: 'vs_main',
+        buffers: [
+          {
+            arrayStride: 24,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: 'float32x2' },
+              { shaderLocation: 1, offset: 8, format: 'float32x4' }
+            ]
+          }
+        ]
+      },
+      fragment: {
+        module: drawShaderModule,
+        entryPoint: 'fs_main',
+        targets: [
+          {
+            format: 'rgba8unorm',
+            blend: {
+              color: {
+                srcFactor: 'src-alpha',
+                dstFactor: 'one-minus-src-alpha',
+                operation: 'add'
+              },
+              alpha: {
+                srcFactor: 'one',
+                dstFactor: 'one-minus-src-alpha',
+                operation: 'add'
+              }
+            }
+          }
+        ]
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'none'
+      }
+    });
+
+    // 5. Create Pass 1 Bind Group
+    drawBindGroup = device.createBindGroup({
+      layout: drawPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: drawUniformBuffer } }
       ]
     });
     } catch (err) {
@@ -287,8 +889,9 @@ async function initApp() {
 
     // GUI state
     const controls = {
-      glowIntensity: 1.5,
-      zoom: 1.4
+      glowIntensity: 0.0,
+      zoom: 1.4,
+      antiAliasing: 4
     };
 
     // Bind controls
@@ -297,12 +900,14 @@ async function initApp() {
     const elLineWeight = document.getElementById('line-weight');
     const elTrailLength = document.getElementById('trail-length');
     const elZoom = document.getElementById('zoom');
+    const elAntiAliasing = document.getElementById('anti-aliasing');
     
     const valGlow = document.getElementById('glow-intensity-val');
     const valTipSize = document.getElementById('tip-size-val');
     const valLineWeight = document.getElementById('line-weight-val');
     const valTrailLength = document.getElementById('trail-length-val');
     const valZoom = document.getElementById('zoom-val');
+    const valAntiAliasing = document.getElementById('anti-aliasing-val');
     
     const elCharInput = document.getElementById('char-input');
     const elStrokeDisplay = document.getElementById('stroke-display');
@@ -336,8 +941,202 @@ async function initApp() {
 
     mobileMediaQuery.addEventListener?.('change', updateStrokeDisplay);
 
+    function drawStrokesToWebGPU(commandEncoder) {
+      let localEncoder = commandEncoder;
+      let shouldSubmit = false;
+      if (!localEncoder) {
+        localEncoder = device.createCommandEncoder();
+        shouldSubmit = true;
+      }
+
+      if (strokePaths.length === 0) return;
+
+      const vertexArray = [];
+
+      const factor = antiAliasingFactor;
+      const padding = 45 * factor;
+      const drawSize = (512 * factor) - padding * 2;
+      const scale = drawSize / 109;
+
+      function mapCoords(poly) {
+        return poly.map(pt => ({
+          x: padding + pt.x * scale,
+          y: padding + pt.y * scale,
+          len: pt.len * scale
+        }));
+      }
+
+      const activeStrokeWidth = dryLineWidth * (8.0 / 6.5) * scale;
+      const guideStrokeWidth = 4 * scale;
+      const dryStrokeWidth = dryLineWidth * scale;
+
+      // 1. Draw future/guide strokes
+      const cGuide = { r: 1.0, g: 1.0, b: 1.0, a: 0.08 };
+      for (let i = currentStrokeIndex; i < strokePaths.length; i++) {
+        const polys = strokePolylines[i];
+        if (!polys) continue;
+        polys.forEach(poly => {
+          if (poly.length < 2) return;
+          const mapped = mapCoords(poly);
+          tessellateStroke(mapped, guideStrokeWidth, cGuide, vertexArray);
+        });
+      }
+
+      // 2. Draw completed strokes (drying effect)
+      const cYellow = { r: 250/255, g: 204/255, b: 21/255, a: 1.0 };
+      const cBlue = { r: 56/255, g: 189/255, b: 248/255, a: 1.0 };
+
+      for (let i = 0; i < currentStrokeIndex; i++) {
+        const polys = strokePolylines[i];
+        if (!polys) continue;
+        
+        let dryProgress = 1.0;
+        if (strokeCompletionTimes[i] !== undefined) {
+          const elapsedMs = (animTime - strokeCompletionTimes[i]) * 1000;
+          dryProgress = Math.min(1.0, elapsedMs / pauseBetweenStrokes);
+        }
+
+        const col = {
+          r: cYellow.r + (cBlue.r - cYellow.r) * dryProgress,
+          g: cYellow.g + (cBlue.g - cYellow.g) * dryProgress,
+          b: cYellow.b + (cBlue.b - cYellow.b) * dryProgress,
+          a: 1.0
+        };
+
+        const w = (activeStrokeWidth - (activeStrokeWidth - dryStrokeWidth) * dryProgress);
+
+        polys.forEach(poly => {
+          if (poly.length < 2) return;
+          const mapped = mapCoords(poly);
+          tessellateStroke(mapped, w, col, vertexArray);
+        });
+      }
+
+      // 3. Draw active stroke & particles
+      if (currentStrokeIndex < strokePaths.length && strokeProgress > 0) {
+        const pathEl = strokeElements[currentStrokeIndex];
+        const totalLength = pathEl.getTotalLength();
+        const currentLength = totalLength * strokeProgress;
+        const diameter = activeStrokeWidth * (tipSizePercent / 100);
+        const radius = diameter / 2;
+
+        const strokeDuration = totalLength > 0 ? (totalLength / drawingSpeed) * 1000 : 100;
+        let pauseProgress = 0.0;
+        if (!isSingleStrokeAnimating && strokeTimeElapsed > strokeDuration) {
+          pauseProgress = Math.min(1.0, (strokeTimeElapsed - strokeDuration) / pauseBetweenStrokes);
+        }
+
+        // Draw animated active stroke segment
+        let remLen = currentLength;
+        const polys = strokePolylines[currentStrokeIndex];
+        if (polys) {
+          polys.forEach(poly => {
+            if (poly.length < 2) return;
+            const mapped = mapCoords(poly);
+            const totalPolyLen = poly[poly.length - 1].len;
+            const truncated = truncatePolyline(mapped, remLen * scale);
+            tessellateStroke(truncated, activeStrokeWidth, cYellow, vertexArray);
+            remLen -= totalPolyLen;
+          });
+        }
+
+        // Active stroke tip comet trail
+        const L = strokeTipHistory.length;
+        if (L > 0) {
+          for (let j = 0; j < L; j++) {
+            let t = L > 1 ? j / (L - 1) : 1.0;
+            t = t * (1.0 - pauseProgress);
+            const r = radius * (0.35 + 0.65 * t);
+            const pt = strokeTipHistory[j];
+            const ptCanvas = {
+              x: padding + pt.x * scale,
+              y: padding + pt.y * scale
+            };
+            const cRed = { r: 239/255, g: 68/255, b: 68/255, a: 1.0 };
+            const col = {
+              r: cYellow.r + (cRed.r - cYellow.r) * t,
+              g: cYellow.g + (cRed.g - cYellow.g) * t,
+              b: cYellow.b + (cRed.b - cYellow.b) * t,
+              a: 1.0
+            };
+            appendCircleGeometry(ptCanvas.x, ptCanvas.y, r, col, vertexArray);
+          }
+        } else {
+          // Fallback: single circle
+          const point = pathEl.getPointAtLength(currentLength);
+          const ptCanvas = {
+            x: padding + point.x * scale,
+            y: padding + point.y * scale
+          };
+          const cRed = { r: 239/255, g: 68/255, b: 68/255, a: 1.0 };
+          appendCircleGeometry(ptCanvas.x, ptCanvas.y, radius, cRed, vertexArray);
+        }
+      }
+
+      if (vertexArray.length === 0) return;
+
+      const floatArray = new Float32Array(vertexArray);
+      device.queue.writeBuffer(drawVertexBuffer, 0, floatArray);
+
+      // Set aspect ratio to 1.0 for the square texture, and pass scaled texture size
+      const aspectArray = new Float32Array([1.0, 512.0 * antiAliasingFactor, 0, 0]);
+      device.queue.writeBuffer(drawUniformBuffer, 0, aspectArray);
+
+      const passEncoder = localEncoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: glyphTextureView,
+            clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }, // Clear to transparent black
+            loadOp: 'clear',
+            storeOp: 'store'
+          }
+        ]
+      });
+
+      passEncoder.setPipeline(drawPipeline);
+      passEncoder.setBindGroup(0, drawBindGroup);
+      passEncoder.setVertexBuffer(0, drawVertexBuffer);
+      passEncoder.draw(vertexArray.length / 6);
+      passEncoder.end();
+
+      if (shouldSubmit) {
+        device.queue.submit([localEncoder.finish()]);
+      }
+    }
+
+    function recreateGlyphTexture(factor) {
+      if (!device) return;
+      antiAliasingFactor = factor;
+      if (glyphTexture) {
+        try {
+          glyphTexture.destroy();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      glyphTexture = device.createTexture({
+        size: [glyphSize * antiAliasingFactor, glyphSize * antiAliasingFactor, 1],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      glyphTextureView = glyphTexture.createView();
+      bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: glyphTextureView },
+          { binding: 2, resource: sampler }
+        ]
+      });
+      drawStrokesToCanvas();
+    }
+
     // Canvas rendering (Strokes grown dynamically, and colored)
-    function drawStrokesToCanvas() {
+    function drawStrokesToCanvas(commandEncoder) {
+      if (webgpuEnabled && webgpuSupported && device) {
+        drawStrokesToWebGPU(commandEncoder);
+        return;
+      }
       const activeStrokeWidth = dryLineWidth * (8.0 / 6.5);
 
       function lerpColor(c1, c2, t) {
@@ -458,8 +1257,25 @@ async function initApp() {
       loadedCharacter = char;
       strokeCompletionTimes = [];
 
+      if (char) {
+        document.title = `WebGPU Kanji Renderer - ${char}`;
+        const logoSpan = document.querySelector('.logo-area .jp-logo');
+        if (logoSpan) {
+          logoSpan.textContent = char;
+          logoSpan.href = `?char=${encodeURIComponent(char)}`;
+        }
+      } else {
+        document.title = 'WebGPU Kanji Renderer';
+        const logoSpan = document.querySelector('.logo-area .jp-logo');
+        if (logoSpan) {
+          logoSpan.textContent = '';
+          logoSpan.href = '#';
+        }
+      }
+
       if (!char) {
         strokePaths = [];
+        strokePolylines = [];
         strokeElements = [];
         currentStrokeCount = 0;
         currentStrokeIndex = 0;
@@ -503,12 +1319,23 @@ async function initApp() {
         svgHelper.innerHTML = ''; // clear
 
         strokePaths = [];
+        strokePolylines = [];
         strokeElements = [];
 
         const svgNS = "http://www.w3.org/2000/svg";
         for (let i = 0; i < paths.length; i++) {
           const d = paths[i].getAttribute('d');
           strokePaths.push(d);
+          
+          const polys = SVGPathInterpreter.parseToPolylines(d);
+          const cleanedPolys = polys.map(poly => cleanPolyline(poly));
+          console.log(`Parsed path ${i} sample points:`, cleanedPolys[0] ? cleanedPolys[0].slice(0, 3).map(pt => `${pt.x.toFixed(2)},${pt.y.toFixed(2)}`).join(" | ") : "empty");
+          cleanedPolys.forEach(poly => {
+            if (poly.length > 0) {
+              computePolylineLengths(poly);
+            }
+          });
+          strokePolylines.push(cleanedPolys);
 
           const pathEl = document.createElementNS(svgNS, 'path');
           pathEl.setAttribute('d', d);
@@ -527,6 +1354,7 @@ async function initApp() {
       } catch (err) {
         showLocalError('Kanji Database Error', err.message);
         strokePaths = [];
+        strokePolylines = [];
         strokeElements = [];
         currentStrokeCount = 0;
         currentStrokeIndex = 0;
@@ -650,6 +1478,16 @@ async function initApp() {
       valZoom.innerText = controls.zoom.toFixed(1);
     });
 
+    const aaFactors = [1, 4, 8, 16];
+    const aaLabels = ["None", "4x", "8x", "16x"];
+    elAntiAliasing.addEventListener('input', (e) => {
+      const idx = parseInt(e.target.value);
+      const factor = aaFactors[idx];
+      controls.antiAliasing = factor;
+      valAntiAliasing.innerText = aaLabels[idx];
+      recreateGlyphTexture(factor);
+    });
+
     elTipSize.addEventListener('input', (e) => {
       tipSizePercent = parseInt(e.target.value);
       valTipSize.innerText = tipSizePercent + '%';
@@ -715,13 +1553,18 @@ async function initApp() {
     btnReset.addEventListener('click', () => {
       stopAnimation();
       
-      elGlow.value = 1.5;
-      controls.glowIntensity = 1.5;
-      valGlow.innerText = '1.5';
+      elGlow.value = 0.0;
+      controls.glowIntensity = 0.0;
+      valGlow.innerText = '0.0';
       
       elZoom.value = 1.4;
       controls.zoom = 1.4;
       valZoom.innerText = '1.4';
+
+      elAntiAliasing.value = 1;
+      controls.antiAliasing = 4;
+      valAntiAliasing.innerText = '4x';
+      recreateGlyphTexture(4);
 
       elTipSize.value = 80;
       tipSizePercent = 80;
@@ -784,8 +1627,19 @@ async function initApp() {
       });
     }
 
-    // Load initial Kanji SVG ("愛") and auto-start animation
-    await loadKanjiSVG('愛');
+    // Parse URL parameter 'char'
+    const urlParams = new URLSearchParams(window.location.search);
+    let initialChar = urlParams.get('char');
+    if (initialChar) {
+      initialChar = initialChar.trim().substring(0, 1);
+    }
+    if (!initialChar) {
+      initialChar = '愛';
+    }
+    elCharInput.value = initialChar;
+
+    // Load initial Kanji SVG and auto-start animation
+    await loadKanjiSVG(initialChar);
     startAnimation();
 
     // Resize handling
@@ -871,7 +1725,12 @@ async function initApp() {
       }
 
       if (needsRedraw) {
-        drawStrokesToCanvas();
+        drawStrokesToCanvas(undefined);
+      }
+
+      let commandEncoder = null;
+      if (webgpuEnabled && webgpuSupported && device && context) {
+        commandEncoder = device.createCommandEncoder();
       }
 
       if (webgpuEnabled && webgpuSupported && device && context) {
@@ -884,7 +1743,6 @@ async function initApp() {
         device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
         // Rendering pass
-        const commandEncoder = device.createCommandEncoder();
         const textureView = context.getCurrentTexture().createView();
 
         const renderPassDescriptor = {
@@ -934,6 +1792,9 @@ async function initApp() {
       if (elGlowControl) {
         elGlowControl.classList.add('hidden');
       }
+      if (elAAControl) {
+        elAAControl.classList.add('hidden');
+      }
     }
 
     function setRenderingMode(useWebGPU) {
@@ -945,6 +1806,9 @@ async function initApp() {
         if (elGlowControl) {
           elGlowControl.classList.remove('hidden');
         }
+        if (elAAControl) {
+          elAAControl.classList.remove('hidden');
+        }
       } else {
         webgpuEnabled = false;
         resetCanvasContext('2d');
@@ -952,6 +1816,9 @@ async function initApp() {
         statusBadge.querySelector('.status-text').innerText = webgpuSupported ? 'WebGPU Disabled' : '2D Fallback';
         if (elGlowControl) {
           elGlowControl.classList.add('hidden');
+        }
+        if (elAAControl) {
+          elAAControl.classList.add('hidden');
         }
       }
       drawStrokesToCanvas();

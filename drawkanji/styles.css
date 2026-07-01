@@ -84,6 +84,16 @@ body {
   border-radius: 12px;
   border: 1px solid rgba(99, 102, 241, 0.2);
   box-shadow: 0 4px 20px rgba(99, 102, 241, 0.15);
+  text-decoration: none !important;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+}
+
+.jp-logo:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(99, 102, 241, 0.35);
+  border-color: rgba(99, 102, 241, 0.45);
+  text-decoration: none !important;
 }
 
 .logo-text h1 {

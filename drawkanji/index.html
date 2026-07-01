@@ -10,13 +10,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
   
-  <link rel="stylesheet" href="styles.css?v=15">
+  <link rel="stylesheet" href="styles.css?v=45">
 </head>
 <body>
   <div class="app-container">
     <header class="app-header">
       <div class="logo-area">
-        <span class="jp-logo">愛</span>
+        <a href="?char=愛" class="jp-logo">愛</a>
         <div class="logo-text">
           <h1>WebGPU Kanji</h1>
           <p>Real-time 3D Shader Rendering</p>
@@ -79,9 +79,9 @@
           <div class="control-group" id="glow-intensity-control">
             <div class="label-val-row">
               <label for="glow-intensity">Glow Intensity</label>
-              <span id="glow-intensity-val" class="control-val">1.5</span>
+              <span id="glow-intensity-val" class="control-val">0.0</span>
             </div>
-            <input type="range" id="glow-intensity" min="0.5" max="3.0" step="0.1" value="1.5">
+            <input type="range" id="glow-intensity" min="0.0" max="3.0" step="0.1" value="0.0">
           </div>
 
           <div class="control-group">
@@ -116,6 +116,14 @@
             <input type="range" id="zoom" min="0.5" max="2.0" step="0.1" value="1.4">
           </div>
 
+          <div class="control-group" id="anti-aliasing-control">
+            <div class="label-val-row">
+              <label for="anti-aliasing">Anti-Aliasing</label>
+              <span id="anti-aliasing-val" class="control-val">4x</span>
+            </div>
+            <input type="range" id="anti-aliasing" min="0" max="3" step="1" value="1">
+          </div>
+
           <div class="control-actions">
             <button id="btn-reset" class="btn-secondary">Reset View</button>
           </div>
@@ -127,7 +135,7 @@
   </div>
 
   <svg id="svg-helper" style="position: absolute; width: 0; height: 0; pointer-events: none; opacity: 0;"></svg>
-  <script src="app.js?v=15"></script>
+  <script src="app.js?v=44"></script>
 
 </body>
 </html>
