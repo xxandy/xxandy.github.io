@@ -1069,7 +1069,7 @@ async function initApp() {
 
         const strokeDuration = totalLength > 0 ? (totalLength / drawingSpeed) * 1000 : 100;
         let pauseProgress = 0.0;
-        if (!isSingleStrokeAnimating && strokeTimeElapsed > strokeDuration) {
+        if (strokeTimeElapsed > strokeDuration) {
           pauseProgress = Math.min(1.0, (strokeTimeElapsed - strokeDuration) / pauseBetweenStrokes);
         }
 
@@ -1077,12 +1077,20 @@ async function initApp() {
         let remLen = currentLength;
         const polys = strokePolylines[currentStrokeIndex];
         if (polys) {
+          const dryProg = isSingleStrokeAnimating ? pauseProgress : 0.0;
+          const w = activeStrokeWidth - (activeStrokeWidth - dryStrokeWidth) * dryProg;
+          const col = {
+            r: cYellow.r + (cBlue.r - cYellow.r) * dryProg,
+            g: cYellow.g + (cBlue.g - cYellow.g) * dryProg,
+            b: cYellow.b + (cBlue.b - cYellow.b) * dryProg,
+            a: 1.0
+          };
           polys.forEach(poly => {
             if (poly.length < 2) return;
             const mapped = mapCoords(poly);
             const totalPolyLen = poly[poly.length - 1].len;
             const truncated = truncatePolyline(mapped, remLen * scale);
-            tessellateStroke(truncated, activeStrokeWidth, cYellow, vertexArray);
+            tessellateStroke(truncated, w, col, vertexArray);
             remLen -= totalPolyLen;
           });
         }
@@ -1092,6 +1100,7 @@ async function initApp() {
 
         // 1. Comet trail *except* the very tip (index 0 to L-2)
         if (L > 1) {
+          const trailAlpha = Math.pow(1.0 - pauseProgress, 2);
           for (let j = 0; j < L - 1; j++) {
             let t = j / (L - 1);
             t = t * (1.0 - pauseProgress);
@@ -1106,7 +1115,7 @@ async function initApp() {
               r: cYellow.r + (cRed.r - cYellow.r) * t,
               g: cYellow.g + (cRed.g - cYellow.g) * t,
               b: cYellow.b + (cRed.b - cYellow.b) * t,
-              a: 1.0
+              a: trailAlpha
             };
             appendCircleGeometry(ptCanvas.x, ptCanvas.y, r, col, vertexArray);
           }
@@ -1136,11 +1145,12 @@ async function initApp() {
           };
           let t = 1.0 * (1.0 - pauseProgress);
           const cRed = { r: 239/255, g: 68/255, b: 68/255, a: 1.0 };
+          const tipAlpha = Math.pow(1.0 - pauseProgress, 2);
           const col = {
             r: cYellow.r + (cRed.r - cYellow.r) * t,
             g: cYellow.g + (cRed.g - cYellow.g) * t,
             b: cYellow.b + (cRed.b - cYellow.b) * t,
-            a: 1.0
+            a: tipAlpha
           };
           appendCircleGeometry(ptCanvas.x, ptCanvas.y, tipRadius, col, vertexArray);
         } else {
@@ -1228,6 +1238,13 @@ async function initApp() {
         return `rgb(${r}, ${g}, ${b})`;
       }
 
+      function lerpColorRGBA(c1, c2, t, alpha) {
+        const r = Math.round(c1.r + (c2.r - c1.r) * t);
+        const g = Math.round(c1.g + (c2.g - c1.g) * t);
+        const b = Math.round(c1.b + (c2.b - c1.b) * t);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+
       glyphCtx.fillStyle = '#000000';
       glyphCtx.fillRect(0, 0, glyphSize, glyphSize);
 
@@ -1275,9 +1292,18 @@ async function initApp() {
         const diameter = activeStrokeWidth * (tipSizePercent / 100);
         const radius = diameter / 2;
 
-        // Draw animated active stroke segment (solid yellow)
-        glyphCtx.strokeStyle = '#facc15'; // Neon yellow
-        glyphCtx.lineWidth = activeStrokeWidth;
+        // Calculate stroke duration and pause progress
+        const strokeDuration = totalLength > 0 ? (totalLength / drawingSpeed) * 1000 : 100;
+        let pauseProgress = 0.0;
+        if (strokeTimeElapsed > strokeDuration) {
+          pauseProgress = Math.min(1.0, (strokeTimeElapsed - strokeDuration) / pauseBetweenStrokes);
+        }
+
+        // Draw animated active stroke segment (with drying transition if single stroke)
+        const dryProg = isSingleStrokeAnimating ? pauseProgress : 0.0;
+        const col = lerpColor(cYellow, cBlue, dryProg);
+        glyphCtx.strokeStyle = col;
+        glyphCtx.lineWidth = activeStrokeWidth - (activeStrokeWidth - dryLineWidth) * dryProg;
         
         glyphCtx.save();
         glyphCtx.beginPath();
@@ -1285,14 +1311,6 @@ async function initApp() {
         glyphCtx.stroke(new Path2D(strokePaths[currentStrokeIndex]));
         glyphCtx.restore();
 
-        // Calculate stroke duration and pause progress
-        const strokeDuration = totalLength > 0 ? (totalLength / drawingSpeed) * 1000 : 100;
-        let pauseProgress = 0.0;
-        if (!isSingleStrokeAnimating && strokeTimeElapsed > strokeDuration) {
-          pauseProgress = Math.min(1.0, (strokeTimeElapsed - strokeDuration) / pauseBetweenStrokes);
-        }
-
-        const cYellow = { r: 250, g: 204, b: 21 }; // #facc15
         const cRed = { r: 239, g: 68, b: 68 };     // #ef4444
 
         const L = strokeTipHistory.length;
@@ -1300,6 +1318,7 @@ async function initApp() {
         // Active stroke tip glow & comet trail (Bottom-to-Top: Trail except tip -> Glow -> Tip)
         // 1. Comet trail *except* the very tip (index 0 to L-2)
         if (L > 1) {
+          const trailAlpha = Math.pow(1.0 - pauseProgress, 2);
           for (let i = 0; i < L - 1; i++) {
             let t = i / (L - 1);
             t = t * (1.0 - pauseProgress); // Fade color to yellow over pause
@@ -1307,7 +1326,7 @@ async function initApp() {
             const r = radius * (0.35 + 0.65 * t);
             const pt = strokeTipHistory[i];
             
-            glyphCtx.fillStyle = lerpColor(cYellow, cRed, t);
+            glyphCtx.fillStyle = lerpColorRGBA(cYellow, cRed, t, trailAlpha);
             glyphCtx.beginPath();
             glyphCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
             glyphCtx.fill();
@@ -1338,7 +1357,8 @@ async function initApp() {
         if (L > 0) {
           const pt = strokeTipHistory[L - 1];
           let t = 1.0 * (1.0 - pauseProgress);
-          glyphCtx.fillStyle = lerpColor(cYellow, cRed, t);
+          const tipAlpha = Math.pow(1.0 - pauseProgress, 2);
+          glyphCtx.fillStyle = lerpColorRGBA(cYellow, cRed, t, tipAlpha);
           glyphCtx.beginPath();
           glyphCtx.arc(pt.x, pt.y, tipRadius, 0, Math.PI * 2);
           glyphCtx.fill();
@@ -1793,10 +1813,7 @@ async function initApp() {
         const totalLength = pathEl.getTotalLength();
         const strokeDuration = totalLength > 0 ? (totalLength / drawingSpeed) * 1000 : 100;
         
-        let stepDuration = strokeDuration;
-        if (!isSingleStrokeAnimating) {
-          stepDuration = strokeDuration + pauseBetweenStrokes;
-        }
+        const stepDuration = strokeDuration + pauseBetweenStrokes;
 
         strokeTimeElapsed += dt * 1000;
         strokeProgress = Math.min(1.0, strokeTimeElapsed / strokeDuration);
@@ -1812,7 +1829,8 @@ async function initApp() {
         }
 
         if (strokeTimeElapsed >= stepDuration) {
-          strokeCompletionTimes[currentStrokeIndex] = animTime;
+          const dryOffset = isSingleStrokeAnimating ? (pauseBetweenStrokes / 1000) : 0.0;
+          strokeCompletionTimes[currentStrokeIndex] = animTime - dryOffset;
           currentStrokeIndex++;
           strokeProgress = 0.0;
           strokeTimeElapsed = 0.0;
