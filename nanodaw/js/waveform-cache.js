@@ -5,7 +5,7 @@
  */
 class WaveformCache {
   constructor() {
-    this.cache = new Map(); // index -> { minPeaks, maxPeaks, duration }
+    this.cache = new Map(); // buffer -> { minPeaks, maxPeaks, duration }
   }
 
   clear() {
@@ -15,17 +15,17 @@ class WaveformCache {
   /**
    * Precalculate peaks for an AudioBuffer
    */
-  getPeaks(trackIndex, audioBuffer, pointsPerSec = 100) {
-    if (this.cache.has(trackIndex)) {
-      return this.cache.get(trackIndex);
-    }
-
+  getPeaks(trackIndex, audioBuffer, pointsPerSec = 80) {
     if (!audioBuffer) return null;
+
+    if (this.cache.has(audioBuffer)) {
+      return this.cache.get(audioBuffer);
+    }
 
     const duration = audioBuffer.duration;
     const totalPoints = Math.max(100, Math.floor(duration * pointsPerSec));
-    const channelData = audioBuffer.getChannelData(0); // Use channel 0 (or mix down)
-    const samplesPerPoint = Math.floor(channelData.length / totalPoints);
+    const channelData = audioBuffer.getChannelData(0);
+    const samplesPerPoint = Math.max(1, Math.floor(channelData.length / totalPoints));
 
     const minPeaks = new Float32Array(totalPoints);
     const maxPeaks = new Float32Array(totalPoints);
@@ -47,25 +47,31 @@ class WaveformCache {
     }
 
     const peakData = { minPeaks, maxPeaks, totalPoints, duration };
-    this.cache.set(trackIndex, peakData);
+    this.cache.set(audioBuffer, peakData);
     return peakData;
   }
 
   /**
    * Render a track lane waveform onto a canvas
    */
-  renderTrackCanvas(canvas, track, pixelsPerSecond, scrollLeft, visibleWidth, options = {}) {
+  renderTrackCanvas(canvas, track, pixelsPerSecond, timelineWidth, trackHeight, options = {}) {
     if (!canvas) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const width = canvas.clientWidth || visibleWidth;
-    const height = canvas.clientHeight || 70;
+    const width = Math.max(100, Math.round(timelineWidth));
+    const height = Math.max(40, Math.round(trackHeight));
 
-    // Adjust canvas resolution for retina displays
-    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
+    // Ensure physical canvas dimensions match timeline width & DPR
+    const targetW = Math.round(width * dpr);
+    const targetH = Math.round(height * dpr);
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
     }
+
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
 
     const ctx = canvas.getContext('2d');
     ctx.save();
@@ -74,72 +80,65 @@ class WaveformCache {
     // Clear background
     ctx.clearRect(0, 0, width, height);
 
-    if (!track || !track.buffer) {
-      // Empty lane
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.02)';
+    const isSelected = Boolean(options.isSelected);
+    const isMuted = Boolean(options.isMuted);
+    const isSoloed = Boolean(options.isSoloed);
+    const isDimmed = Boolean(options.isDimmed);
+    const color = track?.color || '#00f2fe';
+
+    // Lane background wash
+    if (isSelected) {
+      ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.02)' : 'rgba(0, 242, 254, 0.06)';
       ctx.fillRect(0, 0, width, height);
+    } else {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.01)';
+      ctx.fillRect(0, 0, width, height);
+    }
+
+    if (!track || !track.buffer) {
+      // Empty or loading lane
       ctx.restore();
       return;
     }
 
-    const offset = track.offset || 0;
-    const duration = track.duration || 0;
-    const trackStartX = (offset * pixelsPerSecond) - scrollLeft;
-    const trackWidth = duration * pixelsPerSecond;
+    const offset = Math.max(0, Number(track.offset) || 0);
+    const duration = Math.max(0.1, Number(track.duration) || track.buffer.duration || 0);
+    const trackStartX = Math.round(offset * pixelsPerSecond);
+    const trackWidth = Math.max(4, Math.round(duration * pixelsPerSecond));
     const trackEndX = trackStartX + trackWidth;
 
-    // If completely out of visible viewport, skip drawing waveform
-    if (trackEndX < 0 || trackStartX > width) {
-      ctx.restore();
-      return;
-    }
-
-    const color = track.color || '#00f2fe';
-    const isMuted = options.isMuted;
-    const isSoloed = options.isSoloed;
-    const isDimmed = options.isDimmed;
-    const isSelected = options.isSelected;
-
-    // Selected Track background wash
+    // Draw track block background
     if (isSelected) {
-      ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.02)' : (color + '10');
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = isDimmed ? 'rgba(35, 42, 56, 0.6)' : 'rgba(20, 28, 42, 0.95)';
+    } else {
+      ctx.fillStyle = isDimmed ? 'rgba(25, 30, 40, 0.4)' : 'rgba(16, 22, 32, 0.85)';
     }
 
-    // Draw track block container
-    const blockX = Math.max(0, trackStartX);
-    const blockRight = Math.min(width, trackEndX);
-    const blockW = Math.max(0, blockRight - blockX);
+    ctx.beginPath();
+    ctx.roundRect(trackStartX, 4, trackWidth, height - 8, 6);
+    ctx.fill();
 
-    if (blockW > 0) {
-      // Track block background
-      if (isSelected) {
-        ctx.fillStyle = isDimmed ? 'rgba(40, 45, 60, 0.5)' : 'rgba(26, 34, 48, 0.95)';
-      } else {
-        ctx.fillStyle = isDimmed ? 'rgba(30, 35, 45, 0.4)' : 'rgba(20, 26, 38, 0.85)';
-      }
-      ctx.beginPath();
-      ctx.roundRect(trackStartX, 4, trackWidth, height - 8, 6);
-      ctx.fill();
-
-      // Track block border
-      if (isSelected) {
-        ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.15)' : color;
-        ctx.lineWidth = 1.5;
-      } else {
-        ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.05)' : (color + '44');
-        ctx.lineWidth = 1;
-      }
-      ctx.stroke();
-
-      // Track start marker line if within view
-      if (trackStartX >= 0 && trackStartX <= width) {
-        ctx.fillStyle = color;
-        ctx.fillRect(trackStartX, 4, isSelected ? 4 : 3, height - 8);
-      }
+    // Track block border
+    if (isSelected) {
+      ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.2)' : color;
+      ctx.lineWidth = 1.5;
+    } else {
+      ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.05)' : (color + '55');
+      ctx.lineWidth = 1;
     }
+    ctx.stroke();
 
-    // Draw Waveform
+    // Track start accent bar
+    ctx.fillStyle = color;
+    ctx.fillRect(trackStartX, 4, isSelected ? 4 : 3, height - 8);
+
+    // Track label pill at start of block
+    ctx.font = '10px "Inter", -apple-system, sans-serif';
+    ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.85)';
+    const nameLabel = track.name || 'Audio Track';
+    ctx.fillText(nameLabel, trackStartX + 8, 16);
+
+    // Get Peak Data
     const peakData = this.getPeaks(track.index, track.buffer);
     if (!peakData) {
       ctx.restore();
@@ -148,36 +147,32 @@ class WaveformCache {
 
     const { minPeaks, maxPeaks, totalPoints } = peakData;
     const midY = height / 2;
-    const ampScale = (height - 20) / 2;
+    const ampScale = (height - 24) / 2;
 
     ctx.save();
-    // Clip to track bounds
+    // Clip drawing strictly to the track block
     ctx.beginPath();
-    ctx.rect(Math.max(0, trackStartX), 4, Math.max(0, trackWidth), height - 8);
+    ctx.rect(trackStartX, 4, trackWidth, height - 8);
     ctx.clip();
 
     // Waveform gradient
     const gradient = ctx.createLinearGradient(0, 4, 0, height - 4);
     if (isDimmed) {
-      gradient.addColorStop(0, 'rgba(150, 160, 180, 0.25)');
+      gradient.addColorStop(0, 'rgba(140, 150, 170, 0.25)');
       gradient.addColorStop(0.5, 'rgba(100, 110, 130, 0.15)');
-      gradient.addColorStop(1, 'rgba(150, 160, 180, 0.25)');
+      gradient.addColorStop(1, 'rgba(140, 150, 170, 0.25)');
     } else {
       gradient.addColorStop(0, color);
-      gradient.addColorStop(0.5, color + '99');
+      gradient.addColorStop(0.5, color + 'aa');
       gradient.addColorStop(1, color);
     }
 
     ctx.fillStyle = gradient;
 
-    // Draw waveform bars
-    const visibleStartX = Math.max(0, trackStartX);
-    const visibleEndX = Math.min(width, trackEndX);
-    const step = 2; // draw every 2px for smooth crisp performance
-
-    for (let x = visibleStartX; x < visibleEndX; x += step) {
-      const timeAtX = (x + scrollLeft - (offset * pixelsPerSecond)) / pixelsPerSecond;
-      const pointIdx = Math.floor((timeAtX / duration) * totalPoints);
+    const step = 2; // draw bar every 2px
+    for (let x = trackStartX; x < trackEndX; x += step) {
+      const relX = x - trackStartX;
+      const pointIdx = Math.floor((relX / trackWidth) * totalPoints);
 
       if (pointIdx >= 0 && pointIdx < totalPoints) {
         const minVal = minPeaks[pointIdx];
@@ -191,7 +186,7 @@ class WaveformCache {
       }
     }
 
-    // Center baseline
+    // Center reference line
     ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.05)' : 'rgba(255, 255, 255, 0.15)';
     ctx.lineWidth = 1;
     ctx.beginPath();

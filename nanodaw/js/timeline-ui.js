@@ -61,7 +61,15 @@ class TimelineUI {
   }
 
   getTrackHeaderWidth() {
-    return this.isMobile() ? 36 : 250;
+    return this.isMobile() ? 44 : 240;
+  }
+
+  getTrackHeight() {
+    return this.isMobile() ? 64 : 72;
+  }
+
+  getRulerHeight() {
+    return this.isMobile() ? 28 : 34;
   }
 
   initEvents() {
@@ -225,12 +233,16 @@ class TimelineUI {
     }
     if (this.panePrevTrack) {
       this.panePrevTrack.addEventListener('click', () => {
-        this.state.selectTrack(this.state.selectedTrackIndex - 1);
+        const current = this.state.selectedTrackIndex;
+        const total = this.state.project?.tracks?.length || 1;
+        this.state.selectTrack((current - 1 + total) % total);
       });
     }
     if (this.paneNextTrack) {
       this.paneNextTrack.addEventListener('click', () => {
-        this.state.selectTrack(this.state.selectedTrackIndex + 1);
+        const current = this.state.selectedTrackIndex;
+        const total = this.state.project?.tracks?.length || 1;
+        this.state.selectTrack((current + 1) % total);
       });
     }
   }
@@ -284,11 +296,18 @@ class TimelineUI {
       totalDuration * this.pixelsPerSecond + 150
     );
 
-    this.timelineWidth = visibleWaveAreaW;
+    this.timelineWidth = Math.round(visibleWaveAreaW);
 
-    this.timelineContent.style.width = `${headerWidth + this.timelineWidth}px`;
-    this.rulerCanvas.style.width = `${this.timelineWidth}px`;
-    this.markerLayer.style.width = `${this.timelineWidth}px`;
+    if (this.timelineContent) {
+      this.timelineContent.style.setProperty('--timeline-width', `${this.timelineWidth}px`);
+    }
+
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.width = `${this.timelineWidth}px`;
+    }
+    if (this.markerLayer) {
+      this.markerLayer.style.width = `${this.timelineWidth}px`;
+    }
   }
 
   applyZoom(newZoom, originClientX = null) {
@@ -346,12 +365,18 @@ class TimelineUI {
 
     const dpr = window.devicePixelRatio || 1;
     const width = this.timelineWidth;
-    const height = this.isMobile() ? 30 : 36;
+    const height = this.getRulerHeight();
 
-    if (this.rulerCanvas.width !== width * dpr || this.rulerCanvas.height !== height * dpr) {
-      this.rulerCanvas.width = width * dpr;
-      this.rulerCanvas.height = height * dpr;
+    const targetW = Math.round(width * dpr);
+    const targetH = Math.round(height * dpr);
+
+    if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
+      this.rulerCanvas.width = targetW;
+      this.rulerCanvas.height = targetH;
     }
+
+    this.rulerCanvas.style.width = `${width}px`;
+    this.rulerCanvas.style.height = `${height}px`;
 
     const ctx = this.rulerCanvas.getContext('2d');
     ctx.save();
@@ -359,7 +384,7 @@ class TimelineUI {
     ctx.clearRect(0, 0, width, height);
 
     // Ruler Background
-    ctx.fillStyle = 'rgba(14, 18, 26, 0.95)';
+    ctx.fillStyle = 'rgba(14, 18, 26, 0.98)';
     ctx.fillRect(0, 0, width, height);
 
     // Bottom border line
@@ -523,7 +548,7 @@ class TimelineUI {
   }
 
   /**
-   * Render all track rows, mobile selection handles or desktop headers, and wave canvases
+   * Render all track rows, sidebar cells (desktop controls + mobile handles), and wave canvases
    */
   render() {
     if (!this.tracksContainer) return;
@@ -534,7 +559,7 @@ class TimelineUI {
     const tracks = this.state.project?.tracks || [];
     const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
     const selectedIdx = this.state.selectedTrackIndex;
-    const isMobileMode = this.isMobile();
+    const trackHeight = this.getTrackHeight();
 
     tracks.forEach((t, index) => {
       const trackState = this.state.tracksState[index] || { volume: 1.0, mute: false, solo: false };
@@ -556,59 +581,60 @@ class TimelineUI {
         }
       });
 
-      if (isMobileMode) {
-        // Mobile Mode: Compact Selection Handle (tiny circle in track color + number)
-        const handle = document.createElement('div');
-        handle.className = 'mobile-track-handle';
-        handle.style.borderLeft = `3px solid ${color}`;
-        handle.innerHTML = `
-          <span class="track-handle-dot" style="background: ${color}; color: ${color};"></span>
-          <span class="track-handle-num">${index + 1}</span>
-        `;
-        row.appendChild(handle);
-      } else {
-        // Desktop Mode: Full Track Header with mix controls
-        const header = document.createElement('div');
-        header.className = 'track-header';
-        header.style.borderLeft = `4px solid ${color}`;
+      // Sticky Sidebar Cell (contains Desktop Header AND Mobile Handle - toggled via CSS)
+      const sidebarCell = document.createElement('div');
+      sidebarCell.className = 'track-sidebar-cell';
+      sidebarCell.style.borderLeft = `4px solid ${color}`;
 
-        const offsetStr = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
+      const offsetStr = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
 
-        header.innerHTML = `
-          <div class="track-info">
-            <div class="track-title-row">
-              <span class="track-name" title="${this.escapeHtml(t.name)}">${this.escapeHtml(t.name)}</span>
-              <span class="track-offset-badge" title="Start Offset from t0">${offsetStr}</span>
-            </div>
-            <div class="track-sub-info">
-              <span class="track-status">${loadedTrack?.buffer ? `${(loadedTrack.duration).toFixed(1)}s` : 'Loading...'}</span>
-              <span class="track-vu-meter" id="vu_${index}">
-                <span class="vu-led"></span>
-                <span class="vu-led"></span>
-                <span class="vu-led"></span>
-                <span class="vu-led"></span>
-                <span class="vu-led"></span>
-              </span>
-            </div>
+      // 1. Desktop Track Header content
+      const desktopHeader = document.createElement('div');
+      desktopHeader.className = 'desktop-track-header';
+      desktopHeader.innerHTML = `
+        <div class="track-info">
+          <div class="track-title-row">
+            <span class="track-name" title="${this.escapeHtml(t.name)}">${this.escapeHtml(t.name)}</span>
+            <span class="track-offset-badge" title="Start Offset from t0">${offsetStr}</span>
           </div>
-          <div class="track-controls">
-            <div class="btn-group">
-              <button class="btn-ctrl btn-mute ${trackState.mute ? 'active' : ''}" data-action="mute" data-index="${index}" title="Mute Track (M)">M</button>
-              <button class="btn-ctrl btn-solo ${trackState.solo ? 'active' : ''}" data-action="solo" data-index="${index}" title="Solo Track (S)">S</button>
-            </div>
-            <div class="fader-group">
-              <input type="range" class="track-vol-slider" min="0" max="1.5" step="0.01" value="${trackState.volume}" data-index="${index}" title="Volume: ${Math.round(trackState.volume * 100)}%">
-              <span class="vol-label">${this.formatGainDb(trackState.volume)}</span>
-            </div>
+          <div class="track-sub-info">
+            <span class="track-status">${loadedTrack?.buffer ? `${(loadedTrack.duration).toFixed(1)}s` : 'Loading...'}</span>
+            <span class="track-vu-meter" id="vu_${index}">
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+            </span>
           </div>
-        `;
-        row.appendChild(header);
-      }
+        </div>
+        <div class="track-controls">
+          <div class="btn-group">
+            <button class="btn-ctrl btn-mute ${trackState.mute ? 'active' : ''}" data-action="mute" data-index="${index}" title="Mute Track (M)">M</button>
+            <button class="btn-ctrl btn-solo ${trackState.solo ? 'active' : ''}" data-action="solo" data-index="${index}" title="Solo Track (S)">S</button>
+          </div>
+          <div class="fader-group">
+            <input type="range" class="track-vol-slider" min="0" max="1.5" step="0.01" value="${trackState.volume}" data-index="${index}" title="Volume: ${Math.round(trackState.volume * 100)}%">
+            <span class="vol-label">${this.formatGainDb(trackState.volume)}</span>
+          </div>
+        </div>
+      `;
+
+      // 2. Mobile Track Handle content
+      const mobileHandle = document.createElement('div');
+      mobileHandle.className = 'mobile-track-handle';
+      mobileHandle.innerHTML = `
+        <span class="track-handle-dot" style="background: ${color}; color: ${color};"></span>
+        <span class="track-handle-num">${index + 1}</span>
+      `;
+
+      sidebarCell.appendChild(desktopHeader);
+      sidebarCell.appendChild(mobileHandle);
+      row.appendChild(sidebarCell);
 
       // Right Track Waveform Canvas Lane
       const lane = document.createElement('div');
       lane.className = 'track-lane';
-      lane.style.width = `${this.timelineWidth}px`;
 
       const canvas = document.createElement('canvas');
       canvas.className = 'track-canvas';
@@ -623,6 +649,7 @@ class TimelineUI {
         this.audio.seek(time);
       });
 
+      row.appendChild(lane);
       this.tracksContainer.appendChild(row);
     });
 
@@ -668,6 +695,7 @@ class TimelineUI {
     const canvases = this.tracksContainer.querySelectorAll('.track-canvas');
     const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
     const selectedIdx = this.state.selectedTrackIndex;
+    const trackHeight = this.getTrackHeight();
 
     canvases.forEach(canvas => {
       const idx = parseInt(canvas.dataset.index, 10);
@@ -680,8 +708,8 @@ class TimelineUI {
         canvas,
         loadedTrack,
         this.pixelsPerSecond,
-        0,
         this.timelineWidth,
+        trackHeight,
         { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
       );
     });

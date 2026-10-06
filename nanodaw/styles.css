@@ -7,7 +7,7 @@
   --bg-surface: #0e121a;
   --bg-surface-elevated: #151b26;
   --bg-surface-glass: rgba(21, 27, 38, 0.85);
-  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-subtle: rgba(255, 255, 255, 0.08);
   --border-focus: rgba(0, 242, 254, 0.4);
 
   --accent-cyan: #00f2fe;
@@ -23,9 +23,10 @@
   --text-muted: #64748b;
   --text-dim: #475569;
 
-  --track-header-width: 250px;
-  --ruler-height: 36px;
-  --track-height: 74px;
+  --track-sidebar-width: 240px;
+  --ruler-height: 34px;
+  --track-height: 72px;
+  --timeline-width: 1000px;
   
   --shadow-main: 0 10px 30px -5px rgba(0, 0, 0, 0.6);
   --shadow-glow: 0 0 15px rgba(0, 242, 254, 0.25);
@@ -56,7 +57,7 @@ body {
 
 /* --- Top Navigation & Branding --- */
 .app-header {
-  height: 50px;
+  height: 48px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
@@ -83,10 +84,10 @@ body {
 }
 
 .logo-icon-wrap {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
-  border-radius: 7px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -94,8 +95,8 @@ body {
 }
 
 .logo-icon-wrap svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   fill: white;
 }
 
@@ -119,7 +120,7 @@ body {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
-  max-width: 180px;
+  max-width: 220px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -138,8 +139,8 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 6px 12px;
-  border-radius: 7px;
+  padding: 5px 12px;
+  border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -171,7 +172,7 @@ body {
 
 /* --- Transport Bar --- */
 .transport-bar {
-  height: 50px;
+  height: 48px;
   background: var(--bg-surface-elevated);
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
@@ -278,7 +279,7 @@ body {
 .transport-secondary {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
 }
 
@@ -336,7 +337,7 @@ body {
 
 /* --- Marker Quick Navigation Bar --- */
 .marker-nav-bar {
-  height: 32px;
+  height: 30px;
   background: #090c13;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
@@ -408,10 +409,10 @@ body {
   font-size: 9px;
 }
 
-/* --- Selected Track Inspector Pane (Mobile & Desktop Inspector) --- */
+/* --- Selected Track Inspector Pane (Mobile & Desktop) --- */
 .selected-track-pane {
-  height: 44px;
-  background: rgba(18, 24, 34, 0.95);
+  height: 42px;
+  background: rgba(18, 24, 34, 0.98);
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
@@ -425,7 +426,7 @@ body {
 .pane-track-identity {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
 }
@@ -453,7 +454,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 130px;
+  max-width: 150px;
 }
 
 .pane-offset-badge {
@@ -475,7 +476,7 @@ body {
 .pane-track-controls {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
@@ -518,6 +519,7 @@ body {
   overflow: hidden;
   background: #080a0f;
   display: flex;
+  width: 100%;
 }
 
 .timeline-scroll-area {
@@ -531,11 +533,15 @@ body {
     linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
   background-size: 40px 40px;
   touch-action: pan-x pan-y;
+  width: 100%;
 }
 
 .timeline-content {
   position: relative;
-  min-height: 100%;
+  width: fit-content;
+  min-width: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Ruler Bar */
@@ -545,12 +551,17 @@ body {
   top: 0;
   z-index: 30;
   display: flex;
-  background: rgba(14, 18, 26, 0.95);
+  flex-direction: row;
+  background: rgba(14, 18, 26, 0.98);
   border-bottom: 1px solid var(--border-subtle);
+  width: fit-content;
+  min-width: 100%;
 }
 
 .ruler-corner {
-  width: var(--track-header-width);
+  width: var(--track-sidebar-width);
+  min-width: var(--track-sidebar-width);
+  max-width: var(--track-sidebar-width);
   height: 100%;
   background: var(--bg-surface-elevated);
   border-right: 1px solid var(--border-subtle);
@@ -571,7 +582,8 @@ body {
 
 .ruler-track-canvas-wrap {
   position: relative;
-  flex: 1;
+  flex: 0 0 auto;
+  width: var(--timeline-width);
   height: 100%;
 }
 
@@ -581,6 +593,7 @@ body {
   left: 0;
   height: var(--ruler-height);
   cursor: pointer;
+  display: block;
 }
 
 .marker-layer {
@@ -684,15 +697,20 @@ body {
 .tracks-container {
   display: flex;
   flex-direction: column;
+  width: fit-content;
+  min-width: 100%;
 }
 
 .track-row {
   height: var(--track-height);
   display: flex;
+  flex-direction: row;
   border-bottom: 1px solid var(--border-subtle);
   transition: background-color 0.15s ease, opacity 0.2s ease;
   position: relative;
   cursor: pointer;
+  width: fit-content;
+  min-width: 100%;
 }
 
 .track-row.track-dimmed {
@@ -703,42 +721,44 @@ body {
   background: rgba(255, 255, 255, 0.03);
 }
 
-/* Sticky Desktop Track Header */
-.track-header {
-  width: var(--track-header-width);
+/* Sticky Track Sidebar Cell */
+.track-sidebar-cell {
+  width: var(--track-sidebar-width);
+  min-width: var(--track-sidebar-width);
+  max-width: var(--track-sidebar-width);
   height: 100%;
   background: var(--bg-surface);
   border-right: 1px solid var(--border-subtle);
   position: sticky;
   left: 0;
-  z-index: 20;
+  z-index: 25;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.track-row.track-selected .track-sidebar-cell {
+  background: #141a26;
+}
+
+/* Desktop Track Header inside cell */
+.desktop-track-header {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 6px 10px;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-
-.track-row.track-selected .track-header {
-  background: #151b27;
-}
-
-/* Mobile Track Handle (Compact Dot/Pill on Mobile) */
-.mobile-track-handle {
-  width: var(--track-header-width);
   height: 100%;
-  background: var(--bg-surface);
-  border-right: 1px solid var(--border-subtle);
-  position: sticky;
-  left: 0;
-  z-index: 20;
-  display: flex;
+  width: 100%;
+  padding: 6px 10px;
+}
+
+/* Mobile Track Handle inside cell */
+.mobile-track-handle {
+  display: none;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  height: 100%;
+  width: 100%;
   gap: 4px;
-  flex-shrink: 0;
 }
 
 .track-handle-dot {
@@ -786,7 +806,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 135px;
+  max-width: 130px;
 }
 
 .track-offset-badge {
@@ -908,7 +928,7 @@ body {
 .track-vol-slider {
   -webkit-appearance: none;
   appearance: none;
-  width: 60px;
+  width: 55px;
   height: 4px;
   border-radius: 2px;
   background: #242c3d;
@@ -939,15 +959,16 @@ body {
   position: relative;
   height: 100%;
   cursor: pointer;
-  flex: 1;
+  flex: 0 0 auto;
+  width: var(--timeline-width);
 }
 
 .track-canvas {
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
   height: 100%;
+  display: block;
 }
 
 /* --- Stackable Tools Overlay (Mobile Drawer/Popover) --- */
@@ -1226,9 +1247,9 @@ body {
    ========================================================================== */
 @media (max-width: 768px) {
   :root {
-    --track-header-width: 36px;
+    --track-sidebar-width: 44px;
     --track-height: 64px;
-    --ruler-height: 30px;
+    --ruler-height: 28px;
   }
 
   .desktop-only {
@@ -1292,10 +1313,14 @@ body {
   }
 
   .pane-fader-group .track-vol-slider {
-    width: 48px;
+    width: 46px;
   }
 
-  .ruler-corner-text {
-    display: none;
+  .desktop-track-header {
+    display: none !important;
+  }
+
+  .mobile-track-handle {
+    display: flex !important;
   }
 }
