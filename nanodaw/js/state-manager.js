@@ -149,6 +149,8 @@ class StateManager {
           this.markers = loadedMarkers;
         }
       }
+    }
+
     // 6. Zoom factor: "z=75"
     if (params.has('z')) {
       const zVal = parseFloat(params.get('z'));
