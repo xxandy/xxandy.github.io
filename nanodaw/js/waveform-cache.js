@@ -1,6 +1,6 @@
 /**
  * WaveformCache & Renderer
- * Computes audio peak summaries from AudioBuffers and renders smooth canvas waveforms
+ * Computes audio peak summaries from AudioBuffers or pre-extracted peaks and renders smooth canvas waveforms
  * with support for track offsets, Hi-DPI scaling, and theme colors.
  */
 class WaveformCache {
@@ -13,9 +13,33 @@ class WaveformCache {
   }
 
   /**
-   * Precalculate peaks for an AudioBuffer
+   * Precalculate peaks for an AudioBuffer or retrieve track peak data
    */
-  getPeaks(trackIndex, audioBuffer, pointsPerSec = 80) {
+  getPeaks(trackIndex, trackOrBuffer, pointsPerSec = 80) {
+    if (!trackOrBuffer) return null;
+
+    // 1. If track already has pre-computed or extracted peaks
+    if (trackOrBuffer.peaks) {
+      const p = trackOrBuffer.peaks;
+      if (p.minPeaks && p.maxPeaks) {
+        return p;
+      }
+      if (Array.isArray(p) || p instanceof Float32Array) {
+        const totalPoints = p.length;
+        const minPeaks = new Float32Array(totalPoints);
+        const maxPeaks = new Float32Array(totalPoints);
+        for (let i = 0; i < totalPoints; i++) {
+          const v = Math.abs(p[i]);
+          maxPeaks[i] = v;
+          minPeaks[i] = -v;
+        }
+        const formatted = { minPeaks, maxPeaks, totalPoints, duration: trackOrBuffer.duration || 30 };
+        trackOrBuffer.peaks = formatted;
+        return formatted;
+      }
+    }
+
+    const audioBuffer = trackOrBuffer.buffer || (trackOrBuffer.getChannelData ? trackOrBuffer : null);
     if (!audioBuffer) return null;
 
     if (this.cache.has(audioBuffer)) {
@@ -95,14 +119,14 @@ class WaveformCache {
       ctx.fillRect(0, 0, width, height);
     }
 
-    if (!track || !track.buffer) {
+    if (!track || (!track.buffer && !track.peaks)) {
       // Empty or loading lane
       ctx.restore();
       return;
     }
 
     const offset = Math.max(0, Number(track.offset) || 0);
-    const duration = Math.max(0.1, Number(track.duration) || track.buffer.duration || 0);
+    const duration = Math.max(0.1, Number(track.duration) || (track.buffer ? track.buffer.duration : 0) || 30);
     const trackStartX = Math.round(offset * pixelsPerSecond);
     const trackWidth = Math.max(4, Math.round(duration * pixelsPerSecond));
     const trackEndX = trackStartX + trackWidth;
@@ -139,7 +163,7 @@ class WaveformCache {
     ctx.fillText(nameLabel, trackStartX + 8, 16);
 
     // Get Peak Data
-    const peakData = this.getPeaks(track.index, track.buffer);
+    const peakData = this.getPeaks(track.index, track);
     if (!peakData) {
       ctx.restore();
       return;
