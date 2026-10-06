@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoDAW - Digital Audio Workstation</title>
+  <meta name="description" content="NanoDAW - A lightweight, modern in-browser Digital Audio Workstation">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0c10;
+      --bg-panel: rgba(20, 24, 33, 0.75);
+      --border-panel: rgba(255, 255, 255, 0.08);
+      --accent-cyan: #00f2fe;
+      --accent-blue: #4facfe;
+      --accent-purple: #7928ca;
+      --accent-pink: #ff0080;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-dark);
+      background-image: 
+        radial-gradient(circle at 20% 20%, rgba(79, 172, 254, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 80% 80%, rgba(121, 40, 202, 0.08) 0%, transparent 40%),
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      overflow-x: hidden;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 720px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border-panel);
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 
+                  0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .container::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-purple), var(--accent-pink));
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 32px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border-panel);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 15px rgba(0, 242, 254, 0.3);
+    }
+
+    .logo-icon svg {
+      width: 22px;
+      height: 22px;
+      fill: white;
+    }
+
+    .brand h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(to right, #ffffff, #d1d5db);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 500;
+      font-family: 'JetBrains Mono', monospace;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      color: #34d399;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: #34d399;
+      box-shadow: 0 0 10px #34d399;
+      animation: pulse 2s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    .hero {
+      text-align: center;
+      margin: 24px 0 36px 0;
+    }
+
+    .hero-tagline {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--accent-cyan);
+      margin-bottom: 12px;
+    }
+
+    .hero h2 {
+      font-size: 38px;
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: -1px;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, #ffffff 30%, #9ca3af 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p {
+      color: var(--text-muted);
+      font-size: 16px;
+      line-height: 1.6;
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    .visualizer-card {
+      background: rgba(10, 12, 16, 0.6);
+      border: 1px solid var(--border-panel);
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 32px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .wave-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 4px;
+      height: 48px;
+      width: 100%;
+      justify-content: center;
+    }
+
+    .wave-bar {
+      width: 4px;
+      height: 15%;
+      background: linear-gradient(to top, var(--accent-purple), var(--accent-cyan));
+      border-radius: 2px;
+      transition: height 0.1s ease;
+    }
+
+    .controls {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+    }
+
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      background: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
+      color: #050505;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 12px 24px;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 15px rgba(0, 242, 254, 0.3);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(0, 242, 254, 0.45);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    .info-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 24px;
+      border-top: 1px solid var(--border-panel);
+      color: var(--text-dim);
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .info-footer a {
+      color: var(--accent-cyan);
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }
+
+    .info-footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="brand">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+          </svg>
+        </div>
+        <h1>NanoDAW</h1>
+      </div>
+      <div class="status-badge">
+        <span class="status-dot"></span>
+        <span>ENGINE READY</span>
+      </div>
+    </header>
+
+    <main class="hero">
+      <div class="hero-tagline">Web Audio Workstation</div>
+      <h2>Hello, World!</h2>
+      <p>NanoDAW is initializing. A lightweight, powerful digital audio workstation running entirely in your browser.</p>
+    </main>
+
+    <section class="visualizer-card">
+      <div class="wave-bars" id="waveBars">
+        <!-- Bars generated via JS -->
+      </div>
+      <div class="controls">
+        <button class="btn-primary" id="playBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Play Test Sound
+        </button>
+      </div>
+    </section>
+
+    <footer class="info-footer">
+      <span>v0.1.0-alpha</span>
+      <span>Live on GitHub Pages</span>
+    </footer>
+  </div>
+
+  <script>
+    // Create animated visualizer bars
+    const waveContainer = document.getElementById('waveBars');
+    const barCount = 36;
+    const bars = [];
+
+    for (let i = 0; i < barCount; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'wave-bar';
+      waveContainer.appendChild(bar);
+      bars.push(bar);
+    }
+
+    let isPlaying = false;
+    let animId = null;
+
+    function animateVisualizer() {
+      if (!isPlaying) {
+        bars.forEach((bar, idx) => {
+          const defaultH = Math.sin(idx * 0.2) * 15 + 25;
+          bar.style.height = defaultH + '%';
+        });
+        return;
+      }
+
+      bars.forEach((bar) => {
+        const height = Math.floor(Math.random() * 85) + 15;
+        bar.style.height = height + '%';
+      });
+
+      animId = requestAnimationFrame(() => {
+        setTimeout(animateVisualizer, 50);
+      });
+    }
+
+    animateVisualizer();
+
+    // Web Audio synthesizer for test sound
+    const playBtn = document.getElementById('playBtn');
+    let audioCtx = null;
+
+    playBtn.addEventListener('click', () => {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+
+      // Play chord progression (C-major 7th arpeggio / chord chime)
+      const now = audioCtx.currentTime;
+      const notes = [261.63, 329.63, 392.00, 493.88, 523.25]; // C4, E4, G4, B4, C5
+
+      isPlaying = true;
+      animateVisualizer();
+
+      notes.forEach((freq, index) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + index * 0.08);
+
+        gain.gain.setValueAtTime(0, now + index * 0.08);
+        gain.gain.linearRampToValueAtTime(0.15, now + index * 0.08 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + index * 0.08 + 1.2);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start(now + index * 0.08);
+        osc.stop(now + index * 0.08 + 1.3);
+      });
+
+      setTimeout(() => {
+        isPlaying = false;
+        animateVisualizer();
+      }, 1500);
+    });
+  </script>
+</body>
+</html>
