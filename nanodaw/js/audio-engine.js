@@ -1,7 +1,7 @@
 /**
  * AudioEngine - High performance Web Audio multitrack playback engine
  * Handles sample-accurate scheduling, track offsets, gain nodes, VU metering,
- * seeking, and loop regions.
+ * seeking, loop regions, and iOS Safari audio session unlocking.
  */
 class AudioEngine {
   constructor(stateManager) {
@@ -22,7 +22,6 @@ class AudioEngine {
     
     this.rafId = null;
     this.eventListeners = new Map();
-    this.loadingProgress = new Map();
 
     this.webAudioUnlocked = false;
     this.htmlAudioUnlocked = false;
@@ -39,21 +38,16 @@ class AudioEngine {
     if (this.unlockListenersAttached) return;
     this.unlockListenersAttached = true;
 
-    const unlockHandler = async () => {
-      await this.unlockAudio();
-      if (this.audioCtx && this.audioCtx.state === 'running' && this.htmlAudioUnlocked) {
-        ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(evt => {
-          window.removeEventListener(evt, unlockHandler, true);
-        });
-      }
+    const unlockHandler = () => {
+      this.unlockAudioSync();
     };
 
-    ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(evt => {
+    ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'click', 'keydown'].forEach(evt => {
       window.addEventListener(evt, unlockHandler, { capture: true, passive: true });
     });
 
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && this.audioCtx && this.isPlaying) {
+      if (document.visibilityState === 'visible' && this.audioCtx) {
         if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
           this.audioCtx.resume().catch(e => console.warn('Resume on visibilitychange failed:', e));
         }
@@ -61,21 +55,17 @@ class AudioEngine {
     });
   }
 
-  async unlockAudio() {
+  unlockAudioSync() {
     this.initAudioContext();
     if (!this.audioCtx) return;
 
-    // 1. Resume Web Audio context
+    // 1. Resume Web Audio context synchronously within user gesture stack
     if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
-      try {
-        await this.audioCtx.resume();
-      } catch (e) {
-        console.warn('AudioContext resume failed:', e);
-      }
+      this.audioCtx.resume().catch(e => console.warn('AudioContext resume failed:', e));
     }
 
-    // 2. Play 1-sample silent Web Audio buffer to kickstart WebKit audio pipeline
-    if (!this.webAudioUnlocked && this.audioCtx.state === 'running') {
+    // 2. Play 1-sample silent Web Audio buffer directly to destination
+    if (!this.webAudioUnlocked) {
       try {
         const buffer = this.audioCtx.createBuffer(1, 1, 22050);
         const source = this.audioCtx.createBufferSource();
@@ -84,18 +74,18 @@ class AudioEngine {
         source.start(0);
         this.webAudioUnlocked = true;
       } catch (e) {
-        console.warn('Silent buffer unlock failed:', e);
+        console.warn('Silent Web Audio buffer unlock failed:', e);
       }
     }
 
-    // 3. Play tiny HTML5 silent audio element to switch iOS session from Ambient to Playback
+    // 3. Play HTML5 silent audio element to switch iOS session from Ambient to Playback
     // (Bypasses the iPhone physical mute/silent hardware switch)
     if (!this.htmlAudioUnlocked) {
       try {
         const silentAudio = document.createElement('audio');
         silentAudio.setAttribute('playsinline', '');
         silentAudio.setAttribute('webkit-playsinline', '');
-        silentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+        silentAudio.src = 'data:audio/mp3;base64,//OExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';
         const playPromise = silentAudio.play();
         if (playPromise !== undefined) {
           playPromise.then(() => {
@@ -104,7 +94,7 @@ class AudioEngine {
           }).catch(() => {});
         }
       } catch (e) {
-        console.warn('HTML5 audio unlock failed:', e);
+        console.warn('HTML5 silent audio unlock failed:', e);
       }
     }
   }
@@ -133,14 +123,16 @@ class AudioEngine {
       this.audioCtx = new AudioCtxClass();
       
       this.masterGain = this.audioCtx.createGain();
-      this.masterGain.gain.setValueAtTime(1.0, this.audioCtx.currentTime);
+      this.masterGain.gain.value = 1.0;
 
       this.masterAnalyser = this.audioCtx.createAnalyser();
       this.masterAnalyser.fftSize = 128;
       this.masterAnalyser.smoothingTimeConstant = 0.8;
 
+      // Connect master gain DIRECTLY to destination speakers
+      this.masterGain.connect(this.audioCtx.destination);
+      // Branch to analyser in parallel (do NOT put analyser in series)
       this.masterGain.connect(this.masterAnalyser);
-      this.masterAnalyser.connect(this.audioCtx.destination);
     }
 
     if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
@@ -189,7 +181,7 @@ class AudioEngine {
   }
 
   /**
-   * Load all tracks for the given project
+   * Load all tracks for the given project sequentially to prevent OOM/decoder spikes on mobile
    */
   async loadProjectTracks(project, baseUrl) {
     this.initAudioContext();
@@ -202,8 +194,8 @@ class AudioEngine {
     const rawTracks = project.tracks || [];
     let loadedCount = 0;
 
-    const trackPromises = rawTracks.map(async (t, index) => {
-      // Resolve track URL relative to project JSON location
+    for (let index = 0; index < rawTracks.length; index++) {
+      const t = rawTracks[index];
       let resolvedUrl = t.url;
       try {
         resolvedUrl = new URL(t.url, baseUrl).href;
@@ -211,7 +203,7 @@ class AudioEngine {
         resolvedUrl = t.url;
       }
 
-      this.emit('track_loading', { index, name: t.name, progress: 0 });
+      this.emit('track_loading', { index, name: t.name, progress: Math.round((loadedCount / rawTracks.length) * 100) });
 
       try {
         const response = await fetch(resolvedUrl);
@@ -224,12 +216,15 @@ class AudioEngine {
 
         // Create per-track gain and analyser
         const gainNode = this.audioCtx.createGain();
+        gainNode.gain.value = typeof t.volume === 'number' ? t.volume : 1.0;
+
         const analyserNode = this.audioCtx.createAnalyser();
         analyserNode.fftSize = 64;
         analyserNode.smoothingTimeConstant = 0.6;
 
+        // Direct parallel connection
+        gainNode.connect(this.masterGain);
         gainNode.connect(analyserNode);
-        analyserNode.connect(this.masterGain);
 
         const trackData = {
           index,
@@ -250,16 +245,16 @@ class AudioEngine {
         this.tracks[index] = trackData;
         loadedCount++;
         this.emit('track_loaded', { index, track: trackData, loadedCount, total: rawTracks.length });
-        return trackData;
       } catch (err) {
         console.error(`Failed to load track ${index} (${t.name}):`, err);
         this.emit('track_error', { index, name: t.name, error: err.message });
-        // Create silent dummy buffer so app still functions
+
         const dummyBuffer = this.audioCtx.createBuffer(2, this.audioCtx.sampleRate * 2, this.audioCtx.sampleRate);
         const gainNode = this.audioCtx.createGain();
+        gainNode.gain.value = 1.0;
         const analyserNode = this.audioCtx.createAnalyser();
+        gainNode.connect(this.masterGain);
         gainNode.connect(analyserNode);
-        analyserNode.connect(this.masterGain);
 
         const dummyTrack = {
           index,
@@ -275,11 +270,8 @@ class AudioEngine {
           hasError: true
         };
         this.tracks[index] = dummyTrack;
-        return dummyTrack;
       }
-    });
-
-    await Promise.all(trackPromises);
+    }
 
     // Apply initial volume/mute/solo states from stateManager
     this.updateAllGains();
@@ -327,10 +319,9 @@ class AudioEngine {
       if (!track || !track.gainNode) return;
       const trackState = states[index] || { volume: 1.0, mute: false, solo: false };
 
-      let targetGain = trackState.volume;
+      let targetGain = typeof trackState.volume === 'number' ? trackState.volume : 1.0;
 
       if (hasAnySolo) {
-        // When solo is active on any track, unmute only soloed tracks
         if (!trackState.solo) {
           targetGain = 0;
         }
@@ -338,10 +329,8 @@ class AudioEngine {
         targetGain = 0;
       }
 
-      // Smooth gain ramp to avoid clicks
-      const now = this.audioCtx.currentTime;
-      track.gainNode.gain.cancelScheduledValues(now);
-      track.gainNode.gain.setTargetAtTime(targetGain, now, 0.015);
+      // Direct assignment ensures instant, bulletproof gain setting on iOS
+      track.gainNode.gain.value = targetGain;
     });
   }
 
@@ -355,23 +344,14 @@ class AudioEngine {
   setMasterVolume(vol) {
     if (!this.masterGain || !this.audioCtx) return;
     const clamped = Math.max(0, Math.min(2.0, vol));
-    this.masterGain.gain.setTargetAtTime(clamped, this.audioCtx.currentTime, 0.015);
+    this.masterGain.gain.value = clamped;
   }
 
   /**
    * Start multitrack playback from current playhead position
    */
-  async play() {
-    this.initAudioContext();
-    await this.unlockAudio();
-
-    if (this.audioCtx && (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted')) {
-      try {
-        await this.audioCtx.resume();
-      } catch (e) {
-        console.warn('AudioContext resume failed:', e);
-      }
-    }
+  play() {
+    this.unlockAudioSync();
 
     if (this.isPlaying) return;
 
@@ -430,7 +410,7 @@ class AudioEngine {
       } else {
         // Track is already in progress
         const offsetInTrack = currentPlayhead - offset;
-        source.start(audioNow, offsetInTrack);
+        source.start(0, offsetInTrack);
       }
     });
   }
