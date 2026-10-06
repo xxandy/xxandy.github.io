@@ -72,8 +72,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         projectTitleEl.textContent = projectData.title || 'Untitled Project';
       }
 
-      // Initialize state
-      state.initProject(projectData, urlOrPath);
+      // Initialize state with full absolute URL
+      state.initProject(projectData, fullUrl);
 
       // Resolve base URL for relative audio tracks
       const baseUrl = new URL('.', fullUrl).href;
