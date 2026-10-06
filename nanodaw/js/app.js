@@ -58,7 +58,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       setLoading(true, 'Fetching project definition...', 10);
       
       const fullUrl = new URL(urlOrPath, window.location.href).href;
-      const res = await fetch(fullUrl);
+      const res = await fetch(fullUrl, { cache: 'no-cache' });
       if (!res.ok) {
         throw new Error(`Failed to load project JSON: HTTP ${res.status}`);
       }
