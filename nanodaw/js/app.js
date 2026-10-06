@@ -187,13 +187,75 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Master Volume
+  function updateMasterVolume(vol) {
+    audio.setMasterVolume(vol);
+    if (masterVolSlider) masterVolSlider.value = vol;
+    if (masterVolVal) masterVolVal.textContent = timeline.formatGainDb(vol);
+
+    const overlayVol = document.getElementById('overlayMasterVol');
+    const overlayVolVal = document.getElementById('overlayMasterVolVal');
+    if (overlayVol) overlayVol.value = vol;
+    if (overlayVolVal) overlayVolVal.textContent = timeline.formatGainDb(vol);
+  }
+
   if (masterVolSlider) {
     masterVolSlider.addEventListener('input', (e) => {
-      const vol = parseFloat(e.target.value);
-      audio.setMasterVolume(vol);
-      if (masterVolVal) {
-        masterVolVal.textContent = timeline.formatGainDb(vol);
-      }
+      updateMasterVolume(parseFloat(e.target.value));
+    });
+  }
+
+  // Tools Overlay (Mobile Drawer)
+  const btnToggleTools = document.getElementById('btnToggleTools');
+  const toolsOverlay = document.getElementById('toolsOverlay');
+  const btnCloseToolsOverlay = document.getElementById('btnCloseToolsOverlay');
+  const overlayMasterVol = document.getElementById('overlayMasterVol');
+  const overlayBtnLoop = document.getElementById('overlayBtnLoop');
+  const overlayZoomIn = document.getElementById('overlayZoomIn');
+  const overlayZoomOut = document.getElementById('overlayZoomOut');
+  const overlayZoomFit = document.getElementById('overlayZoomFit');
+  const overlayBtnOpenProject = document.getElementById('overlayBtnOpenProject');
+
+  if (btnToggleTools && toolsOverlay) {
+    btnToggleTools.addEventListener('click', () => {
+      toolsOverlay.classList.remove('hidden');
+    });
+  }
+
+  if (btnCloseToolsOverlay && toolsOverlay) {
+    btnCloseToolsOverlay.addEventListener('click', () => {
+      toolsOverlay.classList.add('hidden');
+    });
+  }
+
+  if (overlayMasterVol) {
+    overlayMasterVol.addEventListener('input', (e) => {
+      updateMasterVolume(parseFloat(e.target.value));
+    });
+  }
+
+  if (overlayBtnLoop) {
+    overlayBtnLoop.addEventListener('click', () => {
+      if (btnLoop) btnLoop.click();
+      overlayBtnLoop.textContent = audio.isLooping ? 'Loop: ON' : 'Loop: OFF';
+    });
+  }
+
+  if (overlayZoomIn) {
+    overlayZoomIn.addEventListener('click', () => timeline.applyZoom(timeline.pixelsPerSecond * 1.3));
+  }
+  if (overlayZoomOut) {
+    overlayZoomOut.addEventListener('click', () => timeline.applyZoom(timeline.pixelsPerSecond / 1.3));
+  }
+  if (overlayZoomFit) {
+    overlayZoomFit.addEventListener('click', () => {
+      if (btnZoomFit) btnZoomFit.click();
+      toolsOverlay.classList.add('hidden');
+    });
+  }
+  if (overlayBtnOpenProject) {
+    overlayBtnOpenProject.addEventListener('click', () => {
+      toolsOverlay.classList.add('hidden');
+      if (projectModal) projectModal.classList.remove('hidden');
     });
   }
 
@@ -211,7 +273,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (btnZoomFit) {
     btnZoomFit.addEventListener('click', () => {
       const totalDur = audio.getTotalDuration();
-      const visibleW = timeline.timelineScrollArea.clientWidth - 40;
+      const visibleW = timeline.timelineScrollArea.clientWidth - timeline.getTrackHeaderWidth() - 40;
       const fitZoom = Math.max(timeline.minZoom, visibleW / totalDur);
       timeline.applyZoom(fitZoom);
     });

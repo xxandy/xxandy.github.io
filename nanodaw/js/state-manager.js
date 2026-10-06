@@ -10,8 +10,15 @@ class StateManager {
     this.tracksState = []; // Array of { volume: number, mute: boolean, solo: boolean }
     this.markers = [];     // Array of { id: string, name: string, time: number, color: string }
     this.currentTime = 0;
+    this.selectedTrackIndex = 0;
     this.listeners = new Set();
     this.debounceTimer = null;
+  }
+
+  selectTrack(index) {
+    const maxIdx = (this.project?.tracks?.length || 1) - 1;
+    this.selectedTrackIndex = Math.max(0, Math.min(maxIdx, index));
+    this.notify('track_selected', { index: this.selectedTrackIndex });
   }
 
   subscribe(callback) {

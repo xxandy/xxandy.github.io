@@ -98,6 +98,13 @@ class WaveformCache {
     const isMuted = options.isMuted;
     const isSoloed = options.isSoloed;
     const isDimmed = options.isDimmed;
+    const isSelected = options.isSelected;
+
+    // Selected Track background wash
+    if (isSelected) {
+      ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.02)' : (color + '10');
+      ctx.fillRect(0, 0, width, height);
+    }
 
     // Draw track block container
     const blockX = Math.max(0, trackStartX);
@@ -106,20 +113,29 @@ class WaveformCache {
 
     if (blockW > 0) {
       // Track block background
-      ctx.fillStyle = isDimmed ? 'rgba(30, 35, 45, 0.4)' : 'rgba(20, 26, 38, 0.85)';
+      if (isSelected) {
+        ctx.fillStyle = isDimmed ? 'rgba(40, 45, 60, 0.5)' : 'rgba(26, 34, 48, 0.95)';
+      } else {
+        ctx.fillStyle = isDimmed ? 'rgba(30, 35, 45, 0.4)' : 'rgba(20, 26, 38, 0.85)';
+      }
       ctx.beginPath();
       ctx.roundRect(trackStartX, 4, trackWidth, height - 8, 6);
       ctx.fill();
 
       // Track block border
-      ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.05)' : (color + '44');
-      ctx.lineWidth = 1;
+      if (isSelected) {
+        ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.15)' : color;
+        ctx.lineWidth = 1.5;
+      } else {
+        ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.05)' : (color + '44');
+        ctx.lineWidth = 1;
+      }
       ctx.stroke();
 
       // Track start marker line if within view
       if (trackStartX >= 0 && trackStartX <= width) {
         ctx.fillStyle = color;
-        ctx.fillRect(trackStartX, 4, 3, height - 8);
+        ctx.fillRect(trackStartX, 4, isSelected ? 4 : 3, height - 8);
       }
     }
 
