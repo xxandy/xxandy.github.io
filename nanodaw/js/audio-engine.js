@@ -24,8 +24,89 @@ class AudioEngine {
     this.eventListeners = new Map();
     this.loadingProgress = new Map();
 
+    this.webAudioUnlocked = false;
+    this.htmlAudioUnlocked = false;
+    this.unlockListenersAttached = false;
+
     // Subscribe to state updates
     this.state.subscribe((type, payload) => this.handleStateChange(type, payload));
+
+    // Initialize iOS / Safari touch unlock listeners immediately
+    this.initUnlockListeners();
+  }
+
+  initUnlockListeners() {
+    if (this.unlockListenersAttached) return;
+    this.unlockListenersAttached = true;
+
+    const unlockHandler = async () => {
+      await this.unlockAudio();
+      if (this.audioCtx && this.audioCtx.state === 'running' && this.htmlAudioUnlocked) {
+        ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(evt => {
+          window.removeEventListener(evt, unlockHandler, true);
+        });
+      }
+    };
+
+    ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(evt => {
+      window.addEventListener(evt, unlockHandler, { capture: true, passive: true });
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && this.audioCtx && this.isPlaying) {
+        if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
+          this.audioCtx.resume().catch(e => console.warn('Resume on visibilitychange failed:', e));
+        }
+      }
+    });
+  }
+
+  async unlockAudio() {
+    this.initAudioContext();
+    if (!this.audioCtx) return;
+
+    // 1. Resume Web Audio context
+    if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
+      try {
+        await this.audioCtx.resume();
+      } catch (e) {
+        console.warn('AudioContext resume failed:', e);
+      }
+    }
+
+    // 2. Play 1-sample silent Web Audio buffer to kickstart WebKit audio pipeline
+    if (!this.webAudioUnlocked && this.audioCtx.state === 'running') {
+      try {
+        const buffer = this.audioCtx.createBuffer(1, 1, 22050);
+        const source = this.audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.audioCtx.destination);
+        source.start(0);
+        this.webAudioUnlocked = true;
+      } catch (e) {
+        console.warn('Silent buffer unlock failed:', e);
+      }
+    }
+
+    // 3. Play tiny HTML5 silent audio element to switch iOS session from Ambient to Playback
+    // (Bypasses the iPhone physical mute/silent hardware switch)
+    if (!this.htmlAudioUnlocked) {
+      try {
+        const silentAudio = document.createElement('audio');
+        silentAudio.setAttribute('playsinline', '');
+        silentAudio.setAttribute('webkit-playsinline', '');
+        silentAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+        const playPromise = silentAudio.play();
+        if (playPromise !== undefined) {
+          playPromise.then(() => {
+            silentAudio.pause();
+            this.htmlAudioUnlocked = true;
+          }).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('HTML5 audio unlock failed:', e);
+      }
+    }
   }
 
   on(event, callback) {
@@ -45,6 +126,10 @@ class AudioEngine {
   initAudioContext() {
     if (!this.audioCtx) {
       const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtxClass) {
+        console.error('Web Audio API is not supported in this browser.');
+        return;
+      }
       this.audioCtx = new AudioCtxClass();
       
       this.masterGain = this.audioCtx.createGain();
@@ -58,9 +143,49 @@ class AudioEngine {
       this.masterAnalyser.connect(this.audioCtx.destination);
     }
 
-    if (this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume();
+    if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
+      this.audioCtx.resume().catch(() => {});
     }
+  }
+
+  /**
+   * Decode audio data safely across all Safari / WebKit and Blink engines
+   */
+  decodeAudio(arrayBuffer) {
+    return new Promise((resolve, reject) => {
+      this.initAudioContext();
+      if (!this.audioCtx) {
+        reject(new Error('AudioContext not initialized'));
+        return;
+      }
+
+      // Clone arrayBuffer to prevent detachment errors on WebKit
+      const bufferCopy = arrayBuffer.slice(0);
+      let isSettled = false;
+
+      const onSuccess = (decoded) => {
+        if (!isSettled) {
+          isSettled = true;
+          resolve(decoded);
+        }
+      };
+
+      const onError = (err) => {
+        if (!isSettled) {
+          isSettled = true;
+          reject(err || new Error('decodeAudioData failed'));
+        }
+      };
+
+      try {
+        const promise = this.audioCtx.decodeAudioData(bufferCopy, onSuccess, onError);
+        if (promise && typeof promise.then === 'function') {
+          promise.then(onSuccess).catch(onError);
+        }
+      } catch (e) {
+        onError(e);
+      }
+    });
   }
 
   /**
@@ -95,7 +220,7 @@ class AudioEngine {
         }
         
         const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await this.audioCtx.decodeAudioData(arrayBuffer);
+        const audioBuffer = await this.decodeAudio(arrayBuffer);
 
         // Create per-track gain and analyser
         const gainNode = this.audioCtx.createGain();
@@ -236,8 +361,18 @@ class AudioEngine {
   /**
    * Start multitrack playback from current playhead position
    */
-  play() {
+  async play() {
     this.initAudioContext();
+    await this.unlockAudio();
+
+    if (this.audioCtx && (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted')) {
+      try {
+        await this.audioCtx.resume();
+      } catch (e) {
+        console.warn('AudioContext resume failed:', e);
+      }
+    }
+
     if (this.isPlaying) return;
 
     const totalDur = this.getTotalDuration();
@@ -246,7 +381,7 @@ class AudioEngine {
     }
 
     this.isPlaying = true;
-    this.playbackStartTime = this.audioCtx.currentTime;
+    this.playbackStartTime = this.audioCtx ? this.audioCtx.currentTime : 0;
     this.playbackStartOffset = this.playheadPosition;
 
     this.scheduleTrackSources();
