@@ -609,6 +609,18 @@ class TimelineUI {
       sidebarCell.className = 'track-sidebar-cell';
       sidebarCell.style.borderLeft = `4px solid ${color}`;
 
+      // In mobile mode only: first click selects track; when already selected, next click toggles mute
+      sidebarCell.addEventListener('click', (e) => {
+        if (this.isMobile()) {
+          e.stopPropagation();
+          if (this.state.selectedTrackIndex === index) {
+            this.state.toggleTrackMute(index);
+          } else {
+            this.state.selectTrack(index);
+          }
+        }
+      });
+
       const offsetStr = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
 
       // 1. Desktop Track Header content
@@ -647,7 +659,7 @@ class TimelineUI {
       const mobileHandle = document.createElement('div');
       mobileHandle.className = 'mobile-track-handle';
       mobileHandle.innerHTML = `
-        <span class="track-handle-dot" style="background: ${color}; color: ${color};"></span>
+        <span class="track-handle-dot ${trackState.mute ? 'muted' : ''}" style="background: ${color}; color: ${color};" title="Track ${index + 1}: ${trackState.mute ? 'Muted' : 'Active'}"></span>
         <span class="track-handle-num">${index + 1}</span>
       `;
 
@@ -663,14 +675,6 @@ class TimelineUI {
       canvas.className = 'track-canvas';
       canvas.dataset.index = index;
       lane.appendChild(canvas);
-
-      // Track Lane click to scrub & select
-      lane.addEventListener('click', (e) => {
-        const rect = lane.getBoundingClientRect();
-        const clickX = e.clientX - rect.left;
-        const time = Math.max(0, clickX / this.pixelsPerSecond);
-        this.audio.seek(time);
-      });
 
       row.appendChild(lane);
       this.tracksContainer.appendChild(row);

@@ -759,6 +759,7 @@ body {
   height: 100%;
   width: 100%;
   gap: 4px;
+  cursor: pointer;
 }
 
 .track-handle-dot {
@@ -766,13 +767,28 @@ body {
   height: 14px;
   border-radius: 50%;
   border: 2px solid transparent;
-  transition: transform 0.15s, box-shadow 0.15s;
+  transition: transform 0.15s, box-shadow 0.15s, background-color 0.15s, border-color 0.15s, opacity 0.15s;
+  cursor: pointer;
+}
+
+.track-handle-dot.muted {
+  background: transparent !important;
+  border-color: currentColor !important;
+  opacity: 0.6;
 }
 
 .track-row.track-selected .track-handle-dot {
   transform: scale(1.25);
   box-shadow: 0 0 10px currentColor;
   border-color: #fff;
+}
+
+.track-row.track-selected .track-handle-dot.muted {
+  transform: scale(1.25);
+  background: transparent !important;
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.7);
+  opacity: 1;
 }
 
 .track-handle-num {
