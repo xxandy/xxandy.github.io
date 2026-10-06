@@ -372,6 +372,17 @@ class TimelineUI {
     }
   }
 
+  scrollToTime(time) {
+    if (!this.timelineScrollArea) return;
+    const headerWidth = this.getTrackHeaderWidth();
+    const playheadX = headerWidth + (time * this.pixelsPerSecond);
+    const viewWidth = this.timelineScrollArea.clientWidth;
+    if (playheadX > viewWidth - 80 || playheadX < headerWidth + 40) {
+      this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - (viewWidth / 2));
+      this.scrollLeft = this.timelineScrollArea.scrollLeft;
+    }
+  }
+
   renderRuler() {
     if (!this.rulerCanvas) return;
 
@@ -728,7 +739,9 @@ class TimelineUI {
   }
 
   updatePlayheadPosition() {
-    const time = this.audio.playheadPosition;
+    const time = (this.audio && this.audio.playheadPosition !== undefined && this.audio.playheadPosition > 0)
+      ? this.audio.playheadPosition
+      : (this.state.currentTime || 0);
     const headerWidth = this.getTrackHeaderWidth();
     const playheadX = headerWidth + (time * this.pixelsPerSecond);
 

@@ -49,6 +49,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   audio.on('all_tracks_loaded', () => {
     setLoading(false);
     timeline.render();
+    if (state.currentTime > 0) {
+      timeline.scrollToTime(state.currentTime);
+    }
     showToast(`Loaded ${audio.tracks.length} tracks successfully`, 'success');
   });
 
@@ -82,6 +85,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Seek to initial time if provided in URL
       if (state.currentTime > 0) {
         audio.seek(state.currentTime);
+        timeline.scrollToTime(state.currentTime);
       }
 
     } catch (err) {

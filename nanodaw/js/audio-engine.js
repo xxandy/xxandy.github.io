@@ -68,8 +68,11 @@ class AudioEngine {
    */
   async loadProjectTracks(project, baseUrl) {
     this.initAudioContext();
-    this.stop();
+    this.isPlaying = false;
+    this.stopAllSources();
+    this.stopPlayheadTracker();
     this.tracks = [];
+    const targetPlayhead = (this.state && this.state.currentTime > 0) ? this.state.currentTime : 0;
 
     const rawTracks = project.tracks || [];
     let loadedCount = 0;
@@ -161,6 +164,14 @@ class AudioEngine {
     this.loopStart = 0;
     this.loopEnd = totalDuration;
 
+    // Restore initial playhead position if set in state
+    if (targetPlayhead > 0) {
+      this.seek(targetPlayhead);
+    } else {
+      this.playheadPosition = 0;
+      this.emit('time_update', { time: 0 });
+    }
+
     this.emit('all_tracks_loaded', { tracks: this.tracks, totalDuration });
     return this.tracks;
   }
@@ -173,6 +184,9 @@ class AudioEngine {
         if (end > maxEnd) maxEnd = end;
       }
     });
+    if (maxEnd === 0 && this.state) {
+      maxEnd = this.state.getProjectDuration();
+    }
     return Math.max(maxEnd, 5);
   }
 
