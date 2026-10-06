@@ -10,7 +10,7 @@ class TimelineUI {
     this.waveforms = waveformCache;
 
     // Viewport & Zoom settings
-    this.pixelsPerSecond = 60; // Zoom level
+    this.pixelsPerSecond = this.state.zoom || 60; // Zoom level
     this.minZoom = 15;
     this.maxZoom = 300;
     this.scrollLeft = 0;
@@ -198,12 +198,23 @@ class TimelineUI {
 
     // State changes
     this.state.subscribe((type, payload) => {
-      if (type === 'project_loaded' || type === 'track_volume' || type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
+      if (type === 'project_loaded') {
+        if (this.state.zoom && this.state.zoom !== this.pixelsPerSecond) {
+          this.pixelsPerSecond = this.state.zoom;
+          this.updateTimelineDimensions();
+        }
+        this.render();
+        this.updateInspectorPane();
+      } else if (type === 'track_volume' || type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
         this.render();
         this.updateInspectorPane();
       } else if (type === 'track_selected') {
         this.render();
         this.updateInspectorPane();
+      } else if (type === 'zoom_changed') {
+        if (payload.zoom && payload.zoom !== this.pixelsPerSecond) {
+          this.applyZoom(payload.zoom);
+        }
       } else if (type === 'marker_added' || type === 'marker_updated' || type === 'marker_deleted') {
         this.renderMarkerElements();
         this.renderRuler();
@@ -326,6 +337,7 @@ class TimelineUI {
     focalTime = Math.max(0, focalTime);
 
     this.pixelsPerSecond = clampedZoom;
+    this.state.setZoom(this.pixelsPerSecond);
     this.updateTimelineDimensions();
 
     if (originClientX !== null) {

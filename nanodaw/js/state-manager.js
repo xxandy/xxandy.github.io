@@ -11,8 +11,17 @@ class StateManager {
     this.markers = [];     // Array of { id: string, name: string, time: number, color: string }
     this.currentTime = 0;
     this.selectedTrackIndex = 0;
+    this.zoom = 60; // Pixels per second zoom factor
     this.listeners = new Set();
     this.debounceTimer = null;
+  }
+
+  setZoom(zoom) {
+    const clamped = Math.max(15, Math.min(300, Math.round(zoom)));
+    if (this.zoom !== clamped) {
+      this.zoom = clamped;
+      this.notify('zoom_changed', { zoom: this.zoom });
+    }
   }
 
   selectTrack(index) {
@@ -140,6 +149,12 @@ class StateManager {
           this.markers = loadedMarkers;
         }
       }
+    // 6. Zoom factor: "z=75"
+    if (params.has('z')) {
+      const zVal = parseFloat(params.get('z'));
+      if (!isNaN(zVal) && zVal >= 10 && zVal <= 500) {
+        this.zoom = Math.round(zVal);
+      }
     }
   }
 
@@ -162,14 +177,14 @@ class StateManager {
     hashParams.set('v', volStr);
 
     // Mutes
-    const muteStr = this.tracksState.map(t => t.mute ? '1' : '0').join(',');
     if (this.tracksState.some(t => t.mute)) {
+      const muteStr = this.tracksState.map(t => t.mute ? '1' : '0').join(',');
       hashParams.set('m', muteStr);
     }
 
     // Solos
-    const soloStr = this.tracksState.map(t => t.solo ? '1' : '0').join(',');
     if (this.tracksState.some(t => t.solo)) {
+      const soloStr = this.tracksState.map(t => t.solo ? '1' : '0').join(',');
       hashParams.set('s', soloStr);
     }
 
@@ -179,6 +194,11 @@ class StateManager {
         .map(m => `${encodeURIComponent(m.name)}@${Number(m.time.toFixed(2))}`)
         .join(';');
       hashParams.set('markers', markerStr);
+    }
+
+    // Zoom factor
+    if (this.zoom) {
+      hashParams.set('z', Math.round(this.zoom));
     }
 
     // Playhead time
