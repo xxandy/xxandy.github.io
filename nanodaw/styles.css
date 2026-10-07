@@ -102,7 +102,8 @@ body {
   z-index: 60;
 }
 
-.logo-icon-wrap:hover {
+.logo-icon-wrap:hover,
+.logo-icon-wrap.expanded {
   transform: scale(2.45);
   z-index: 100;
   border-color: #f97316;
