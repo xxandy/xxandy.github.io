@@ -534,17 +534,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       logoWrap.classList.toggle('expanded');
     });
 
-    // Collapse when tapping anywhere on the UX
-    document.addEventListener('click', (e) => {
+    // Collapse when clicking or tapping anywhere outside the logo
+    document.addEventListener('pointerdown', (e) => {
       if (logoWrap.classList.contains('expanded') && !logoWrap.contains(e.target)) {
         logoWrap.classList.remove('expanded');
       }
     });
-
-    document.addEventListener('touchstart', (e) => {
-      if (logoWrap.classList.contains('expanded') && !logoWrap.contains(e.target)) {
-        logoWrap.classList.remove('expanded');
-      }
-    }, { passive: true });
   }
 });

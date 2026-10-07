@@ -102,7 +102,16 @@ body {
   z-index: 60;
 }
 
-.logo-icon-wrap:hover,
+@media (hover: hover) {
+  .logo-icon-wrap:hover {
+    transform: scale(2.45);
+    z-index: 100;
+    border-color: #f97316;
+    background: radial-gradient(ellipse at center, #ffffff 62%, #fff7ed 85%, #fed7aa 100%);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.75), 0 0 24px rgba(249, 115, 22, 0.45), inset 0 0 6px rgba(251, 146, 60, 0.2);
+  }
+}
+
 .logo-icon-wrap.expanded {
   transform: scale(2.45);
   z-index: 100;
