@@ -69,7 +69,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const projectData = await res.json();
       
       // Update page title
-      document.title = `NanoDAW - ${projectData.title || 'Untitled Project'}`;
+      document.title = `NANOdaw - ${projectData.title || 'Untitled Project'}`;
       const projectTitleEl = document.getElementById('projectTitle');
       if (projectTitleEl) {
         projectTitleEl.textContent = projectData.title || 'Untitled Project';
@@ -330,13 +330,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function handleShare() {
     const shareUrl = state.buildShareableUrl(true);
-    const title = state.project?.title || 'NanoDAW Session';
-    const text = `Listen to "${title}" multitrack recording on NanoDAW with customized mix and markers:`;
+    const title = state.project?.title || 'NANOdaw Session';
+    const text = `Listen to "${title}" multitrack recording on NANOdaw with customized mix and markers:`;
 
     if (navigator.share) {
       try {
         await navigator.share({
-          title: `NanoDAW - ${title}`,
+          title: `NANOdaw - ${title}`,
           text: text,
           url: shareUrl
         });
@@ -439,7 +439,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const blob = new Blob([text], { type: 'application/json' });
         const localUrl = URL.createObjectURL(blob);
 
-        document.title = `NanoDAW - ${projectData.title || file.name}`;
+        document.title = `NANOdaw - ${projectData.title || file.name}`;
         state.initProject(projectData, localUrl);
         await audio.loadProjectTracks(projectData, window.location.href);
       } catch (err) {
