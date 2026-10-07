@@ -81,24 +81,33 @@ body {
   gap: 9px;
   text-decoration: none;
   flex-shrink: 0;
+  position: relative;
+  z-index: 60;
 }
 
 .logo-icon-wrap {
   height: 28px;
   padding: 2px 7px;
-  background: linear-gradient(135deg, #fffbf5 0%, #ffedd5 45%, #fed7aa 100%);
-  border: 1px solid rgba(251, 146, 60, 0.45);
+  background: radial-gradient(ellipse at center, #ffffff 58%, #fff7ed 82%, #fed7aa 100%);
+  border: 1.5px solid #fb923c;
   border-radius: 7px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 8px rgba(249, 115, 22, 0.2), 0 0 12px rgba(254, 215, 170, 0.25);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 2px 8px rgba(249, 115, 22, 0.2), inset 0 0 4px rgba(251, 146, 60, 0.15);
+  transform-origin: top left;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease, border-color 0.25s ease;
+  cursor: pointer;
+  position: relative;
+  z-index: 60;
 }
 
 .logo-icon-wrap:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 3px 12px rgba(249, 115, 22, 0.3), 0 0 16px rgba(254, 215, 170, 0.35);
+  transform: scale(2.45);
+  z-index: 100;
+  border-color: #f97316;
+  background: radial-gradient(ellipse at center, #ffffff 62%, #fff7ed 85%, #fed7aa 100%);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.75), 0 0 24px rgba(249, 115, 22, 0.45), inset 0 0 6px rgba(251, 146, 60, 0.2);
 }
 
 .app-logo-img {
@@ -107,6 +116,7 @@ body {
   max-width: 44px;
   display: block;
   object-fit: contain;
+  filter: drop-shadow(0 0.5px 1px rgba(0, 0, 0, 0.1));
 }
 
 .app-title {
