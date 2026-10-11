@@ -302,15 +302,19 @@ class StateManager {
   }
 
   getProjectDuration() {
-    if (!this.project || !this.project.tracks) return 30;
+    if (!this.project || !this.project.tracks || this.project.tracks.length === 0) return 266;
+    let hasExplicit = false;
     let maxDur = 0;
     this.project.tracks.forEach(t => {
       const offset = Number(t.offset) || 0;
-      const dur = Number(t.duration) || 30;
-      if (offset + dur > maxDur) {
-        maxDur = offset + dur;
+      if (typeof t.duration === 'number' && t.duration > 0) {
+        hasExplicit = true;
+        if (offset + t.duration > maxDur) {
+          maxDur = offset + t.duration;
+        }
       }
     });
-    return Math.max(maxDur, 10);
+    if (hasExplicit) return Math.max(maxDur, 5);
+    return 266;
   }
 }

@@ -258,6 +258,12 @@ class TimelineUI {
       this.updateTrackStatus(trackIndex);
     });
 
+    this.audio.on('track_duration_updated', () => {
+      this.updateTimelineDimensions();
+      this.renderRuler();
+      this.renderWaveforms();
+    });
+
     // State changes
     this.state.subscribe((type, payload) => {
       if (type === 'project_loaded') {

@@ -35,6 +35,84 @@ class TrackDataLoader {
     })();
     return this.fetchPromise;
   }
+
+  /**
+   * Fast header parser to determine exact audio duration from buffer bytes
+   */
+  detectDuration(buf) {
+    if (!buf || buf.length < 32) return null;
+
+    // 1. WAV header
+    if (buf.length >= 44 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46) { // 'RIFF'
+      let offset = 12;
+      let sampleRate = 44100;
+      let channels = 2;
+      let bitsPerSample = 16;
+      let dataSize = 0;
+      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      while (offset < buf.length - 8) {
+        const id = String.fromCharCode(buf[offset], buf[offset+1], buf[offset+2], buf[offset+3]);
+        const size = view.getUint32(offset + 4, true);
+        if (id === 'fmt ') {
+          channels = view.getUint16(offset + 10, true);
+          sampleRate = view.getUint32(offset + 12, true);
+          bitsPerSample = view.getUint16(offset + 22, true);
+        } else if (id === 'data') {
+          dataSize = size;
+          break;
+        }
+        offset += 8 + size;
+      }
+      if (dataSize > 0 && sampleRate > 0 && channels > 0) {
+        return dataSize / (sampleRate * channels * (bitsPerSample / 8));
+      }
+    }
+
+    // 2. MP3 Xing / Info header (standard in LAME, FFmpeg, Lavf)
+    const limit = Math.min(buf.length - 16, 8192);
+    for (let i = 0; i < limit; i++) {
+      if ((buf[i] === 0x58 && buf[i+1] === 0x69 && buf[i+2] === 0x6e && buf[i+3] === 0x67) || // 'Xing'
+          (buf[i] === 0x49 && buf[i+1] === 0x6e && buf[i+2] === 0x66 && buf[i+3] === 0x6f)) {  // 'Info'
+        const view = new DataView(buf.buffer, buf.byteOffset + i, 16);
+        const flags = view.getUint32(4, false);
+        if (flags & 1) {
+          const frames = view.getUint32(8, false);
+          let sampleRate = 44100;
+          for (let h = Math.max(0, i - 160); h <= i; h++) {
+            if (buf[h] === 0xFF && (buf[h+1] & 0xE0) === 0xE0) {
+              const srIdx = (buf[h+2] >> 2) & 0x03;
+              const rates = [44100, 48000, 32000];
+              if (rates[srIdx]) sampleRate = rates[srIdx];
+              break;
+            }
+          }
+          return (frames * 1152) / sampleRate;
+        }
+      }
+    }
+
+    // 3. MP3 CBR from first valid MPEG frame
+    for (let i = 0; i < limit; i++) {
+      if (buf[i] === 0xFF && (buf[i+1] & 0xFE) === 0xFA) { // MPEG-1 Layer 3
+        const brIdx = (buf[i+2] >> 4) & 0x0F;
+        const bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+        const kbps = bitrates[brIdx];
+        if (kbps > 0) {
+          return (buf.length * 8) / (kbps * 1000);
+        }
+      }
+    }
+
+    // 4. WASM decoder seek fallback
+    if (window.mp3Decoder && typeof window.mp3Decoder.getDuration === 'function') {
+      try {
+        const dur = window.mp3Decoder.getDuration(buf);
+        if (dur > 0) return dur;
+      } catch (e) {}
+    }
+
+    return null;
+  }
 }
 
 class AudioEngine {
@@ -268,7 +346,8 @@ class AudioEngine {
       }
 
       const offset = Math.max(0, Number(t.offset) || 0);
-      const trackDuration = Math.max(5.0, Number(t.duration) || defaultDuration);
+      const hasExplicitDuration = typeof t.duration === 'number' && t.duration > 0;
+      const trackDuration = Math.max(5.0, hasExplicitDuration ? t.duration : defaultDuration);
       const numChunks = Math.ceil(trackDuration / CHUNK_DURATION);
       const chunks = [];
 
@@ -291,6 +370,8 @@ class AudioEngine {
         url: resolvedUrl,
         offset,
         duration: trackDuration,
+        hasExplicitDuration,
+        durationDetected: false,
         chunks,
         loader: new TrackDataLoader(index, resolvedUrl, this),
         sourceNodes: new Map(),
@@ -385,6 +466,33 @@ class AudioEngine {
   }
 
   /**
+   * Ensure track chunks exist up to current track duration
+   */
+  syncTrackChunks(track) {
+    const CHUNK_DURATION = 20.0;
+    const numChunks = Math.ceil(track.duration / CHUNK_DURATION);
+    while (track.chunks.length < numChunks) {
+      const k = track.chunks.length;
+      track.chunks.push({
+        index: k,
+        startTime: k * CHUNK_DURATION,
+        duration: Math.min(CHUNK_DURATION, track.duration - k * CHUNK_DURATION),
+        status: 'undecoded',
+        buffer: null,
+        minPeaks: null,
+        maxPeaks: null,
+        totalPoints: 0
+      });
+    }
+    if (track.chunks.length > numChunks) {
+      track.chunks.length = numChunks;
+    }
+    if (numChunks > 0) {
+      track.chunks[numChunks - 1].duration = track.duration - (numChunks - 1) * CHUNK_DURATION;
+    }
+  }
+
+  /**
    * Decode a specific 20-second chunk for a track
    */
   async decodeTrackChunk(trackIndex, chunkIndex) {
@@ -400,6 +508,21 @@ class AudioEngine {
     try {
       const bytes = await track.loader.ensureBuffer();
       this.ensureAudioContextUnlocked();
+
+      // Detect actual media duration if not explicitly specified in project JSON
+      if (!track.hasExplicitDuration && !track.durationDetected) {
+        const detectedDur = track.loader.detectDuration(bytes);
+        if (detectedDur && detectedDur > 1.0) {
+          track.duration = detectedDur;
+          track.durationDetected = true;
+          this.syncTrackChunks(track);
+          this.emit('track_duration_updated', {
+            trackIndex,
+            duration: track.duration,
+            totalDuration: this.getTotalDuration()
+          });
+        }
+      }
 
       const isWav = track.url.toLowerCase().endsWith('.wav');
       if (isWav) {
@@ -580,7 +703,7 @@ class AudioEngine {
         // Currently playing right now; offset into the chunk buffer
         const offsetInChunk = audioNow - chunkAudioStartTime;
         if (offsetInChunk < chunk.duration) {
-          source.start(audioNow, Math.max(0, offsetInChunk));
+          source.start(0, Math.max(0, offsetInChunk));
         } else {
           track.sourceNodes.delete(chunk.index);
           return;
