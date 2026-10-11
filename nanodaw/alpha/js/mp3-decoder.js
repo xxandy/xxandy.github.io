@@ -47,7 +47,7 @@ async function getWasmModule() {
   return wasmInstancePromise;
 }
 
-export class Mp3BlockDecoder {
+class Mp3BlockDecoder {
   constructor() {
     this.wasm = null;
   }
@@ -165,9 +165,16 @@ export class Mp3BlockDecoder {
   }
 }
 
-export const mp3Decoder = new Mp3BlockDecoder();
+const mp3Decoder = new Mp3BlockDecoder();
 
 if (typeof window !== 'undefined') {
   window.Mp3BlockDecoder = Mp3BlockDecoder;
   window.mp3Decoder = mp3Decoder;
+}
+if (typeof global !== 'undefined') {
+  global.Mp3BlockDecoder = Mp3BlockDecoder;
+  global.mp3Decoder = mp3Decoder;
+}
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { Mp3BlockDecoder, mp3Decoder };
 }

@@ -21,7 +21,7 @@ class TrackDataLoader {
     this.totalBytes = 0;
   }
 
-  async ensureFullBuffer() {
+  async ensureBuffer() {
     if (this.fullBuffer) return this.fullBuffer;
     if (this.fetchPromise) return this.fetchPromise;
 
@@ -34,46 +34,6 @@ class TrackDataLoader {
       return this.fullBuffer;
     })();
     return this.fetchPromise;
-  }
-
-  async getChunkBytes(chunkIndex, chunkDuration = 20.0, totalDuration = 266.0) {
-    if (this.fullBuffer) {
-      const bytesPerSec = totalDuration > 0 ? (this.totalBytes / totalDuration) : 32000;
-      const s = Math.max(0, Math.floor(chunkIndex * chunkDuration * bytesPerSec) - 4096);
-      const e = Math.min(this.totalBytes, Math.floor((chunkIndex + 1) * chunkDuration * bytesPerSec) + 8192);
-      return this.fullBuffer.subarray(s, e);
-    }
-
-    // Try HTTP Range request first
-    const approxBytesPerSec = 32000; // 256kbps CBR default
-    const s = Math.max(0, Math.floor(chunkIndex * chunkDuration * approxBytesPerSec) - 4096);
-    const e = Math.floor((chunkIndex + 1) * chunkDuration * approxBytesPerSec) + 8192;
-
-    try {
-      const res = await fetch(this.url, {
-        headers: { 'Range': `bytes=${s}-${e}` }
-      });
-      if (res.status === 206) {
-        const buf = await res.arrayBuffer();
-        return new Uint8Array(buf);
-      } else if (res.status === 200) {
-        const buf = await res.arrayBuffer();
-        this.fullBuffer = new Uint8Array(buf);
-        this.totalBytes = this.fullBuffer.byteLength;
-        const actualBytesPerSec = totalDuration > 0 ? (this.totalBytes / totalDuration) : 32000;
-        const actualS = Math.max(0, Math.floor(chunkIndex * chunkDuration * actualBytesPerSec) - 4096);
-        const actualE = Math.min(this.totalBytes, Math.floor((chunkIndex + 1) * chunkDuration * actualBytesPerSec) + 8192);
-        return this.fullBuffer.subarray(actualS, actualE);
-      }
-    } catch (err) {
-      // Fallback below
-    }
-
-    const full = await this.ensureFullBuffer();
-    const actualBytesPerSec = totalDuration > 0 ? (this.totalBytes / totalDuration) : 32000;
-    const actualS = Math.max(0, Math.floor(chunkIndex * chunkDuration * actualBytesPerSec) - 4096);
-    const actualE = Math.min(this.totalBytes, Math.floor((chunkIndex + 1) * chunkDuration * actualBytesPerSec) + 8192);
-    return full.subarray(actualS, actualE);
   }
 }
 
@@ -400,6 +360,31 @@ class AudioEngine {
   }
 
   /**
+   * Compute waveform peaks from Float32Array channel data
+   */
+  computePeaks(channelData, duration, pointsPerSec = 80) {
+    const totalPoints = Math.max(10, Math.floor(duration * pointsPerSec));
+    const samplesPerPoint = Math.max(1, Math.floor(channelData.length / totalPoints));
+    const minPeaks = new Float32Array(totalPoints);
+    const maxPeaks = new Float32Array(totalPoints);
+
+    for (let p = 0; p < totalPoints; p++) {
+      let min = 1.0;
+      let max = -1.0;
+      const start = p * samplesPerPoint;
+      const end = Math.min((p + 1) * samplesPerPoint, channelData.length);
+      for (let s = start; s < end; s += 4) {
+        const val = channelData[s];
+        if (val < min) min = val;
+        if (val > max) max = val;
+      }
+      minPeaks[p] = min === 1.0 ? 0 : min;
+      maxPeaks[p] = max === -1.0 ? 0 : max;
+    }
+    return { minPeaks, maxPeaks, totalPoints };
+  }
+
+  /**
    * Decode a specific 20-second chunk for a track
    */
   async decodeTrackChunk(trackIndex, chunkIndex) {
@@ -413,21 +398,41 @@ class AudioEngine {
     this.emit('chunk_loading', { trackIndex, chunkIndex });
 
     try {
-      const CHUNK_DURATION = 20.0;
-      const bytes = await track.loader.getChunkBytes(chunkIndex, CHUNK_DURATION, track.duration);
-
+      const bytes = await track.loader.ensureBuffer();
       this.ensureAudioContextUnlocked();
 
-      if (window.mp3Decoder && window.mp3Decoder.wasm) {
-        const decoded = window.mp3Decoder.decodeChunk(bytes, CHUNK_DURATION, 0.0, this.audioCtx);
+      const isWav = track.url.toLowerCase().endsWith('.wav');
+      if (isWav) {
+        if (!track.fullWavBuffer) {
+          track.fullWavBuffer = await this.decodeAudio(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+        }
+        const fullBuf = track.fullWavBuffer;
+        const startFrame = Math.floor(chunk.startTime * fullBuf.sampleRate);
+        const endFrame = Math.min(fullBuf.length, Math.floor((chunk.startTime + chunk.duration) * fullBuf.sampleRate));
+        const frames = Math.max(0, endFrame - startFrame);
+        let chunkBuf = null;
+        if (this.audioCtx && frames > 0) {
+          chunkBuf = this.audioCtx.createBuffer(fullBuf.numberOfChannels, frames, fullBuf.sampleRate);
+          for (let ch = 0; ch < fullBuf.numberOfChannels; ch++) {
+            chunkBuf.getChannelData(ch).set(fullBuf.getChannelData(ch).subarray(startFrame, endFrame));
+          }
+        }
+        chunk.buffer = chunkBuf;
+        const p = this.computePeaks(fullBuf.getChannelData(0).subarray(startFrame, endFrame), frames / fullBuf.sampleRate);
+        chunk.minPeaks = p.minPeaks;
+        chunk.maxPeaks = p.maxPeaks;
+        chunk.totalPoints = p.totalPoints;
+        chunk.status = 'decoded';
+      } else {
+        if (!window.mp3Decoder || !window.mp3Decoder.wasm) {
+          if (window.mp3Decoder) await window.mp3Decoder.init();
+        }
+        const decoded = window.mp3Decoder.decodeChunk(bytes, chunk.duration, chunk.startTime, this.audioCtx);
         chunk.buffer = decoded.audioBuffer;
+        chunk.duration = decoded.duration;
         chunk.minPeaks = decoded.minPeaks;
         chunk.maxPeaks = decoded.maxPeaks;
         chunk.totalPoints = decoded.totalPoints;
-        chunk.status = 'decoded';
-      } else {
-        const audioBuffer = await this.decodeAudio(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-        chunk.buffer = audioBuffer;
         chunk.status = 'decoded';
       }
 
@@ -437,6 +442,7 @@ class AudioEngine {
       if (this.isPlaying) {
         this.scheduleSingleChunk(track, chunk);
       }
+      return chunk;
     } catch (err) {
       console.warn(`Failed decoding track ${trackIndex} chunk ${chunkIndex}:`, err);
       chunk.status = 'error';
@@ -548,15 +554,15 @@ class AudioEngine {
    */
   scheduleSingleChunk(track, chunk) {
     if (!this.audioCtx || !this.isPlaying || !chunk.buffer || !track.gainNode) return;
-    const audioNow = this.audioCtx.currentTime;
-    const currentPlayhead = this.playheadPosition;
+
     const chunkStart = track.offset + chunk.startTime;
     const chunkEnd = chunkStart + chunk.duration;
+    const currentPlayhead = this.playheadPosition;
 
     if (currentPlayhead >= chunkEnd) return; // In the past
 
     if (!track.sourceNodes) track.sourceNodes = new Map();
-    if (track.sourceNodes.has(chunk.index)) return;
+    if (track.sourceNodes.has(chunk.index)) return; // Already scheduled
 
     try {
       const source = this.audioCtx.createBufferSource();
@@ -564,12 +570,21 @@ class AudioEngine {
       source.connect(track.gainNode);
       track.sourceNodes.set(chunk.index, source);
 
-      if (currentPlayhead < chunkStart) {
-        const delay = chunkStart - currentPlayhead;
-        source.start(audioNow + delay, 0);
+      const audioNow = this.audioCtx.currentTime;
+      const chunkAudioStartTime = this.playbackStartTime + (chunkStart - this.playbackStartOffset);
+
+      if (chunkAudioStartTime > audioNow) {
+        // Scheduled in the future at the exact hardware timestamp
+        source.start(chunkAudioStartTime, 0);
       } else {
-        const offsetInChunk = currentPlayhead - chunkStart;
-        source.start(audioNow, Math.max(0, offsetInChunk));
+        // Currently playing right now; offset into the chunk buffer
+        const offsetInChunk = audioNow - chunkAudioStartTime;
+        if (offsetInChunk < chunk.duration) {
+          source.start(audioNow, Math.max(0, offsetInChunk));
+        } else {
+          track.sourceNodes.delete(chunk.index);
+          return;
+        }
       }
 
       source.onended = () => {
