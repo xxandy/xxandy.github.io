@@ -14,7 +14,14 @@ async function getWasmModule() {
     let wasmBuffer;
     try {
       // 1. Try fetching the .wasm file if on HTTP/HTTPS
-      const wasmUrl = new URL('decoder.opt.wasm', import.meta.url).href;
+      let wasmUrl = 'js/decoder.opt.wasm';
+      try {
+        if (typeof document !== 'undefined' && document.currentScript && document.currentScript.src) {
+          wasmUrl = new URL('decoder.opt.wasm', document.currentScript.src).href;
+        } else if (typeof location !== 'undefined') {
+          wasmUrl = new URL('js/decoder.opt.wasm', location.href).href;
+        }
+      } catch (e) {}
       const res = await fetch(wasmUrl);
       if (res.ok) {
         wasmBuffer = await res.arrayBuffer();
