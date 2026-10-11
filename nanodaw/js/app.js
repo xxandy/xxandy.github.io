@@ -40,7 +40,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Track loading events
+  // Track loading & chunk streaming events
+  audio.on('tracks_initialized', ({ tracks }) => {
+    setLoading(false);
+    timeline.render();
+    if (state.currentTime > 0) {
+      timeline.scrollToTime(state.currentTime);
+    }
+  });
+
+  audio.on('initial_playback_ready', () => {
+    setLoading(false);
+    showToast('Ready to play! Streaming remaining tracks...', 'info', 2500);
+  });
+
+  audio.on('all_chunks_completed', () => {
+    showToast('All audio tracks fully decoded into memory', 'success', 2500);
+  });
+
   audio.on('track_loaded', ({ loadedCount, total, track }) => {
     const pct = Math.round((loadedCount / total) * 100);
     setLoading(true, `Loaded ${track.name} (${loadedCount}/${total})`, pct);
@@ -81,6 +98,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Resolve base URL for relative audio tracks
       const baseUrl = new URL('.', fullUrl).href;
       await audio.loadProjectTracks(projectData, baseUrl);
+
+      // Dismiss loading modal as soon as tracks are initialized
+      setLoading(false);
 
       // Seek to initial time if provided in URL
       if (state.currentTime > 0) {

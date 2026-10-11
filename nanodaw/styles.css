@@ -1383,3 +1383,22 @@ body {
     display: flex !important;
   }
 }
+
+/* --- Middle Mouse Button Panning ("Hand Scroll") --- */
+body.is-middle-panning,
+body.is-middle-panning * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* --- Dynamic Chunk Loading Pulse Animation --- */
+.loading-pulse {
+  color: var(--accent-cyan) !important;
+  animation: pulseOpacity 1.2s infinite ease-in-out;
+}
+
+@keyframes pulseOpacity {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1.0; }
+}
