@@ -139,7 +139,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnStop) {
     btnStop.addEventListener('click', () => {
-      audio.stop();
+      if (!audio.isPlaying) {
+        audio.hardReset();
+        showToast('Audio Engine Reset', 'info', 1500);
+      } else {
+        audio.stop();
+      }
     });
   }
 
@@ -477,6 +482,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       case 'Space':
         e.preventDefault();
         audio.togglePlay();
+        break;
+      case 'Escape':
+        e.preventDefault();
+        if (!audio.isPlaying) {
+          audio.hardReset();
+          showToast('Audio Engine Reset', 'info', 1500);
+        } else {
+          audio.stop();
+        }
         break;
       case 'Enter':
       case 'Home':

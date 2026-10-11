@@ -135,6 +135,8 @@ class AudioEngine {
 
     this.rafId = null;
     this.eventListeners = new Map();
+    this.activeSources = new Set();
+    this.playbackEpoch = 0;
 
     // Subscribe to state updates
     this.state.subscribe((type, payload) => this.handleStateChange(type, payload));
@@ -561,9 +563,13 @@ class AudioEngine {
 
       this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
 
-      // If currently playing, seamlessly schedule this newly ready chunk!
+      // If currently playing, seamlessly schedule this newly ready chunk only if within lookahead!
       if (this.isPlaying) {
-        this.scheduleSingleChunk(track, chunk);
+        const relTime = Math.max(0, this.playheadPosition - track.offset);
+        const currentChunkIdx = Math.floor(relTime / 20.0);
+        if (chunkIndex === currentChunkIdx || chunkIndex === currentChunkIdx + 1) {
+          this.scheduleSingleChunk(track, chunk);
+        }
       }
       return chunk;
     } catch (err) {
@@ -655,11 +661,25 @@ class AudioEngine {
     if (!this.audioCtx) return;
     if (this.isPlaying) return;
 
+    if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
+      this.audioCtx.resume().catch(() => {});
+    }
+
+    // Reconnect track audio nodes cleanly and restore master volume
+    this.reconnectAllTrackNodes();
+    if (this.masterGain) {
+      try {
+        this.masterGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+        this.masterGain.gain.setValueAtTime(this.masterVolume, this.audioCtx.currentTime);
+      } catch (e) {}
+    }
+
     const totalDur = this.getTotalDuration();
     if (this.playheadPosition >= totalDur) {
       this.playheadPosition = 0;
     }
 
+    this.playbackEpoch++;
     this.isPlaying = true;
     this.playbackStartTime = this.audioCtx.currentTime;
     this.playbackStartOffset = this.playheadPosition;
@@ -685,13 +705,15 @@ class AudioEngine {
     if (currentPlayhead >= chunkEnd) return; // In the past
 
     if (!track.sourceNodes) track.sourceNodes = new Map();
-    if (track.sourceNodes.has(chunk.index)) return; // Already scheduled
+    // Prevent double-scheduling of the exact same chunk
+    if (track.sourceNodes.has(chunk.index)) return;
 
     try {
       const source = this.audioCtx.createBufferSource();
       source.buffer = chunk.buffer;
       source.connect(track.gainNode);
       track.sourceNodes.set(chunk.index, source);
+      if (this.activeSources) this.activeSources.add(source);
 
       const audioNow = this.audioCtx.currentTime;
       const chunkAudioStartTime = this.playbackStartTime + (chunkStart - this.playbackStartOffset);
@@ -705,13 +727,20 @@ class AudioEngine {
         if (offsetInChunk < chunk.duration) {
           source.start(0, Math.max(0, offsetInChunk));
         } else {
+          if (this.activeSources) this.activeSources.delete(source);
           track.sourceNodes.delete(chunk.index);
+          try { source.disconnect(); } catch (e) {}
           return;
         }
       }
 
       source.onended = () => {
-        if (track.sourceNodes) track.sourceNodes.delete(chunk.index);
+        if (this.activeSources) this.activeSources.delete(source);
+        try { source.disconnect(); } catch (e) {}
+        // Only delete from map if this exact source node is still registered
+        if (track.sourceNodes && track.sourceNodes.get(chunk.index) === source) {
+          track.sourceNodes.delete(chunk.index);
+        }
       };
     } catch (e) {
       console.warn('Error scheduling chunk:', e);
@@ -719,22 +748,30 @@ class AudioEngine {
   }
 
   /**
-   * Schedule all track sources (chunked or legacy) based on playhead
+   * Schedule track sources using bounded lookahead (current chunk + immediate next chunk)
    */
   scheduleTrackSources() {
     if (!this.audioCtx) return;
     this.reconnectAllTrackNodes();
     this.stopAllSources();
 
+    const currentPos = this.playheadPosition;
+    const CHUNK_DURATION = 20.0;
+
     this.tracks.forEach(track => {
       if (!track || !track.gainNode) return;
 
       if (track.chunks && track.chunks.length > 0) {
-        track.chunks.forEach(chunk => {
-          if (chunk.status === 'decoded' && chunk.buffer) {
+        const relTime = Math.max(0, currentPos - track.offset);
+        const currentChunkIdx = Math.floor(relTime / CHUNK_DURATION);
+
+        // Schedule only current and immediate next chunk (lookahead)
+        for (let k of [currentChunkIdx, currentChunkIdx + 1]) {
+          const chunk = track.chunks[k];
+          if (chunk && chunk.status === 'decoded' && chunk.buffer) {
             this.scheduleSingleChunk(track, chunk);
           }
-        });
+        }
       } else if (track.buffer) {
         const offset = track.offset;
         const duration = track.duration;
@@ -744,6 +781,16 @@ class AudioEngine {
           source.buffer = track.buffer;
           source.connect(track.gainNode);
           track.sourceNode = source;
+          if (this.activeSources) this.activeSources.add(source);
+
+          source.onended = () => {
+            if (this.activeSources) this.activeSources.delete(source);
+            try { source.disconnect(); } catch (e) {}
+            if (track.sourceNode === source) {
+              track.sourceNode = null;
+            }
+          };
+
           const audioNow = this.audioCtx.currentTime;
           if (this.playheadPosition < offset) {
             source.start(audioNow + (offset - this.playheadPosition), 0);
@@ -755,38 +802,182 @@ class AudioEngine {
     });
   }
 
+  /**
+   * Lookahead maintenance called during animation frame tick
+   */
+  checkScheduleLookahead() {
+    if (!this.isPlaying || !this.audioCtx) return;
+    const CHUNK_DURATION = 20.0;
+
+    this.tracks.forEach(track => {
+      if (!track || !track.chunks || !track.gainNode) return;
+      const relTime = Math.max(0, this.playheadPosition - track.offset);
+      const currentChunkIdx = Math.floor(relTime / CHUNK_DURATION);
+
+      // Ensure current chunk is scheduled
+      const curChunk = track.chunks[currentChunkIdx];
+      if (curChunk && curChunk.status === 'decoded' && curChunk.buffer) {
+        if (!track.sourceNodes || !track.sourceNodes.has(currentChunkIdx)) {
+          this.scheduleSingleChunk(track, curChunk);
+        }
+      }
+
+      // Lookahead: ensure next chunk is scheduled
+      const nextChunk = track.chunks[currentChunkIdx + 1];
+      if (nextChunk && nextChunk.status === 'decoded' && nextChunk.buffer) {
+        if (!track.sourceNodes || !track.sourceNodes.has(currentChunkIdx + 1)) {
+          this.scheduleSingleChunk(track, nextChunk);
+        }
+      }
+
+      // Clean up past chunk source nodes
+      if (track.sourceNodes) {
+        for (const [idx, source] of track.sourceNodes) {
+          if (idx < currentChunkIdx) {
+            try {
+              source.onended = null;
+              source.stop(0);
+              source.disconnect();
+            } catch (e) {}
+            if (this.activeSources) this.activeSources.delete(source);
+            track.sourceNodes.delete(idx);
+          }
+        }
+      }
+    });
+  }
+
   pause() {
     if (!this.isPlaying) return;
     this.isPlaying = false;
+    this.playbackEpoch++;
+
+    if (this.masterGain && this.audioCtx) {
+      try {
+        this.masterGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+        this.masterGain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+      } catch (e) {}
+    }
+
     this.stopAllSources();
     this.stopPlayheadTracker();
+
+    if (this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+      try {
+        this.audioCtx.suspend().catch(() => {});
+      } catch (e) {}
+    }
+
     this.emit('playback_paused', { time: this.playheadPosition });
     this.state.setCurrentTime(this.playheadPosition);
   }
 
+  /**
+   * Complete hardware audio engine shutdown and reset to beginning
+   */
   stop() {
     this.isPlaying = false;
+    this.playbackEpoch++;
+
+    // 1. Hardware-level instant master gain mute
+    if (this.masterGain && this.audioCtx) {
+      try {
+        this.masterGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+        this.masterGain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+      } catch (e) {}
+    }
+
+    // 2. Unconditionally stop and disconnect all source nodes
     this.stopAllSources();
     this.stopPlayheadTracker();
+
+    // 3. Disconnect all track gain & analyser nodes
+    this.tracks.forEach(track => {
+      if (track) {
+        if (track.gainNode) {
+          try { track.gainNode.disconnect(); } catch (e) {}
+          track.gainNode = null;
+        }
+        if (track.analyserNode) {
+          try { track.analyserNode.disconnect(); } catch (e) {}
+          track.analyserNode = null;
+        }
+      }
+    });
+
+    // 4. Suspend audio context hardware thread
+    if (this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+      try {
+        this.audioCtx.suspend().catch(() => {});
+      } catch (e) {}
+    }
+
+    // 5. Reset playhead to 0
     this.playheadPosition = 0;
-    this.emit('playback_stopped', { time: 0 });
     this.state.setCurrentTime(0);
+    this.emit('playback_stopped', { time: 0 });
+    this.emit('time_update', { time: 0 });
+  }
+
+  /**
+   * Hard reset: complete teardown of AudioContext and graph
+   * Called when Stop button is clicked while stopped or on double-tap
+   */
+  hardReset() {
+    this.stop();
+
+    if (this.audioCtx) {
+      try {
+        this.audioCtx.close().catch(() => {});
+      } catch (e) {}
+      this.audioCtx = null;
+      this.masterGain = null;
+      this.masterAnalyser = null;
+      this.silentBufferUnlocked = false;
+    }
+
+    this.tracks.forEach(track => {
+      if (track) {
+        track.gainNode = null;
+        track.analyserNode = null;
+        track.sourceNode = null;
+        if (track.sourceNodes) track.sourceNodes.clear();
+      }
+    });
+
+    this.emit('engine_reset');
   }
 
   stopAllSources() {
+    // 1. Terminate all globally tracked active sources across the engine
+    if (this.activeSources) {
+      for (const source of this.activeSources) {
+        try {
+          source.onended = null;
+          source.stop(0);
+          source.disconnect();
+        } catch (e) {}
+      }
+      this.activeSources.clear();
+    }
+
+    // 2. Clean all track source maps
     this.tracks.forEach(track => {
-      if (track && track.sourceNodes) {
-        track.sourceNodes.forEach(source => {
+      if (!track) return;
+      if (track.sourceNodes) {
+        for (const [idx, source] of track.sourceNodes) {
           try {
-            source.stop();
+            source.onended = null;
+            source.stop(0);
             source.disconnect();
           } catch (e) {}
-        });
+        }
         track.sourceNodes.clear();
       }
-      if (track && track.sourceNode) {
+      if (track.sourceNode) {
         try {
-          track.sourceNode.stop();
+          track.sourceNode.onended = null;
+          track.sourceNode.stop(0);
           track.sourceNode.disconnect();
         } catch (e) {}
         track.sourceNode = null;
@@ -805,6 +996,7 @@ class AudioEngine {
     this.prioritizeSeek(targetTime);
 
     if (this.isPlaying && this.audioCtx) {
+      this.playbackEpoch++;
       this.playbackStartTime = this.audioCtx.currentTime;
       this.playbackStartOffset = this.playheadPosition;
       this.scheduleTrackSources();
@@ -812,7 +1004,6 @@ class AudioEngine {
 
     this.emit('time_update', { time: targetTime });
   }
-
 
   togglePlay() {
     if (this.isPlaying) {
@@ -848,16 +1039,16 @@ class AudioEngine {
         if (this.isLooping) {
           this.seek(this.loopStart);
         } else {
-          this.pause();
-          this.seek(0);
+          this.stop();
           return;
         }
       }
 
+      // Check lookahead scheduling
+      this.checkScheduleLookahead();
+
       // Proactively prioritize decoding ahead of playhead
-      if (this.isPlaying) {
-        this.prioritizeSeek(this.playheadPosition + 10.0);
-      }
+      this.prioritizeSeek(this.playheadPosition + 15.0);
 
       this.emit('time_update', { time: this.playheadPosition });
       this.rafId = requestAnimationFrame(tick);

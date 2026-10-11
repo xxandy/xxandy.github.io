@@ -99,16 +99,18 @@ class TimelineUI {
         };
 
         const onMouseUp = (upEvent) => {
-          if (upEvent.button === 1 || upEvent.buttons === 0) {
+          if (upEvent.button === 1 || (upEvent.buttons & 4) === 0) {
             this.isMiddlePanning = false;
             document.body.classList.remove('is-middle-panning');
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
+            window.removeEventListener('pointerup', onMouseUp);
           }
         };
 
         window.addEventListener('mousemove', onMouseMove);
         window.addEventListener('mouseup', onMouseUp);
+        window.addEventListener('pointerup', onMouseUp);
       }
     });
 
@@ -173,15 +175,26 @@ class TimelineUI {
       this.isDraggingPlayhead = true;
       this.audio.seek(time);
       
+      let rafScrubId = null;
       const onMouseMove = (moveEvent) => {
         if (!this.isDraggingPlayhead) return;
-        const moveX = moveEvent.clientX - rect.left;
-        const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
-        this.audio.seek(scrubTime);
+        if (rafScrubId) return;
+        rafScrubId = requestAnimationFrame(() => {
+          rafScrubId = null;
+          if (!this.isDraggingPlayhead) return;
+          const currentRect = this.rulerCanvas.getBoundingClientRect();
+          const moveX = moveEvent.clientX - currentRect.left;
+          const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
+          this.audio.seek(scrubTime);
+        });
       };
 
       const onMouseUp = () => {
         this.isDraggingPlayhead = false;
+        if (rafScrubId) {
+          cancelAnimationFrame(rafScrubId);
+          rafScrubId = null;
+        }
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
       };
@@ -210,15 +223,25 @@ class TimelineUI {
         const startX = e.clientX;
         const startTime = this.audio.playheadPosition;
 
+        let rafScrubId = null;
         const onMouseMove = (moveEvent) => {
           if (!this.isDraggingPlayhead) return;
-          const deltaX = moveEvent.clientX - startX;
-          const newTime = Math.max(0, startTime + (deltaX / this.pixelsPerSecond));
-          this.audio.seek(newTime);
+          if (rafScrubId) return;
+          rafScrubId = requestAnimationFrame(() => {
+            rafScrubId = null;
+            if (!this.isDraggingPlayhead) return;
+            const deltaX = moveEvent.clientX - startX;
+            const newTime = Math.max(0, startTime + (deltaX / this.pixelsPerSecond));
+            this.audio.seek(newTime);
+          });
         };
 
         const onMouseUp = () => {
           this.isDraggingPlayhead = false;
+          if (rafScrubId) {
+            cancelAnimationFrame(rafScrubId);
+            rafScrubId = null;
+          }
           window.removeEventListener('mousemove', onMouseMove);
           window.removeEventListener('mouseup', onMouseUp);
         };
@@ -425,7 +448,7 @@ class TimelineUI {
   }
 
   checkAutoScroll(time) {
-    if (!this.followPlayhead || !this.audio.isPlaying) return;
+    if (!this.followPlayhead || !this.audio.isPlaying || this.isMiddlePanning) return;
 
     const headerWidth = this.getTrackHeaderWidth();
     const playheadX = headerWidth + (time * this.pixelsPerSecond);
@@ -772,15 +795,26 @@ class TimelineUI {
         this.isDraggingPlayhead = true;
         this.audio.seek(time);
 
+        let rafScrubId = null;
         const onMouseMove = (moveEvent) => {
           if (!this.isDraggingPlayhead) return;
-          const moveX = moveEvent.clientX - rect.left;
-          const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
-          this.audio.seek(scrubTime);
+          if (rafScrubId) return;
+          rafScrubId = requestAnimationFrame(() => {
+            rafScrubId = null;
+            if (!this.isDraggingPlayhead) return;
+            const currentRect = canvas.getBoundingClientRect();
+            const moveX = moveEvent.clientX - currentRect.left;
+            const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
+            this.audio.seek(scrubTime);
+          });
         };
 
         const onMouseUp = () => {
           this.isDraggingPlayhead = false;
+          if (rafScrubId) {
+            cancelAnimationFrame(rafScrubId);
+            rafScrubId = null;
+          }
           window.removeEventListener('mousemove', onMouseMove);
           window.removeEventListener('mouseup', onMouseUp);
         };
