@@ -358,10 +358,51 @@ body {
   text-align: right;
 }
 
+.btn-compact-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 4px 7px;
+  height: 32px;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.btn-compact-marker:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border-color: var(--border-active);
+}
+
+.marker-plus-sign {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--accent-cyan);
+  line-height: 1;
+}
+
 .zoom-controls {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.btn-zoom-action {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* --- Marker Quick Navigation Bar --- */
@@ -1387,6 +1428,24 @@ body {
   .btn-transport-action {
     padding: 4px 8px;
     font-size: 11px;
+  }
+
+  .btn-compact-marker {
+    padding: 2px 5px;
+    height: 28px;
+  }
+
+  .zoom-controls {
+    gap: 2px;
+  }
+
+  .btn-zoom-action {
+    width: 26px;
+    height: 26px;
+  }
+
+  .btn-zoom-action svg {
+    transform: scale(0.9);
   }
 
   .selected-track-pane {

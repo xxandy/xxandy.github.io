@@ -248,9 +248,11 @@ class WaveformCache {
             ctx.stroke();
           }
 
-          ctx.font = '10px "Inter", -apple-system, sans-serif';
-          ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.6)' : color;
-          ctx.fillText(`⚡ Loading ${Math.round(chunk.startTime)}s...`, chunkStartX + 8, midY + 4);
+          if (chunkWidth > 50) {
+            ctx.font = '10px "Inter", -apple-system, sans-serif';
+            ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.6)' : color;
+            ctx.fillText(`⚡ Loading ${Math.round(chunk.startTime)}s...`, chunkStartX + 8, midY + 4);
+          }
           ctx.restore();
 
         } else {
@@ -273,9 +275,11 @@ class WaveformCache {
             ctx.stroke();
           }
 
-          ctx.font = '9px "Inter", -apple-system, sans-serif';
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-          ctx.fillText(`${Math.round(chunk.startTime)}s`, chunkStartX + 8, height - 12);
+          if (chunkWidth > 35) {
+            ctx.font = '9px "Inter", -apple-system, sans-serif';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+            ctx.fillText(`${Math.round(chunk.startTime)}s`, chunkStartX + 8, height - 12);
+          }
           ctx.restore();
         }
       });

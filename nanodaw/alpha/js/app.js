@@ -304,10 +304,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnZoomFit) {
     btnZoomFit.addEventListener('click', () => {
-      const totalDur = audio.getTotalDuration();
-      const visibleW = timeline.timelineScrollArea.clientWidth - timeline.getTrackHeaderWidth() - 40;
-      const fitZoom = Math.max(timeline.minZoom, visibleW / totalDur);
+      const fitZoom = timeline.computeProjectMinZoom();
       timeline.applyZoom(fitZoom);
+      if (timeline.timelineScrollArea) {
+        timeline.timelineScrollArea.scrollLeft = 0;
+        timeline.scrollLeft = 0;
+      }
     });
   }
 

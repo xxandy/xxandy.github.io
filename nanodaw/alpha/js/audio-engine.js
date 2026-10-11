@@ -468,6 +468,47 @@ class AudioEngine {
   }
 
   /**
+   * Apply smooth half-cosine micro-fade out on the tail of an audio buffer
+   */
+  applyBufferMicroFadeEnd(audioBuffer, fadeSeconds = 0.05) {
+    if (!audioBuffer) return;
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const fadeSamples = Math.min(audioBuffer.length, Math.floor(sampleRate * fadeSeconds));
+    if (fadeSamples <= 0) return;
+    const startIdx = audioBuffer.length - fadeSamples;
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      const data = audioBuffer.getChannelData(ch);
+      for (let i = 0; i < fadeSamples; i++) {
+        const progress = i / fadeSamples;
+        const gain = 0.5 * (1 + Math.cos(Math.PI * progress));
+        data[startIdx + i] *= gain;
+      }
+    }
+  }
+
+  /**
+   * Apply smooth half-cosine micro-fade in on the head of an audio buffer
+   */
+  applyBufferMicroFadeStart(audioBuffer, fadeSeconds = 0.005) {
+    if (!audioBuffer) return;
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const fadeSamples = Math.min(audioBuffer.length, Math.floor(sampleRate * fadeSeconds));
+    if (fadeSamples <= 0) return;
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      const data = audioBuffer.getChannelData(ch);
+      for (let i = 0; i < fadeSamples; i++) {
+        const progress = i / fadeSamples;
+        const gain = 0.5 * (1 - Math.cos(Math.PI * progress));
+        data[i] *= gain;
+      }
+    }
+  }
+
+  /**
    * Ensure track chunks exist up to current track duration
    */
   syncTrackChunks(track) {
@@ -559,6 +600,16 @@ class AudioEngine {
         chunk.maxPeaks = decoded.maxPeaks;
         chunk.totalPoints = decoded.totalPoints;
         chunk.status = 'decoded';
+      }
+
+      // Smooth buffer boundaries: micro-fade in on start chunk, micro-fade out on final chunk
+      if (chunk.buffer) {
+        if (chunkIndex === 0) {
+          this.applyBufferMicroFadeStart(chunk.buffer, 0.005);
+        }
+        if (chunkIndex === track.chunks.length - 1) {
+          this.applyBufferMicroFadeEnd(chunk.buffer, 0.05);
+        }
       }
 
       this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
@@ -877,6 +928,7 @@ class AudioEngine {
    */
   stop() {
     this.isPlaying = false;
+    this.isWindingDown = false;
     this.playbackEpoch++;
 
     // 1. Hardware-level instant master gain mute
@@ -1021,6 +1073,94 @@ class AudioEngine {
   }
 
   /**
+   * Smooth wind down and stop: ramp master gain to 0 over 35ms before stopping
+   * Eliminates DAC DC offset popping at the end of the song
+   */
+  windDownAndStop() {
+    if (!this.isPlaying) return;
+    if (this.isWindingDown) return;
+    this.isWindingDown = true;
+
+    if (this.masterGain && this.audioCtx) {
+      try {
+        const now = this.audioCtx.currentTime;
+        this.masterGain.gain.cancelScheduledValues(now);
+        this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
+        this.masterGain.gain.linearRampToValueAtTime(0, now + 0.035);
+      } catch (e) {}
+    }
+
+    setTimeout(() => {
+      this.isWindingDown = false;
+      this.stop();
+    }, 40);
+  }
+
+  /**
+   * Seamless loop transition: blends tail of loop into loop head with continuous voice handover
+   */
+  performSeamlessLoop() {
+    if (!this.isPlaying || !this.audioCtx) return;
+
+    const loopStart = this.loopStart || 0;
+    const now = this.audioCtx.currentTime;
+    const CHUNK_DURATION = 20.0;
+    const targetChunkIdx = Math.floor(loopStart / CHUNK_DURATION);
+
+    // 1. Gently stop tail source nodes with a 20ms tail-off so there is no abrupt DC drop
+    this.tracks.forEach(track => {
+      if (!track || !track.sourceNodes) return;
+      for (const [idx, source] of track.sourceNodes) {
+        if (idx !== targetChunkIdx) {
+          try {
+            source.onended = null;
+            source.stop(now + 0.02);
+          } catch (e) {}
+        }
+      }
+      track.sourceNodes.clear();
+      if (track.sourceNode) {
+        try {
+          track.sourceNode.onended = null;
+          track.sourceNode.stop(now + 0.02);
+        } catch (e) {}
+        track.sourceNode = null;
+      }
+    });
+
+    // 2. Advance playback timing reference cleanly
+    this.playbackEpoch++;
+    this.playbackStartTime = now;
+    this.playbackStartOffset = loopStart;
+    this.playheadPosition = loopStart;
+
+    // 3. Schedule target head chunk immediately starting seamlessly at 'now'
+    this.tracks.forEach(track => {
+      if (!track || !track.gainNode) return;
+      if (track.chunks && track.chunks.length > 0) {
+        const headChunk = track.chunks[targetChunkIdx];
+        if (headChunk && headChunk.status === 'decoded' && headChunk.buffer) {
+          this.scheduleSingleChunk(track, headChunk);
+        }
+      } else if (track.buffer) {
+        const source = this.audioCtx.createBufferSource();
+        source.buffer = track.buffer;
+        source.connect(track.gainNode);
+        track.sourceNode = source;
+        if (this.activeSources) this.activeSources.add(source);
+        source.onended = () => {
+          if (this.activeSources) this.activeSources.delete(source);
+          try { source.disconnect(); } catch (e) {}
+          if (track.sourceNode === source) track.sourceNode = null;
+        };
+        source.start(now, loopStart);
+      }
+    });
+
+    this.emit('time_update', { time: loopStart });
+  }
+
+  /**
    * High frequency loop to update playhead position and handle end of playback / loop
    */
   startPlayheadTracker() {
@@ -1037,9 +1177,9 @@ class AudioEngine {
 
       if (currentPos >= endThreshold) {
         if (this.isLooping) {
-          this.seek(this.loopStart);
+          this.performSeamlessLoop();
         } else {
-          this.stop();
+          this.windDownAndStop();
           return;
         }
       }

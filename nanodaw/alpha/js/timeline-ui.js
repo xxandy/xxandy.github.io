@@ -11,7 +11,8 @@ class TimelineUI {
 
     // Viewport & Zoom settings
     this.pixelsPerSecond = this.state.zoom || 60; // Zoom level
-    this.minZoom = 15;
+    this.minZoomFloor = 0.1; // Supports fitting ~3+ hours on a 1200px screen
+    this.minZoom = 0.1;
     this.maxZoom = 300;
     this.scrollLeft = 0;
     this.timelineWidth = 1000;
@@ -126,11 +127,14 @@ class TimelineUI {
     this.timelineScrollArea.addEventListener('wheel', (e) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        const zoomDelta = -e.deltaY * 0.15;
-        this.applyZoom(this.pixelsPerSecond + zoomDelta, e.clientX);
+        // Exponential zoom scaling for smooth micro & macro control
+        const zoomFactor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+        this.applyZoom(this.pixelsPerSecond * zoomFactor, e.clientX);
       } else if (e.shiftKey) {
         e.preventDefault();
-        this.timelineScrollArea.scrollLeft += e.deltaY;
+        // Adaptive horizontal scroll step scaled by zoom density
+        const scrollFactor = Math.min(2.0, Math.max(0.3, Math.sqrt(this.pixelsPerSecond / 40)));
+        this.timelineScrollArea.scrollLeft += e.deltaY * scrollFactor;
       }
     }, { passive: false });
 
@@ -410,15 +414,22 @@ class TimelineUI {
     this.renderMarkerElements();
   }
 
+  computeProjectMinZoom() {
+    const totalDur = Math.max(this.audio.getTotalDuration(), 5);
+    const headerWidth = this.getTrackHeaderWidth();
+    const visibleW = Math.max(100, this.timelineScrollArea.clientWidth - headerWidth - 30);
+    const fitLevel = visibleW / totalDur;
+    return Math.max(this.minZoomFloor, fitLevel);
+  }
+
   updateTimelineDimensions() {
     const headerWidth = this.getTrackHeaderWidth();
     const totalDuration = Math.max(this.audio.getTotalDuration(), 10);
-    const visibleWaveAreaW = Math.max(
-      this.timelineScrollArea.clientWidth - headerWidth - 20,
-      totalDuration * this.pixelsPerSecond + 150
-    );
+    const availableW = Math.max(100, this.timelineScrollArea.clientWidth - headerWidth - 10);
+    const projectContentW = totalDuration * this.pixelsPerSecond;
+    const visibleWaveAreaW = projectContentW <= availableW ? availableW : (projectContentW + 100);
 
-    this.timelineWidth = Math.round(visibleWaveAreaW);
+    this.timelineWidth = Math.round(Math.max(100, visibleWaveAreaW));
 
     if (this.timelineContent) {
       this.timelineContent.style.setProperty('--timeline-width', `${this.timelineWidth}px`);
@@ -433,7 +444,7 @@ class TimelineUI {
   }
 
   applyZoom(newZoom, originClientX = null) {
-    const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, newZoom));
+    const clampedZoom = Math.max(this.minZoomFloor, Math.min(this.maxZoom, newZoom));
     if (clampedZoom === this.pixelsPerSecond) return;
 
     const headerWidth = this.getTrackHeaderWidth();
@@ -540,13 +551,15 @@ class TimelineUI {
     ctx.lineTo(width, height - 0.5);
     ctx.stroke();
 
-    // Step interval
-    let stepSec = 1;
-    if (this.pixelsPerSecond < 25) stepSec = 10;
-    else if (this.pixelsPerSecond < 50) stepSec = 5;
-    else if (this.pixelsPerSecond < 100) stepSec = 2;
-    else if (this.pixelsPerSecond < 200) stepSec = 1;
-    else stepSec = 0.5;
+    // Adaptive Step Interval Ladder:
+    // Ensures ticks always maintain between ~70px and 160px gap across all zoom levels
+    const TIME_INTERVALS = [
+      0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, // seconds
+      60, 120, 300, 600, 900, 1800, 3600  // 1m, 2m, 5m, 10m, 15m, 30m, 1h
+    ];
+    const minPixelGap = 80;
+    const minTimeGap = minPixelGap / this.pixelsPerSecond;
+    let stepSec = TIME_INTERVALS.find(intv => intv >= minTimeGap) || 3600;
 
     const totalSeconds = width / this.pixelsPerSecond;
 
@@ -558,23 +571,35 @@ class TimelineUI {
       const x = t * this.pixelsPerSecond;
       if (x < 0 || x > width) continue;
 
-      const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0;
+      const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0 || stepSec >= 300;
 
       ctx.beginPath();
       ctx.moveTo(x, height);
       ctx.lineTo(x, isMajor ? height - 10 : height - 5);
       ctx.stroke();
 
-      if (isMajor || this.pixelsPerSecond >= 70) {
+      // Format time label adaptively:
+      let timeLabel = '';
+      if (stepSec >= 3600) {
+        const hrs = Math.floor(t / 3600);
+        const mins = Math.floor((t % 3600) / 60);
+        timeLabel = `${hrs}h${mins > 0 ? ` ${mins}m` : ''}`;
+      } else if (stepSec >= 60) {
+        const mins = Math.floor(t / 60);
+        const secs = Math.floor(t % 60);
+        timeLabel = secs === 0 ? `${mins}m` : `${mins}:${secs.toString().padStart(2, '0')}`;
+      } else if (stepSec >= 1) {
+        const mins = Math.floor(t / 60);
+        const secs = Math.floor(t % 60);
+        timeLabel = `${mins}:${secs.toString().padStart(2, '0')}`;
+      } else {
         const mins = Math.floor(t / 60);
         const secs = Math.floor(t % 60);
         const millis = Math.floor((t % 1) * 10);
-        let timeLabel = `${mins}:${secs.toString().padStart(2, '0')}`;
-        if (stepSec < 1) {
-          timeLabel += `.${millis}`;
-        }
-        ctx.fillText(timeLabel, x + 3, 12);
+        timeLabel = `${mins}:${secs.toString().padStart(2, '0')}.${millis}`;
       }
+
+      ctx.fillText(timeLabel, x + 3, 12);
     }
 
     ctx.restore();
