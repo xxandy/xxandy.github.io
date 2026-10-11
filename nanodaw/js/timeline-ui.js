@@ -79,47 +79,6 @@ class TimelineUI {
       this.updatePlayheadPosition();
     });
 
-    // Middle mouse button "hand scroll" (drag horizontally) in desktop mode
-    this.timelineScrollArea.addEventListener('mousedown', (e) => {
-      if (e.button === 1) { // Middle click / wheel button
-        e.preventDefault();
-        e.stopPropagation();
-        const startX = e.clientX;
-        const startScrollLeft = this.timelineScrollArea.scrollLeft;
-        this.isMiddlePanning = true;
-        document.body.classList.add('is-middle-panning');
-
-        const onMouseMove = (moveEvent) => {
-          if (!this.isMiddlePanning) return;
-          moveEvent.preventDefault();
-          const dx = moveEvent.clientX - startX;
-          // Drag right -> reveal left content (scrollLeft decreases)
-          this.timelineScrollArea.scrollLeft = startScrollLeft - dx;
-          this.scrollLeft = this.timelineScrollArea.scrollLeft;
-        };
-
-        const onMouseUp = (upEvent) => {
-          if (upEvent.button === 1 || upEvent.buttons === 0) {
-            this.isMiddlePanning = false;
-            document.body.classList.remove('is-middle-panning');
-            window.removeEventListener('mousemove', onMouseMove);
-            window.removeEventListener('mouseup', onMouseUp);
-          }
-        };
-
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-      }
-    });
-
-    // Prevent default browser autoscroll indicator on middle click
-    this.timelineScrollArea.addEventListener('auxclick', (e) => {
-      if (e.button === 1) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    });
-
     // Zoom via Ctrl + Wheel or trackpad pinch
     this.timelineScrollArea.addEventListener('wheel', (e) => {
       if (e.ctrlKey || e.metaKey) {
@@ -204,7 +163,6 @@ class TimelineUI {
     // Playhead line / handle dragging
     if (this.playheadHandle) {
       this.playheadHandle.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return;
         e.stopPropagation();
         this.isDraggingPlayhead = true;
         const startX = e.clientX;
@@ -237,26 +195,6 @@ class TimelineUI {
     this.audio.on('playback_started', () => this.updatePlayheadPosition());
     this.audio.on('playback_paused', () => this.updatePlayheadPosition());
     this.audio.on('playback_stopped', () => this.updatePlayheadPosition());
-
-    // Chunk-based streaming & progressive decoding events
-    this.audio.on('tracks_initialized', () => {
-      this.render();
-    });
-
-    this.audio.on('chunk_loading', ({ trackIndex }) => {
-      this.renderWaveformForTrack(trackIndex);
-      this.updateTrackStatus(trackIndex);
-    });
-
-    this.audio.on('chunk_decoded', ({ trackIndex }) => {
-      this.renderWaveformForTrack(trackIndex);
-      this.updateTrackStatus(trackIndex);
-    });
-
-    this.audio.on('chunk_error', ({ trackIndex }) => {
-      this.renderWaveformForTrack(trackIndex);
-      this.updateTrackStatus(trackIndex);
-    });
 
     // State changes
     this.state.subscribe((type, payload) => {
@@ -685,23 +623,6 @@ class TimelineUI {
 
       const offsetStr = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
 
-      // Determine initial status text
-      let statusText = 'Loading...';
-      let isChunkLoading = false;
-      if (loadedTrack?.chunks && loadedTrack.chunks.length > 0) {
-        const total = loadedTrack.chunks.length;
-        const decoded = loadedTrack.chunks.filter(c => c.status === 'decoded').length;
-        if (decoded === total) {
-          statusText = `${loadedTrack.duration.toFixed(1)}s`;
-        } else {
-          const decodedSec = Math.min(loadedTrack.duration, decoded * 20);
-          statusText = `${Math.round(decodedSec)}s / ${Math.round(loadedTrack.duration)}s`;
-          isChunkLoading = loadedTrack.chunks.some(c => c.status === 'loading');
-        }
-      } else if (loadedTrack?.buffer) {
-        statusText = `${loadedTrack.duration.toFixed(1)}s`;
-      }
-
       // 1. Desktop Track Header content
       const desktopHeader = document.createElement('div');
       desktopHeader.className = 'desktop-track-header';
@@ -712,7 +633,7 @@ class TimelineUI {
             <span class="track-offset-badge" title="Start Offset from t0">${offsetStr}</span>
           </div>
           <div class="track-sub-info">
-            <span class="track-status ${isChunkLoading ? 'loading-pulse' : ''}" id="track_status_${index}">${statusText}</span>
+            <span class="track-status">${loadedTrack?.buffer ? `${(loadedTrack.duration).toFixed(1)}s` : 'Loading...'}</span>
             <span class="track-vu-meter" id="vu_${index}">
               <span class="vu-led"></span>
               <span class="vu-led"></span>
@@ -754,34 +675,6 @@ class TimelineUI {
       canvas.className = 'track-canvas';
       canvas.dataset.index = index;
       lane.appendChild(canvas);
-
-      // Interactive timeline seeking on click or drag across waveform
-      lane.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return; // Only left-click seeks; middle-click bubbles to timelineScrollArea
-        const rect = canvas.getBoundingClientRect();
-        const clickX = e.clientX - rect.left;
-        const time = Math.max(0, clickX / this.pixelsPerSecond);
-
-        this.state.selectTrack(index);
-        this.isDraggingPlayhead = true;
-        this.audio.seek(time);
-
-        const onMouseMove = (moveEvent) => {
-          if (!this.isDraggingPlayhead) return;
-          const moveX = moveEvent.clientX - rect.left;
-          const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
-          this.audio.seek(scrubTime);
-        };
-
-        const onMouseUp = () => {
-          this.isDraggingPlayhead = false;
-          window.removeEventListener('mousemove', onMouseMove);
-          window.removeEventListener('mouseup', onMouseUp);
-        };
-
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-      });
 
       row.appendChild(lane);
       this.tracksContainer.appendChild(row);
@@ -847,57 +740,6 @@ class TimelineUI {
         { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
       );
     });
-  }
-
-  renderWaveformForTrack(trackIndex) {
-    if (!this.tracksContainer) return;
-    const canvas = this.tracksContainer.querySelector(`.track-canvas[data-index="${trackIndex}"]`);
-    if (!canvas) return;
-
-    const loadedTrack = this.audio.tracks[trackIndex];
-    const trackState = this.state.tracksState[trackIndex] || { volume: 1.0, mute: false, solo: false };
-    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
-    const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
-    const isSelected = trackIndex === this.state.selectedTrackIndex;
-    const trackHeight = this.getTrackHeight();
-
-    this.waveforms.renderTrackCanvas(
-      canvas,
-      loadedTrack,
-      this.pixelsPerSecond,
-      this.timelineWidth,
-      trackHeight,
-      { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
-    );
-  }
-
-  updateTrackStatus(trackIndex) {
-    const statusEl = document.getElementById(`track_status_${trackIndex}`);
-    if (!statusEl) return;
-    const loadedTrack = this.audio.tracks[trackIndex];
-    if (!loadedTrack) return;
-
-    if (loadedTrack.chunks && loadedTrack.chunks.length > 0) {
-      const total = loadedTrack.chunks.length;
-      const decoded = loadedTrack.chunks.filter(c => c.status === 'decoded').length;
-      if (decoded === total) {
-        statusEl.textContent = `${loadedTrack.duration.toFixed(1)}s`;
-        statusEl.classList.remove('loading-pulse');
-      } else {
-        const decodedSec = Math.min(loadedTrack.duration, decoded * 20);
-        statusEl.textContent = `${Math.round(decodedSec)}s / ${Math.round(loadedTrack.duration)}s`;
-        if (loadedTrack.chunks.some(c => c.status === 'loading')) {
-          statusEl.classList.add('loading-pulse');
-        } else {
-          statusEl.classList.remove('loading-pulse');
-        }
-      }
-    } else if (loadedTrack.buffer) {
-      statusEl.textContent = `${loadedTrack.duration.toFixed(1)}s`;
-      statusEl.classList.remove('loading-pulse');
-    } else {
-      statusEl.textContent = 'Loading...';
-    }
   }
 
   updatePlayheadPosition() {

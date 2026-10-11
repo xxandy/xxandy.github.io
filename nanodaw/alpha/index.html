@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>NANOdaw - Browser Multitrack Player</title>
+  <meta name="description" content="NANOdaw - Instant in-browser multitrack audio playback, custom mix sharing, and marker navigation.">
+  <link rel="icon" type="image/svg+xml" href="nanodaw_logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=24">
+</head>
+<body>
+  <!-- Top App Navigation -->
+  <header class="app-header">
+    <div class="brand-section">
+      <div class="app-logo">
+        <div class="logo-icon-wrap" title="NANOdaw">
+          <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
+        </div>
+        <span class="app-title">NANOdaw</span>
+      </div>
+      <div class="project-title-badge" id="projectTitle">Loading...</div>
+    </div>
+
+    <div class="header-actions">
+      <!-- Export button always visible -->
+      <button class="btn btn-secondary btn-header-action" id="btnExportProject" title="Download Project JSON">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
+        </svg>
+        <span class="btn-label-desktop">Export</span>
+      </button>
+
+      <!-- Share button always visible -->
+      <button class="btn btn-share btn-header-action" id="btnShare" title="Share Mix & Markers via URL">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"/>
+        </svg>
+        <span class="btn-label-desktop">Share</span>
+      </button>
+
+      <!-- Mobile / Extra Tools Menu Toggle -->
+      <button class="btn btn-secondary btn-header-action" id="btnToggleTools" title="Master Volume & Zoom Settings">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Transport Controls Bar -->
+  <section class="transport-bar">
+    <div class="transport-main">
+      <!-- Key Transport Buttons Always Visible -->
+      <button class="transport-btn" id="btnRewind" title="Rewind to Start (Enter)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="11 18 2 12 11 6 11 18"/>
+          <polygon points="20 18 11 12 20 6 20 18"/>
+        </svg>
+      </button>
+      <button class="transport-btn btn-play-hero" id="btnPlay" title="Play / Pause (Space)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <span class="play-btn-text">Play</span>
+      </button>
+      <button class="transport-btn" id="btnStop" title="Stop">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="6" y="6" width="12" height="12"/>
+        </svg>
+      </button>
+
+      <!-- Always visible +Marker button -->
+      <button class="btn btn-secondary btn-transport-action" id="btnAddMarker" title="Add Marker at Playhead (Shift+M)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+        </svg>
+        <span>+ Marker</span>
+      </button>
+
+      <!-- Marker Jumps (Desktop & Tablet) -->
+      <div class="marker-jump-group desktop-only">
+        <button class="transport-btn" id="btnPrevMarker" title="Previous Marker ([)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="18 18 8 12 18 6 18 18"/>
+            <rect x="4" y="6" width="2" height="12"/>
+          </svg>
+        </button>
+        <button class="transport-btn" id="btnNextMarker" title="Next Marker (])">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="6 6 16 12 6 18 6 6"/>
+            <rect x="18" y="6" width="2" height="12"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Timecode Readout (Always Visible) -->
+      <div class="time-display-box">
+        <span class="time-label">Time</span>
+        <span class="time-readout" id="timeDisplay">00:00.000</span>
+      </div>
+    </div>
+
+    <!-- Secondary Transport Controls (Desktop View) -->
+    <div class="transport-secondary desktop-only">
+      <!-- Master Volume -->
+      <div class="fader-control-wrap" title="Master Output Volume">
+        <span class="fader-icon">
+          <svg viewBox="0 0 24 24">
+            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+          </svg>
+        </span>
+        <input type="range" class="slider-styled" id="masterVolSlider" min="0" max="1.5" step="0.01" value="1.0">
+        <span class="fader-val-text" id="masterVolVal">0.0 dB</span>
+      </div>
+
+      <!-- Loop mode -->
+      <button class="transport-btn" id="btnLoop" title="Toggle Loop Mode (L)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/>
+        </svg>
+      </button>
+
+      <!-- Timeline Zoom Controls -->
+      <div class="zoom-controls">
+        <button class="transport-btn" id="btnZoomOut" title="Zoom Out (-)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19 13H5v-2h14v2z"/>
+          </svg>
+        </button>
+        <button class="transport-btn" id="btnZoomIn" title="Zoom In (+)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+          </svg>
+        </button>
+        <button class="btn btn-secondary" id="btnZoomFit" title="Fit Timeline (F)" style="padding: 6px 10px; font-size: 11px;">
+          Fit All
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Marker Jump Bar -->
+  <nav class="marker-nav-bar">
+    <div class="marker-bar-label">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z"/>
+      </svg>
+      <span>Markers:</span>
+    </div>
+    <div class="marker-pill-list" id="markerPillList">
+      <!-- Injected dynamically via JS -->
+    </div>
+  </nav>
+
+  <!-- Selected Track Inspector Pane (Mobile & Desktop Inspector) -->
+  <section class="selected-track-pane" id="selectedTrackPane">
+    <div class="pane-track-identity">
+      <div class="pane-track-badge">
+        <span class="pane-track-dot" id="paneTrackDot"></span>
+        <span class="pane-track-name" id="paneTrackName">Selected Track</span>
+        <span class="pane-offset-badge" id="paneOffsetBadge">+0.00s</span>
+      </div>
+      <div class="pane-vu-wrap">
+        <span class="track-vu-meter" id="paneVuMeter">
+          <span class="vu-led"></span>
+          <span class="vu-led"></span>
+          <span class="vu-led"></span>
+          <span class="vu-led"></span>
+          <span class="vu-led"></span>
+        </span>
+      </div>
+    </div>
+
+    <div class="pane-track-controls">
+      <div class="btn-group">
+        <button class="btn-ctrl btn-mute" id="paneBtnMute" title="Mute Track (M)">M</button>
+        <button class="btn-ctrl btn-solo" id="paneBtnSolo" title="Solo Track (S)">S</button>
+      </div>
+      <div class="pane-fader-group">
+        <input type="range" class="track-vol-slider" id="paneVolSlider" min="0" max="1.5" step="0.01" value="1.0">
+        <span class="vol-label" id="paneVolLabel">0.0 dB</span>
+      </div>
+      <div class="pane-nav-btns">
+        <button class="pane-nav-btn" id="panePrevTrack" title="Select Previous Track">&lsaquo;</button>
+        <button class="pane-nav-btn" id="paneNextTrack" title="Select Next Track">&rsaquo;</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main Multitrack Timeline Workspace -->
+  <main class="timeline-workspace" id="timelineApp">
+    <!-- Horizontally and Vertically Scrollable Waveform Canvas Area -->
+    <div class="timeline-scroll-area" id="timelineScrollArea">
+      <div class="timeline-content" id="timelineContent">
+        <!-- Ruler & Draggable Markers Bar -->
+        <div class="timeline-ruler-bar">
+          <div class="ruler-corner">
+            <span class="ruler-corner-text">Tracks</span>
+          </div>
+          <div class="ruler-track-canvas-wrap" id="rulerWrap">
+            <canvas id="rulerCanvas"></canvas>
+            <div class="marker-layer" id="markerLayer"></div>
+          </div>
+        </div>
+
+        <!-- Global Playhead -->
+        <div class="playhead-line" id="playheadLine">
+          <div class="playhead-handle" id="playheadHandle"></div>
+        </div>
+
+        <!-- Track Rows Container (Headers/Handles + Waveform Canvases) -->
+        <div class="tracks-container" id="tracksContainer">
+          <!-- Populated dynamically via JS -->
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Stackable Tools & Master Volume Overlay (Mobile Drawer / Popover) -->
+  <div class="tools-overlay-backdrop hidden" id="toolsOverlay">
+    <div class="tools-overlay-card">
+      <div class="tools-overlay-header">
+        <h4>Project & Master Controls</h4>
+        <button class="btn-close-modal" id="btnCloseToolsOverlay">&times;</button>
+      </div>
+      <div class="tools-overlay-body">
+        <!-- Master Volume in Overlay -->
+        <div class="tools-row">
+          <label class="tools-row-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+            </svg>
+            Master Volume:
+          </label>
+          <div class="tools-fader-wrap">
+            <input type="range" class="slider-styled" id="overlayMasterVol" min="0" max="1.5" step="0.01" value="1.0" style="width: 140px;">
+            <span class="fader-val-text" id="overlayMasterVolVal">0.0 dB</span>
+          </div>
+        </div>
+
+        <!-- Loop Toggle in Overlay -->
+        <div class="tools-row">
+          <label class="tools-row-label">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/>
+            </svg>
+            Loop Mode:
+          </label>
+          <button class="btn btn-secondary" id="overlayBtnLoop">Toggle Loop</button>
+        </div>
+
+        <!-- Zoom Controls in Overlay -->
+        <div class="tools-row">
+          <label class="tools-row-label">Timeline Zoom:</label>
+          <div class="tools-btn-group">
+            <button class="transport-btn" id="overlayZoomOut" title="Zoom Out">-</button>
+            <button class="transport-btn" id="overlayZoomIn" title="Zoom In">+</button>
+            <button class="btn btn-secondary" id="overlayZoomFit" style="padding: 6px 12px; font-size: 11px;">Fit</button>
+          </div>
+        </div>
+
+        <div class="divider-text" style="margin: 8px 0;">PROJECT</div>
+
+        <!-- Open / Load Project in Overlay -->
+        <div class="tools-actions-stack">
+          <button class="btn btn-secondary" id="overlayBtnOpenProject" style="width: 100%; justify-content: center; padding: 10px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
+            </svg>
+            Open Another Project / File
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Share Mix Modal -->
+  <div class="modal-backdrop hidden" id="shareModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Share Multitrack Mix</h3>
+        <button class="btn-close-modal" id="btnCloseShareModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
+          This URL contains your exact track volumes, mute/solo states, timing markers, and playhead position. Anyone who opens it will hear this exact mix with zero login required.
+        </p>
+        <input type="text" class="input-styled" id="shareUrlInput" readonly>
+        <button class="btn btn-share" id="btnCopyShareUrl" style="width: 100%; padding: 10px;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
+          </svg>
+          Copy Shareable Link
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Open Project Modal -->
+  <div class="modal-backdrop hidden" id="projectModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Load Multitrack Project</h3>
+        <button class="btn-close-modal" id="btnCloseProjectModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Remote Project JSON URL:</label>
+        <div class="input-row">
+          <input type="url" class="input-styled" id="projectUrlInput" placeholder="https://example.com/stems/project.json">
+          <button class="btn btn-secondary" id="btnLoadRemoteProject">Load</button>
+        </div>
+
+        <div class="divider-text">OR</div>
+
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Upload Local Project .json File:</label>
+        <input type="file" class="input-styled" id="jsonFileInput" accept=".json">
+
+        <div class="divider-text">OR</div>
+
+        <button class="btn btn-secondary" id="btnLoadDemo" style="width: 100%; justify-content: center; padding: 10px;">
+          Load Built-in Demo Project ("Midnight Groove")
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);" id="loadingText">Loading multitrack audio...</div>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="loadingProgress"></div>
+    </div>
+  </div>
+
+  <!-- App Toast Notification -->
+  <div class="app-toast" id="appToast"></div>
+
+  <!-- Script Modules -->
+  <script src="js/mp3-decoder.js?v=24"></script>
+  <script src="js/state-manager.js?v=24"></script>
+  <script src="js/waveform-cache.js?v=24"></script>
+  <script src="js/audio-engine.js?v=24"></script>
+  <script src="js/timeline-ui.js?v=24"></script>
+  <script src="js/app.js?v=24"></script>
+</body>
+</html>

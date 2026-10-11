@@ -1,0 +1,973 @@
+/**
+ * TimelineUI - Interactive multitrack timeline, responsive mobile track handles,
+ * track selection, draggable markers, pinch-to-zoom, and selected track inspector.
+ */
+class TimelineUI {
+  constructor(containerEl, stateManager, audioEngine, waveformCache) {
+    this.container = containerEl;
+    this.state = stateManager;
+    this.audio = audioEngine;
+    this.waveforms = waveformCache;
+
+    // Viewport & Zoom settings
+    this.pixelsPerSecond = this.state.zoom || 60; // Zoom level
+    this.minZoom = 15;
+    this.maxZoom = 300;
+    this.scrollLeft = 0;
+    this.timelineWidth = 1000;
+    this.followPlayhead = true;
+
+    // DOM Elements
+    this.rulerCanvas = document.getElementById('rulerCanvas');
+    this.markerLayer = document.getElementById('markerLayer');
+    this.tracksContainer = document.getElementById('tracksContainer');
+    this.playheadLine = document.getElementById('playheadLine');
+    this.playheadHandle = document.getElementById('playheadHandle');
+    this.timelineScrollArea = document.getElementById('timelineScrollArea');
+    this.timelineContent = document.getElementById('timelineContent');
+
+    // Selected Track Pane DOM
+    this.paneTrackDot = document.getElementById('paneTrackDot');
+    this.paneTrackName = document.getElementById('paneTrackName');
+    this.paneOffsetBadge = document.getElementById('paneOffsetBadge');
+    this.paneBtnMute = document.getElementById('paneBtnMute');
+    this.paneBtnSolo = document.getElementById('paneBtnSolo');
+    this.paneVolSlider = document.getElementById('paneVolSlider');
+    this.paneVolLabel = document.getElementById('paneVolLabel');
+    this.paneVuMeter = document.getElementById('paneVuMeter');
+    this.panePrevTrack = document.getElementById('panePrevTrack');
+    this.paneNextTrack = document.getElementById('paneNextTrack');
+
+    // Dragging / Touch Interaction State
+    this.isDraggingPlayhead = false;
+    this.draggingMarkerId = null;
+    this.touchPinchInitialDist = null;
+    this.touchPinchInitialZoom = null;
+    this.touchPinchMidX = null;
+
+    // Canvas resize observer
+    this.resizeObserver = new ResizeObserver(() => this.handleResize());
+    if (this.timelineScrollArea) {
+      this.resizeObserver.observe(this.timelineScrollArea);
+    }
+
+    this.initEvents();
+    this.initInspectorEvents();
+    this.render();
+  }
+
+  isMobile() {
+    return window.innerWidth <= 768;
+  }
+
+  getTrackHeaderWidth() {
+    return this.isMobile() ? 44 : 240;
+  }
+
+  getTrackHeight() {
+    return this.isMobile() ? 64 : 72;
+  }
+
+  getRulerHeight() {
+    return this.isMobile() ? 28 : 34;
+  }
+
+  initEvents() {
+    // Scroll event on timeline
+    this.timelineScrollArea.addEventListener('scroll', () => {
+      this.scrollLeft = this.timelineScrollArea.scrollLeft;
+      this.updatePlayheadPosition();
+    });
+
+    // Middle mouse button "hand scroll" (drag horizontally) in desktop mode
+    this.timelineScrollArea.addEventListener('mousedown', (e) => {
+      if (e.button === 1) { // Middle click / wheel button
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX;
+        const startScrollLeft = this.timelineScrollArea.scrollLeft;
+        this.isMiddlePanning = true;
+        document.body.classList.add('is-middle-panning');
+
+        const onMouseMove = (moveEvent) => {
+          if (!this.isMiddlePanning) return;
+          moveEvent.preventDefault();
+          const dx = moveEvent.clientX - startX;
+          // Drag right -> reveal left content (scrollLeft decreases)
+          this.timelineScrollArea.scrollLeft = startScrollLeft - dx;
+          this.scrollLeft = this.timelineScrollArea.scrollLeft;
+        };
+
+        const onMouseUp = (upEvent) => {
+          if (upEvent.button === 1 || upEvent.buttons === 0) {
+            this.isMiddlePanning = false;
+            document.body.classList.remove('is-middle-panning');
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+          }
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      }
+    });
+
+    // Prevent default browser autoscroll indicator on middle click
+    this.timelineScrollArea.addEventListener('auxclick', (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+
+    // Zoom via Ctrl + Wheel or trackpad pinch
+    this.timelineScrollArea.addEventListener('wheel', (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const zoomDelta = -e.deltaY * 0.15;
+        this.applyZoom(this.pixelsPerSecond + zoomDelta, e.clientX);
+      } else if (e.shiftKey) {
+        e.preventDefault();
+        this.timelineScrollArea.scrollLeft += e.deltaY;
+      }
+    }, { passive: false });
+
+    // Touch events for mobile pinch-to-zoom
+    this.timelineScrollArea.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        this.touchPinchInitialDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+        this.touchPinchInitialZoom = this.pixelsPerSecond;
+        this.touchPinchMidX = (t1.clientX + t2.clientX) / 2;
+      }
+    }, { passive: true });
+
+    this.timelineScrollArea.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2 && this.touchPinchInitialDist) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const currentDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+        if (this.touchPinchInitialDist > 0) {
+          const ratio = currentDist / this.touchPinchInitialDist;
+          const targetZoom = this.touchPinchInitialZoom * ratio;
+          this.applyZoom(targetZoom, this.touchPinchMidX);
+        }
+      }
+    }, { passive: true });
+
+    this.timelineScrollArea.addEventListener('touchend', (e) => {
+      if (e.touches.length < 2) {
+        this.touchPinchInitialDist = null;
+        this.touchPinchInitialZoom = null;
+      }
+    });
+
+    // Ruler click / drag for playhead scrub
+    this.rulerCanvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const rect = this.rulerCanvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const time = Math.max(0, clickX / this.pixelsPerSecond);
+      
+      this.isDraggingPlayhead = true;
+      this.audio.seek(time);
+      
+      const onMouseMove = (moveEvent) => {
+        if (!this.isDraggingPlayhead) return;
+        const moveX = moveEvent.clientX - rect.left;
+        const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
+        this.audio.seek(scrubTime);
+      };
+
+      const onMouseUp = () => {
+        this.isDraggingPlayhead = false;
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    });
+
+    // Double click ruler to add marker
+    this.rulerCanvas.addEventListener('dblclick', (e) => {
+      const rect = this.rulerCanvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const time = Math.max(0, clickX / this.pixelsPerSecond);
+      const markerName = prompt('Enter name for new marker:', `Marker ${this.state.markers.length + 1}`);
+      if (markerName !== null) {
+        this.state.addMarker(markerName, time);
+      }
+    });
+
+    // Playhead line / handle dragging
+    if (this.playheadHandle) {
+      this.playheadHandle.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        this.isDraggingPlayhead = true;
+        const startX = e.clientX;
+        const startTime = this.audio.playheadPosition;
+
+        const onMouseMove = (moveEvent) => {
+          if (!this.isDraggingPlayhead) return;
+          const deltaX = moveEvent.clientX - startX;
+          const newTime = Math.max(0, startTime + (deltaX / this.pixelsPerSecond));
+          this.audio.seek(newTime);
+        };
+
+        const onMouseUp = () => {
+          this.isDraggingPlayhead = false;
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+    }
+
+    // Audio Engine time updates
+    this.audio.on('time_update', ({ time }) => {
+      this.updatePlayheadPosition();
+      this.checkAutoScroll(time);
+    });
+
+    this.audio.on('playback_started', () => this.updatePlayheadPosition());
+    this.audio.on('playback_paused', () => this.updatePlayheadPosition());
+    this.audio.on('playback_stopped', () => this.updatePlayheadPosition());
+
+    // Chunk-based streaming & progressive decoding events
+    this.audio.on('tracks_initialized', () => {
+      this.render();
+    });
+
+    this.audio.on('chunk_loading', ({ trackIndex }) => {
+      this.renderWaveformForTrack(trackIndex);
+      this.updateTrackStatus(trackIndex);
+    });
+
+    this.audio.on('chunk_decoded', ({ trackIndex }) => {
+      this.renderWaveformForTrack(trackIndex);
+      this.updateTrackStatus(trackIndex);
+    });
+
+    this.audio.on('chunk_error', ({ trackIndex }) => {
+      this.renderWaveformForTrack(trackIndex);
+      this.updateTrackStatus(trackIndex);
+    });
+
+    // State changes
+    this.state.subscribe((type, payload) => {
+      if (type === 'project_loaded') {
+        if (this.state.zoom && this.state.zoom !== this.pixelsPerSecond) {
+          this.pixelsPerSecond = this.state.zoom;
+          this.updateTimelineDimensions();
+        }
+        this.render();
+        this.updateInspectorPane();
+      } else if (type === 'track_volume' || type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
+        this.render();
+        this.updateInspectorPane();
+      } else if (type === 'track_selected') {
+        this.render();
+        this.updateInspectorPane();
+      } else if (type === 'zoom_changed') {
+        if (payload.zoom && payload.zoom !== this.pixelsPerSecond) {
+          this.applyZoom(payload.zoom);
+        }
+      } else if (type === 'marker_added' || type === 'marker_updated' || type === 'marker_deleted') {
+        this.renderMarkerElements();
+        this.renderRuler();
+      }
+    });
+  }
+
+  initInspectorEvents() {
+    if (this.paneBtnMute) {
+      this.paneBtnMute.addEventListener('click', () => {
+        this.state.toggleTrackMute(this.state.selectedTrackIndex);
+      });
+    }
+    if (this.paneBtnSolo) {
+      this.paneBtnSolo.addEventListener('click', () => {
+        this.state.toggleTrackSolo(this.state.selectedTrackIndex);
+      });
+    }
+    if (this.paneVolSlider) {
+      this.paneVolSlider.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        this.state.setTrackVolume(this.state.selectedTrackIndex, val);
+        if (this.paneVolLabel) {
+          this.paneVolLabel.textContent = this.formatGainDb(val);
+        }
+      });
+    }
+    if (this.panePrevTrack) {
+      this.panePrevTrack.addEventListener('click', () => {
+        const current = this.state.selectedTrackIndex;
+        const total = this.state.project?.tracks?.length || 1;
+        this.state.selectTrack((current - 1 + total) % total);
+      });
+    }
+    if (this.paneNextTrack) {
+      this.paneNextTrack.addEventListener('click', () => {
+        const current = this.state.selectedTrackIndex;
+        const total = this.state.project?.tracks?.length || 1;
+        this.state.selectTrack((current + 1) % total);
+      });
+    }
+  }
+
+  updateInspectorPane() {
+    const idx = this.state.selectedTrackIndex;
+    const tracks = this.state.project?.tracks || [];
+    const track = tracks[idx];
+    const trackState = this.state.tracksState[idx] || { volume: 1.0, mute: false, solo: false };
+
+    if (!track) return;
+
+    if (this.paneTrackDot) {
+      this.paneTrackDot.style.background = track.color || '#00f2fe';
+      this.paneTrackDot.style.boxShadow = `0 0 6px ${track.color || '#00f2fe'}`;
+    }
+    if (this.paneTrackName) {
+      this.paneTrackName.textContent = track.name || `Track ${idx + 1}`;
+    }
+    if (this.paneOffsetBadge) {
+      const offset = Number(track.offset) || 0;
+      this.paneOffsetBadge.textContent = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
+    }
+    if (this.paneBtnMute) {
+      this.paneBtnMute.classList.toggle('active', trackState.mute);
+    }
+    if (this.paneBtnSolo) {
+      this.paneBtnSolo.classList.toggle('active', trackState.solo);
+    }
+    if (this.paneVolSlider) {
+      this.paneVolSlider.value = trackState.volume;
+    }
+    if (this.paneVolLabel) {
+      this.paneVolLabel.textContent = this.formatGainDb(trackState.volume);
+    }
+  }
+
+  handleResize() {
+    this.updateTimelineDimensions();
+    this.renderRuler();
+    this.renderWaveforms();
+    this.updatePlayheadPosition();
+    this.renderMarkerElements();
+  }
+
+  updateTimelineDimensions() {
+    const headerWidth = this.getTrackHeaderWidth();
+    const totalDuration = Math.max(this.audio.getTotalDuration(), 10);
+    const visibleWaveAreaW = Math.max(
+      this.timelineScrollArea.clientWidth - headerWidth - 20,
+      totalDuration * this.pixelsPerSecond + 150
+    );
+
+    this.timelineWidth = Math.round(visibleWaveAreaW);
+
+    if (this.timelineContent) {
+      this.timelineContent.style.setProperty('--timeline-width', `${this.timelineWidth}px`);
+    }
+
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.width = `${this.timelineWidth}px`;
+    }
+    if (this.markerLayer) {
+      this.markerLayer.style.width = `${this.timelineWidth}px`;
+    }
+  }
+
+  applyZoom(newZoom, originClientX = null) {
+    const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, newZoom));
+    if (clampedZoom === this.pixelsPerSecond) return;
+
+    const headerWidth = this.getTrackHeaderWidth();
+
+    let focalTime = (this.scrollLeft + (this.timelineScrollArea.clientWidth / 2) - headerWidth) / this.pixelsPerSecond;
+    if (originClientX !== null) {
+      const rect = this.timelineScrollArea.getBoundingClientRect();
+      const originX = originClientX - rect.left;
+      focalTime = (this.scrollLeft + originX - headerWidth) / this.pixelsPerSecond;
+    }
+
+    focalTime = Math.max(0, focalTime);
+
+    this.pixelsPerSecond = clampedZoom;
+    this.state.setZoom(this.pixelsPerSecond);
+    this.updateTimelineDimensions();
+
+    if (originClientX !== null) {
+      const rect = this.timelineScrollArea.getBoundingClientRect();
+      const originX = originClientX - rect.left;
+      this.timelineScrollArea.scrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - originX;
+    } else {
+      this.timelineScrollArea.scrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - (this.timelineScrollArea.clientWidth / 2);
+    }
+
+    this.scrollLeft = this.timelineScrollArea.scrollLeft;
+
+    this.renderRuler();
+    this.renderWaveforms();
+    this.updatePlayheadPosition();
+    this.renderMarkerElements();
+  }
+
+  checkAutoScroll(time) {
+    if (!this.followPlayhead || !this.audio.isPlaying) return;
+
+    const headerWidth = this.getTrackHeaderWidth();
+    const playheadX = headerWidth + (time * this.pixelsPerSecond);
+    const viewLeft = this.scrollLeft;
+    const viewWidth = this.timelineScrollArea.clientWidth;
+    const viewRight = viewLeft + viewWidth;
+
+    if (playheadX > viewRight - 80) {
+      this.timelineScrollArea.scrollLeft = playheadX - 120;
+    } else if (playheadX < viewLeft + headerWidth) {
+      this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - headerWidth - 40);
+    }
+  }
+
+  scrollToTime(time) {
+    if (!this.timelineScrollArea) return;
+    const headerWidth = this.getTrackHeaderWidth();
+    const playheadX = headerWidth + (time * this.pixelsPerSecond);
+    const viewWidth = this.timelineScrollArea.clientWidth;
+    if (playheadX > viewWidth - 80 || playheadX < headerWidth + 40) {
+      this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - (viewWidth / 2));
+      this.scrollLeft = this.timelineScrollArea.scrollLeft;
+    }
+  }
+
+  renderRuler() {
+    if (!this.rulerCanvas) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const width = this.timelineWidth;
+    const height = this.getRulerHeight();
+
+    const targetW = Math.round(width * dpr);
+    const targetH = Math.round(height * dpr);
+
+    if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
+      this.rulerCanvas.width = targetW;
+      this.rulerCanvas.height = targetH;
+    }
+
+    this.rulerCanvas.style.width = `${width}px`;
+    this.rulerCanvas.style.height = `${height}px`;
+
+    const ctx = this.rulerCanvas.getContext('2d');
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    // Ruler Background
+    ctx.fillStyle = 'rgba(14, 18, 26, 0.98)';
+    ctx.fillRect(0, 0, width, height);
+
+    // Bottom border line
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, height - 0.5);
+    ctx.lineTo(width, height - 0.5);
+    ctx.stroke();
+
+    // Step interval
+    let stepSec = 1;
+    if (this.pixelsPerSecond < 25) stepSec = 10;
+    else if (this.pixelsPerSecond < 50) stepSec = 5;
+    else if (this.pixelsPerSecond < 100) stepSec = 2;
+    else if (this.pixelsPerSecond < 200) stepSec = 1;
+    else stepSec = 0.5;
+
+    const totalSeconds = width / this.pixelsPerSecond;
+
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#94a3b8';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+
+    for (let t = 0; t <= totalSeconds; t += stepSec) {
+      const x = t * this.pixelsPerSecond;
+      if (x < 0 || x > width) continue;
+
+      const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0;
+
+      ctx.beginPath();
+      ctx.moveTo(x, height);
+      ctx.lineTo(x, isMajor ? height - 10 : height - 5);
+      ctx.stroke();
+
+      if (isMajor || this.pixelsPerSecond >= 70) {
+        const mins = Math.floor(t / 60);
+        const secs = Math.floor(t % 60);
+        const millis = Math.floor((t % 1) * 10);
+        let timeLabel = `${mins}:${secs.toString().padStart(2, '0')}`;
+        if (stepSec < 1) {
+          timeLabel += `.${millis}`;
+        }
+        ctx.fillText(timeLabel, x + 3, 12);
+      }
+    }
+
+    ctx.restore();
+  }
+
+  renderMarkerElements() {
+    if (!this.markerLayer) return;
+    this.markerLayer.innerHTML = '';
+
+    const markers = this.state.markers;
+    markers.forEach((marker) => {
+      const markerX = (marker.time * this.pixelsPerSecond);
+
+      const el = document.createElement('div');
+      el.className = 'marker-flag';
+      el.dataset.id = marker.id;
+      el.style.left = `${markerX}px`;
+      el.style.borderColor = marker.color;
+
+      const mins = Math.floor(marker.time / 60);
+      const secs = (marker.time % 60).toFixed(1).padStart(4, '0');
+
+      el.innerHTML = `
+        <div class="marker-tag" style="background: ${marker.color}22; border-color: ${marker.color}">
+          <span class="marker-dot" style="background: ${marker.color}"></span>
+          <span class="marker-name">${this.escapeHtml(marker.name)}</span>
+          <span class="marker-time">${mins}:${secs}</span>
+          <button class="marker-del-btn" title="Delete Marker" data-del="${marker.id}">&times;</button>
+        </div>
+        <div class="marker-guide-line" style="border-color: ${marker.color}55"></div>
+      `;
+
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.marker-del-btn')) {
+          e.stopPropagation();
+          const delId = e.target.closest('.marker-del-btn').dataset.del;
+          if (confirm(`Delete marker "${marker.name}"?`)) {
+            this.state.deleteMarker(delId);
+          }
+          return;
+        }
+
+        this.audio.seek(marker.time);
+      });
+
+      const tag = el.querySelector('.marker-tag');
+      tag.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        const newName = prompt('Rename marker:', marker.name);
+        if (newName !== null) {
+          this.state.updateMarker(marker.id, { name: newName });
+        }
+      });
+
+      tag.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.marker-del-btn')) return;
+        e.stopPropagation();
+
+        this.draggingMarkerId = marker.id;
+        const startClientX = e.clientX;
+        const originalTime = marker.time;
+
+        const onMouseMove = (moveEvent) => {
+          if (this.draggingMarkerId !== marker.id) return;
+          const deltaX = moveEvent.clientX - startClientX;
+          const newTime = Math.max(0, originalTime + (deltaX / this.pixelsPerSecond));
+          this.state.updateMarker(marker.id, { time: newTime });
+        };
+
+        const onMouseUp = () => {
+          this.draggingMarkerId = null;
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+
+      this.markerLayer.appendChild(el);
+    });
+
+    this.updateMarkerPillBar();
+  }
+
+  updateMarkerPillBar() {
+    const pillContainer = document.getElementById('markerPillList');
+    if (!pillContainer) return;
+
+    pillContainer.innerHTML = '';
+    const markers = this.state.markers;
+
+    if (markers.length === 0) {
+      pillContainer.innerHTML = '<span class="empty-markers-hint">No markers. Double-click ruler or click "+ Marker"</span>';
+      return;
+    }
+
+    markers.forEach(m => {
+      const pill = document.createElement('button');
+      pill.className = 'marker-pill';
+      const mins = Math.floor(m.time / 60);
+      const secs = Math.floor(m.time % 60).toString().padStart(2, '0');
+      
+      pill.innerHTML = `
+        <span class="pill-dot" style="background:${m.color}"></span>
+        <span class="pill-title">${this.escapeHtml(m.name)}</span>
+        <span class="pill-time">${mins}:${secs}</span>
+      `;
+
+      pill.addEventListener('click', () => {
+        this.audio.seek(m.time);
+      });
+
+      pillContainer.appendChild(pill);
+    });
+  }
+
+  /**
+   * Render all track rows, sidebar cells (desktop controls + mobile handles), and wave canvases
+   */
+  render() {
+    if (!this.tracksContainer) return;
+
+    this.updateTimelineDimensions();
+    this.tracksContainer.innerHTML = '';
+
+    const tracks = this.state.project?.tracks || [];
+    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
+    const selectedIdx = this.state.selectedTrackIndex;
+    const trackHeight = this.getTrackHeight();
+
+    tracks.forEach((t, index) => {
+      const trackState = this.state.tracksState[index] || { volume: 1.0, mute: false, solo: false };
+      const loadedTrack = this.audio.tracks[index];
+      const color = t.color || '#00f2fe';
+      const offset = Number(t.offset) || 0;
+      const isSelected = index === selectedIdx;
+
+      const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
+
+      const row = document.createElement('div');
+      row.className = `track-row ${isDimmed ? 'track-dimmed' : ''} ${isSelected ? 'track-selected' : ''}`;
+      row.dataset.index = index;
+
+      // Handle track selection when row is clicked
+      row.addEventListener('click', () => {
+        if (this.state.selectedTrackIndex !== index) {
+          this.state.selectTrack(index);
+        }
+      });
+
+      // Sticky Sidebar Cell (contains Desktop Header AND Mobile Handle - toggled via CSS)
+      const sidebarCell = document.createElement('div');
+      sidebarCell.className = 'track-sidebar-cell';
+      sidebarCell.style.borderLeft = `4px solid ${color}`;
+
+      // In mobile mode only: first click selects track; when already selected, next click toggles mute
+      sidebarCell.addEventListener('click', (e) => {
+        if (this.isMobile()) {
+          e.stopPropagation();
+          if (this.state.selectedTrackIndex === index) {
+            this.state.toggleTrackMute(index);
+          } else {
+            this.state.selectTrack(index);
+          }
+        }
+      });
+
+      const offsetStr = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
+
+      // Determine initial status text
+      let statusText = 'Loading...';
+      let isChunkLoading = false;
+      if (loadedTrack?.chunks && loadedTrack.chunks.length > 0) {
+        const total = loadedTrack.chunks.length;
+        const decoded = loadedTrack.chunks.filter(c => c.status === 'decoded').length;
+        if (decoded === total) {
+          statusText = `${loadedTrack.duration.toFixed(1)}s`;
+        } else {
+          const decodedSec = Math.min(loadedTrack.duration, decoded * 20);
+          statusText = `${Math.round(decodedSec)}s / ${Math.round(loadedTrack.duration)}s`;
+          isChunkLoading = loadedTrack.chunks.some(c => c.status === 'loading');
+        }
+      } else if (loadedTrack?.buffer) {
+        statusText = `${loadedTrack.duration.toFixed(1)}s`;
+      }
+
+      // 1. Desktop Track Header content
+      const desktopHeader = document.createElement('div');
+      desktopHeader.className = 'desktop-track-header';
+      desktopHeader.innerHTML = `
+        <div class="track-info">
+          <div class="track-title-row">
+            <span class="track-name" title="${this.escapeHtml(t.name)}">${this.escapeHtml(t.name)}</span>
+            <span class="track-offset-badge" title="Start Offset from t0">${offsetStr}</span>
+          </div>
+          <div class="track-sub-info">
+            <span class="track-status ${isChunkLoading ? 'loading-pulse' : ''}" id="track_status_${index}">${statusText}</span>
+            <span class="track-vu-meter" id="vu_${index}">
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+              <span class="vu-led"></span>
+            </span>
+          </div>
+        </div>
+        <div class="track-controls">
+          <div class="btn-group">
+            <button class="btn-ctrl btn-mute ${trackState.mute ? 'active' : ''}" data-action="mute" data-index="${index}" title="Mute Track (M)">M</button>
+            <button class="btn-ctrl btn-solo ${trackState.solo ? 'active' : ''}" data-action="solo" data-index="${index}" title="Solo Track (S)">S</button>
+          </div>
+          <div class="fader-group">
+            <input type="range" class="track-vol-slider" min="0" max="1.5" step="0.01" value="${trackState.volume}" data-index="${index}" title="Volume: ${Math.round(trackState.volume * 100)}%">
+            <span class="vol-label">${this.formatGainDb(trackState.volume)}</span>
+          </div>
+        </div>
+      `;
+
+      // 2. Mobile Track Handle content
+      const mobileHandle = document.createElement('div');
+      mobileHandle.className = 'mobile-track-handle';
+      mobileHandle.innerHTML = `
+        <span class="track-handle-dot ${trackState.mute ? 'muted' : ''}" style="background: ${color}; color: ${color};" title="Track ${index + 1}: ${trackState.mute ? 'Muted' : 'Active'}"></span>
+        <span class="track-handle-num">${index + 1}</span>
+      `;
+
+      sidebarCell.appendChild(desktopHeader);
+      sidebarCell.appendChild(mobileHandle);
+      row.appendChild(sidebarCell);
+
+      // Right Track Waveform Canvas Lane
+      const lane = document.createElement('div');
+      lane.className = 'track-lane';
+
+      const canvas = document.createElement('canvas');
+      canvas.className = 'track-canvas';
+      canvas.dataset.index = index;
+      lane.appendChild(canvas);
+
+      // Interactive timeline seeking on click or drag across waveform
+      lane.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return; // Only left-click seeks; middle-click bubbles to timelineScrollArea
+        const rect = canvas.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const time = Math.max(0, clickX / this.pixelsPerSecond);
+
+        this.state.selectTrack(index);
+        this.isDraggingPlayhead = true;
+        this.audio.seek(time);
+
+        const onMouseMove = (moveEvent) => {
+          if (!this.isDraggingPlayhead) return;
+          const moveX = moveEvent.clientX - rect.left;
+          const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
+          this.audio.seek(scrubTime);
+        };
+
+        const onMouseUp = () => {
+          this.isDraggingPlayhead = false;
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+
+      row.appendChild(lane);
+      this.tracksContainer.appendChild(row);
+    });
+
+    this.bindTrackControlEvents();
+    this.renderWaveforms();
+    this.renderRuler();
+    this.renderMarkerElements();
+    this.updatePlayheadPosition();
+    this.updateInspectorPane();
+  }
+
+  bindTrackControlEvents() {
+    this.tracksContainer.querySelectorAll('.btn-mute').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.index, 10);
+        this.state.toggleTrackMute(idx);
+      });
+    });
+
+    this.tracksContainer.querySelectorAll('.btn-solo').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.index, 10);
+        this.state.toggleTrackSolo(idx);
+      });
+    });
+
+    this.tracksContainer.querySelectorAll('.track-vol-slider').forEach(slider => {
+      slider.addEventListener('input', (e) => {
+        const idx = parseInt(slider.dataset.index, 10);
+        const val = parseFloat(slider.value);
+        this.state.setTrackVolume(idx, val);
+        const label = slider.parentElement.querySelector('.vol-label');
+        if (label) label.textContent = this.formatGainDb(val);
+      });
+    });
+  }
+
+  renderWaveforms() {
+    if (!this.tracksContainer) return;
+
+    const canvases = this.tracksContainer.querySelectorAll('.track-canvas');
+    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
+    const selectedIdx = this.state.selectedTrackIndex;
+    const trackHeight = this.getTrackHeight();
+
+    canvases.forEach(canvas => {
+      const idx = parseInt(canvas.dataset.index, 10);
+      const loadedTrack = this.audio.tracks[idx];
+      const trackState = this.state.tracksState[idx] || { volume: 1.0, mute: false, solo: false };
+      const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
+      const isSelected = idx === selectedIdx;
+
+      this.waveforms.renderTrackCanvas(
+        canvas,
+        loadedTrack,
+        this.pixelsPerSecond,
+        this.timelineWidth,
+        trackHeight,
+        { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
+      );
+    });
+  }
+
+  renderWaveformForTrack(trackIndex) {
+    if (!this.tracksContainer) return;
+    const canvas = this.tracksContainer.querySelector(`.track-canvas[data-index="${trackIndex}"]`);
+    if (!canvas) return;
+
+    const loadedTrack = this.audio.tracks[trackIndex];
+    const trackState = this.state.tracksState[trackIndex] || { volume: 1.0, mute: false, solo: false };
+    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
+    const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
+    const isSelected = trackIndex === this.state.selectedTrackIndex;
+    const trackHeight = this.getTrackHeight();
+
+    this.waveforms.renderTrackCanvas(
+      canvas,
+      loadedTrack,
+      this.pixelsPerSecond,
+      this.timelineWidth,
+      trackHeight,
+      { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
+    );
+  }
+
+  updateTrackStatus(trackIndex) {
+    const statusEl = document.getElementById(`track_status_${trackIndex}`);
+    if (!statusEl) return;
+    const loadedTrack = this.audio.tracks[trackIndex];
+    if (!loadedTrack) return;
+
+    if (loadedTrack.chunks && loadedTrack.chunks.length > 0) {
+      const total = loadedTrack.chunks.length;
+      const decoded = loadedTrack.chunks.filter(c => c.status === 'decoded').length;
+      if (decoded === total) {
+        statusEl.textContent = `${loadedTrack.duration.toFixed(1)}s`;
+        statusEl.classList.remove('loading-pulse');
+      } else {
+        const decodedSec = Math.min(loadedTrack.duration, decoded * 20);
+        statusEl.textContent = `${Math.round(decodedSec)}s / ${Math.round(loadedTrack.duration)}s`;
+        if (loadedTrack.chunks.some(c => c.status === 'loading')) {
+          statusEl.classList.add('loading-pulse');
+        } else {
+          statusEl.classList.remove('loading-pulse');
+        }
+      }
+    } else if (loadedTrack.buffer) {
+      statusEl.textContent = `${loadedTrack.duration.toFixed(1)}s`;
+      statusEl.classList.remove('loading-pulse');
+    } else {
+      statusEl.textContent = 'Loading...';
+    }
+  }
+
+  updatePlayheadPosition() {
+    const time = (this.audio && this.audio.playheadPosition !== undefined && this.audio.playheadPosition > 0)
+      ? this.audio.playheadPosition
+      : (this.state.currentTime || 0);
+    const headerWidth = this.getTrackHeaderWidth();
+    const playheadX = headerWidth + (time * this.pixelsPerSecond);
+
+    if (this.playheadLine) {
+      this.playheadLine.style.transform = `translateX(${playheadX}px)`;
+    }
+
+    const timeDisplay = document.getElementById('timeDisplay');
+    if (timeDisplay) {
+      timeDisplay.textContent = this.formatTimecode(time);
+    }
+
+    this.updateVUMeters();
+  }
+
+  updateVUMeters() {
+    if (!this.audio.isPlaying) {
+      document.querySelectorAll('.vu-led.lit').forEach(led => led.classList.remove('lit'));
+      return;
+    }
+
+    // Update track VU meters on desktop
+    this.audio.tracks.forEach((track, idx) => {
+      const peak = this.audio.getTrackPeak(idx);
+      const vuMeter = document.getElementById(`vu_${idx}`);
+      if (vuMeter) {
+        const leds = vuMeter.querySelectorAll('.vu-led');
+        const litCount = Math.floor(peak * (leds.length + 1));
+        leds.forEach((led, i) => {
+          if (i < litCount) led.classList.add('lit');
+          else led.classList.remove('lit');
+        });
+      }
+    });
+
+    // Update Selected Track Inspector Pane VU meter
+    const selectedIdx = this.state.selectedTrackIndex;
+    const selectedPeak = this.audio.getTrackPeak(selectedIdx);
+    if (this.paneVuMeter) {
+      const paneLeds = this.paneVuMeter.querySelectorAll('.vu-led');
+      const litCount = Math.floor(selectedPeak * (paneLeds.length + 1));
+      paneLeds.forEach((led, i) => {
+        if (i < litCount) led.classList.add('lit');
+        else led.classList.remove('lit');
+      });
+    }
+  }
+
+  formatTimecode(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    const millis = Math.floor((seconds % 1) * 1000);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`;
+  }
+
+  formatGainDb(gain) {
+    if (gain <= 0.001) return '-inf dB';
+    const db = 20 * Math.log10(gain);
+    return (db >= 0 ? '+' : '') + db.toFixed(1) + ' dB';
+  }
+
+  escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+}

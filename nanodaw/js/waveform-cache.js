@@ -119,7 +119,7 @@ class WaveformCache {
       ctx.fillRect(0, 0, width, height);
     }
 
-    if (!track || (!track.buffer && !track.peaks && (!track.chunks || track.chunks.length === 0))) {
+    if (!track || (!track.buffer && !track.peaks)) {
       // Empty or loading lane
       ctx.restore();
       return;
@@ -162,6 +162,14 @@ class WaveformCache {
     const nameLabel = track.name || 'Audio Track';
     ctx.fillText(nameLabel, trackStartX + 8, 16);
 
+    // Get Peak Data
+    const peakData = this.getPeaks(track.index, track);
+    if (!peakData) {
+      ctx.restore();
+      return;
+    }
+
+    const { minPeaks, maxPeaks, totalPoints } = peakData;
     const midY = height / 2;
     const ampScale = (height - 24) / 2;
 
@@ -183,123 +191,22 @@ class WaveformCache {
       gradient.addColorStop(1, color);
     }
 
-    // --- Case A: Track has 20-second streaming chunks ---
-    if (track.chunks && track.chunks.length > 0) {
-      track.chunks.forEach((chunk, k) => {
-        const chunkStartX = Math.round((offset + chunk.startTime) * pixelsPerSecond);
-        const chunkWidth = Math.max(2, Math.round(chunk.duration * pixelsPerSecond));
-        const chunkEndX = chunkStartX + chunkWidth;
+    ctx.fillStyle = gradient;
 
-        // 1. Chunk boundary separator line
-        if (k > 0) {
-          ctx.save();
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-          ctx.lineWidth = 1;
-          ctx.setLineDash([2, 3]);
-          ctx.beginPath();
-          ctx.moveTo(chunkStartX, 4);
-          ctx.lineTo(chunkStartX, height - 4);
-          ctx.stroke();
-          ctx.restore();
-        }
+    const step = 2; // draw bar every 2px
+    for (let x = trackStartX; x < trackEndX; x += step) {
+      const relX = x - trackStartX;
+      const pointIdx = Math.floor((relX / trackWidth) * totalPoints);
 
-        // 2. Render based on chunk status
-        if (chunk.status === 'decoded' && chunk.minPeaks && chunk.maxPeaks) {
-          // Decoded chunk: draw vibrant waveform!
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(chunkStartX, 4, chunkWidth, height - 8);
-          ctx.clip();
+      if (pointIdx >= 0 && pointIdx < totalPoints) {
+        const minVal = minPeaks[pointIdx];
+        const maxVal = maxPeaks[pointIdx];
 
-          ctx.fillStyle = gradient;
-          const totalPoints = chunk.minPeaks.length;
-          const step = 2;
-          for (let x = chunkStartX; x < chunkEndX; x += step) {
-            const relX = x - chunkStartX;
-            const pointIdx = Math.floor((relX / chunkWidth) * totalPoints);
-            if (pointIdx >= 0 && pointIdx < totalPoints) {
-              const minVal = chunk.minPeaks[pointIdx];
-              const maxVal = chunk.maxPeaks[pointIdx];
-              const topY = midY - (maxVal * ampScale);
-              const botY = midY - (minVal * ampScale);
-              const barHeight = Math.max(1.5, botY - topY);
-              ctx.fillRect(x, topY, step - 0.5, barHeight);
-            }
-          }
-          ctx.restore();
+        const topY = midY - (maxVal * ampScale);
+        const botY = midY - (minVal * ampScale);
+        const barHeight = Math.max(1.5, botY - topY);
 
-        } else if (chunk.status === 'loading') {
-          // Loading chunk: diagonal animated stripes + loading badge
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(chunkStartX, 4, chunkWidth, height - 8);
-          ctx.clip();
-
-          ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.04)' : (color + '15');
-          ctx.fillRect(chunkStartX, 4, chunkWidth, height - 8);
-
-          ctx.strokeStyle = isDimmed ? 'rgba(255, 255, 255, 0.12)' : (color + '55');
-          ctx.lineWidth = 1.5;
-          const stripeSpacing = 12;
-          for (let lx = chunkStartX - height; lx < chunkEndX + height; lx += stripeSpacing) {
-            ctx.beginPath();
-            ctx.moveTo(lx, height - 4);
-            ctx.lineTo(lx + height, 4);
-            ctx.stroke();
-          }
-
-          ctx.font = '10px "Inter", -apple-system, sans-serif';
-          ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.6)' : color;
-          ctx.fillText(`⚡ Loading ${Math.round(chunk.startTime)}s...`, chunkStartX + 8, midY + 4);
-          ctx.restore();
-
-        } else {
-          // Undecoded chunk: dimmed diagonal hatch pattern + timestamp label
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(chunkStartX, 4, chunkWidth, height - 8);
-          ctx.clip();
-
-          ctx.fillStyle = 'rgba(15, 20, 30, 0.5)';
-          ctx.fillRect(chunkStartX, 4, chunkWidth, height - 8);
-
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-          ctx.lineWidth = 1;
-          const stripeSpacing = 16;
-          for (let lx = chunkStartX - height; lx < chunkEndX + height; lx += stripeSpacing) {
-            ctx.beginPath();
-            ctx.moveTo(lx, height - 4);
-            ctx.lineTo(lx + height, 4);
-            ctx.stroke();
-          }
-
-          ctx.font = '9px "Inter", -apple-system, sans-serif';
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-          ctx.fillText(`${Math.round(chunk.startTime)}s`, chunkStartX + 8, height - 12);
-          ctx.restore();
-        }
-      });
-
-    } else {
-      // --- Case B: Legacy / Monolithic buffer or pre-computed peaks ---
-      const peakData = this.getPeaks(track.index, track);
-      if (peakData) {
-        const { minPeaks, maxPeaks, totalPoints } = peakData;
-        ctx.fillStyle = gradient;
-        const step = 2; // draw bar every 2px
-        for (let x = trackStartX; x < trackEndX; x += step) {
-          const relX = x - trackStartX;
-          const pointIdx = Math.floor((relX / trackWidth) * totalPoints);
-
-          if (pointIdx >= 0 && pointIdx < totalPoints) {
-            const minVal = minPeaks[pointIdx];
-            const maxVal = maxPeaks[pointIdx];
-            const topY = midY - (maxVal * ampScale);
-            const botY = midY - (minVal * ampScale);
-            const barHeight = Math.max(1.5, botY - topY);
-            ctx.fillRect(x, topY, step - 0.5, barHeight);
-          }
-        }
+        ctx.fillRect(x, topY, step - 0.5, barHeight);
       }
     }
 
@@ -313,6 +220,5 @@ class WaveformCache {
 
     ctx.restore();
     ctx.restore();
-
   }
 }

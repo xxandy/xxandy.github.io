@@ -1,0 +1,112 @@
+{
+  "title": "CQG Multitrack Session",
+  "tracks": [
+    {
+      "name": "Alex_P",
+      "url": "voice.mp3",
+      "offset": 0.0,
+      "color": "#ec4899",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Yilei_P",
+      "url": "yilei_p.mp3",
+      "offset": 0.0,
+      "color": "#8b5cf6",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Uekawa_P",
+      "url": "uekawa_p.mp3",
+      "offset": 0.0,
+      "color": "#c471ed",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Piano 1",
+      "url": "piano1.mp3",
+      "offset": 0.0,
+      "color": "#f7797d",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Piano 2",
+      "url": "piano2.mp3",
+      "offset": 0.0,
+      "color": "#fbbf24",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Bagpipe 1",
+      "url": "bagpipe1.mp3",
+      "offset": 0.0,
+      "color": "#00f2fe",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Bagpipe 2",
+      "url": "bagpipe2.mp3",
+      "offset": 0.0,
+      "color": "#4facfe",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Bass",
+      "url": "bass.mp3",
+      "offset": 0.0,
+      "color": "#38ef7d",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Pad",
+      "url": "pad.mp3",
+      "offset": 0.0,
+      "color": "#ff758c",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    }
+  ],
+  "markers": [
+    {
+      "name": "Start",
+      "time": 0.0
+    },
+    {
+      "name": "Section A",
+      "time": 30.0
+    },
+    {
+      "name": "Section B",
+      "time": 60.0
+    },
+    {
+      "name": "Midpoint",
+      "time": 120.0
+    },
+    {
+      "name": "Climax",
+      "time": 180.0
+    },
+    {
+      "name": "Outro",
+      "time": 230.0
+    }
+  ]
+}

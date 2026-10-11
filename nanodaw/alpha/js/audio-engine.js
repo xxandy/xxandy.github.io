@@ -1,0 +1,769 @@
+/**
+ * AudioEngine - High performance Web Audio multitrack playback engine
+ * Features:
+ * - 100% sample-accurate multitrack synchronization using a single master AudioContext.
+ * - iOS 16.4+ / iOS 17 / iOS 18 navigator.audioSession.type = 'playback' (bypasses silent switch).
+ * - Lazy AudioContext instantiation on first trusted user interaction (prevents iOS pre-gesture lockup).
+ * - OfflineAudioContext decoding pipeline (zero pre-gesture context poisoning).
+ * - Direct parallel audio graph routing (source -> trackGain -> masterGain -> destination).
+ * - Direct gain value assignments (no stalled clock automation ramps).
+ */
+/**
+ * TrackDataLoader - Handles Range-based partial chunk fetching and full-stream caching
+ */
+class TrackDataLoader {
+  constructor(trackIndex, url, audioEngine) {
+    this.trackIndex = trackIndex;
+    this.url = url;
+    this.audioEngine = audioEngine;
+    this.fullBuffer = null;
+    this.fetchPromise = null;
+    this.totalBytes = 0;
+  }
+
+  async ensureFullBuffer() {
+    if (this.fullBuffer) return this.fullBuffer;
+    if (this.fetchPromise) return this.fetchPromise;
+
+    this.fetchPromise = (async () => {
+      const res = await fetch(this.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} loading ${this.url}`);
+      const buf = await res.arrayBuffer();
+      this.fullBuffer = new Uint8Array(buf);
+      this.totalBytes = this.fullBuffer.byteLength;
+      return this.fullBuffer;
+    })();
+    return this.fetchPromise;
+  }
+
+  async getChunkBytes(chunkIndex, chunkDuration = 20.0, totalDuration = 266.0) {
+    if (this.fullBuffer) {
+      const bytesPerSec = totalDuration > 0 ? (this.totalBytes / totalDuration) : 32000;
+      const s = Math.max(0, Math.floor(chunkIndex * chunkDuration * bytesPerSec) - 4096);
+      const e = Math.min(this.totalBytes, Math.floor((chunkIndex + 1) * chunkDuration * bytesPerSec) + 8192);
+      return this.fullBuffer.subarray(s, e);
+    }
+
+    // Try HTTP Range request first
+    const approxBytesPerSec = 32000; // 256kbps CBR default
+    const s = Math.max(0, Math.floor(chunkIndex * chunkDuration * approxBytesPerSec) - 4096);
+    const e = Math.floor((chunkIndex + 1) * chunkDuration * approxBytesPerSec) + 8192;
+
+    try {
+      const res = await fetch(this.url, {
+        headers: { 'Range': `bytes=${s}-${e}` }
+      });
+      if (res.status === 206) {
+        const buf = await res.arrayBuffer();
+        return new Uint8Array(buf);
+      } else if (res.status === 200) {
+        const buf = await res.arrayBuffer();
+        this.fullBuffer = new Uint8Array(buf);
+        this.totalBytes = this.fullBuffer.byteLength;
+        const actualBytesPerSec = totalDuration > 0 ? (this.totalBytes / totalDuration) : 32000;
+        const actualS = Math.max(0, Math.floor(chunkIndex * chunkDuration * actualBytesPerSec) - 4096);
+        const actualE = Math.min(this.totalBytes, Math.floor((chunkIndex + 1) * chunkDuration * actualBytesPerSec) + 8192);
+        return this.fullBuffer.subarray(actualS, actualE);
+      }
+    } catch (err) {
+      // Fallback below
+    }
+
+    const full = await this.ensureFullBuffer();
+    const actualBytesPerSec = totalDuration > 0 ? (this.totalBytes / totalDuration) : 32000;
+    const actualS = Math.max(0, Math.floor(chunkIndex * chunkDuration * actualBytesPerSec) - 4096);
+    const actualE = Math.min(this.totalBytes, Math.floor((chunkIndex + 1) * chunkDuration * actualBytesPerSec) + 8192);
+    return full.subarray(actualS, actualE);
+  }
+}
+
+class AudioEngine {
+  constructor(stateManager) {
+    this.state = stateManager;
+    this.audioCtx = null;
+    this.masterGain = null;
+    this.masterAnalyser = null;
+    this.masterVolume = 1.0;
+    this.tracks = []; // Array of { index, name, url, offset, duration, buffer, gainNode, analyserNode, sourceNode, color }
+
+    this.isPlaying = false;
+    this.playheadPosition = 0; // In seconds
+    this.playbackStartTime = 0; // audioCtx.currentTime when playback started
+    this.playbackStartOffset = 0; // Playhead position when playback started
+
+    this.isLooping = false;
+    this.loopStart = 0;
+    this.loopEnd = 0;
+
+    this.rafId = null;
+    this.eventListeners = new Map();
+
+    // Subscribe to state updates
+    this.state.subscribe((type, payload) => this.handleStateChange(type, payload));
+
+    // Declare playback audio session immediately
+    this.setPlaybackAudioSession();
+
+    // Initialize lazy user touch unlock listeners
+    this.initTouchUnlockListeners();
+  }
+
+  setPlaybackAudioSession() {
+    if (typeof navigator !== 'undefined' && navigator.audioSession) {
+      try {
+        navigator.audioSession.type = 'playback';
+      } catch (e) {
+        console.warn('Setting navigator.audioSession failed:', e);
+      }
+    }
+  }
+
+  initTouchUnlockListeners() {
+    const unlockHandler = () => {
+      this.setPlaybackAudioSession();
+      this.ensureAudioContextUnlocked();
+    };
+
+    ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'click', 'keydown'].forEach(evt => {
+      window.addEventListener(evt, unlockHandler, { capture: true, passive: true });
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        this.setPlaybackAudioSession();
+        if (this.audioCtx && this.isPlaying) {
+          if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
+            this.audioCtx.resume().catch(() => {});
+          }
+        }
+      }
+    });
+  }
+
+  /**
+   * Lazily instantiate and unlock the master AudioContext inside a user gesture
+   */
+  getOrCreateAudioContext() {
+    if (!this.audioCtx) {
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtxClass) {
+        console.error('Web Audio API is not supported in this browser.');
+        return null;
+      }
+      this.audioCtx = new AudioCtxClass();
+
+      this.masterGain = this.audioCtx.createGain();
+      this.masterGain.gain.value = this.masterVolume;
+
+      this.masterAnalyser = this.audioCtx.createAnalyser();
+      this.masterAnalyser.fftSize = 128;
+      this.masterAnalyser.smoothingTimeConstant = 0.8;
+
+      // Direct parallel routing (masterGain -> destination, masterGain -> masterAnalyser)
+      this.masterGain.connect(this.audioCtx.destination);
+      this.masterGain.connect(this.masterAnalyser);
+
+      // Connect any existing tracks to the new audio graph
+      this.reconnectAllTrackNodes();
+    }
+
+    return this.audioCtx;
+  }
+
+  ensureAudioContextUnlocked() {
+    const ctx = this.getOrCreateAudioContext();
+    if (!ctx) return;
+
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      ctx.resume().catch(() => {});
+    }
+
+    // Play micro 1-sample silent buffer directly to destination to activate iOS WebKit audio pipeline
+    if (!this.silentBufferUnlocked) {
+      try {
+        const buffer = ctx.createBuffer(1, 1, 22050);
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(0);
+        this.silentBufferUnlocked = true;
+      } catch (e) {}
+    }
+  }
+
+  reconnectAllTrackNodes() {
+    if (!this.audioCtx || !this.masterGain) return;
+
+    this.tracks.forEach((track, index) => {
+      if (!track) return;
+
+      if (!track.gainNode) {
+        const gainNode = this.audioCtx.createGain();
+        const trackState = this.state.tracksState[index] || { volume: 1.0, mute: false, solo: false };
+        gainNode.gain.value = typeof trackState.volume === 'number' ? trackState.volume : 1.0;
+
+        const analyserNode = this.audioCtx.createAnalyser();
+        analyserNode.fftSize = 64;
+        analyserNode.smoothingTimeConstant = 0.6;
+
+        // Direct parallel connection
+        gainNode.connect(this.masterGain);
+        gainNode.connect(analyserNode);
+
+        track.gainNode = gainNode;
+        track.analyserNode = analyserNode;
+      }
+    });
+
+    this.updateAllGains();
+  }
+
+  on(event, callback) {
+    if (!this.eventListeners.has(event)) {
+      this.eventListeners.set(event, new Set());
+    }
+    this.eventListeners.get(event).add(callback);
+    return () => this.eventListeners.get(event).delete(callback);
+  }
+
+  emit(event, data) {
+    if (this.eventListeners.has(event)) {
+      this.eventListeners.get(event).forEach(cb => cb(data));
+    }
+  }
+
+  /**
+   * Decode an ArrayBuffer without requiring an active output AudioContext
+   */
+  decodeAudio(arrayBuffer) {
+    return new Promise((resolve, reject) => {
+      const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      
+      const decodeCtx = this.audioCtx || (OfflineCtx ? new OfflineCtx(1, 1, 44100) : (AudioCtxClass ? new AudioCtxClass() : null));
+      if (!decodeCtx) {
+        reject(new Error('Audio decoder not available'));
+        return;
+      }
+
+      const bufferCopy = arrayBuffer.slice(0);
+      let isSettled = false;
+
+      const onSuccess = (decoded) => {
+        if (!isSettled) {
+          isSettled = true;
+          resolve(decoded);
+        }
+      };
+
+      const onError = (err) => {
+        if (!isSettled) {
+          isSettled = true;
+          reject(err || new Error('decodeAudioData failed'));
+        }
+      };
+
+      try {
+        const promise = decodeCtx.decodeAudioData(bufferCopy, onSuccess, onError);
+        if (promise && typeof promise.then === 'function') {
+          promise.then(onSuccess).catch(onError);
+        }
+      } catch (e) {
+        onError(e);
+      }
+    });
+  }
+
+  /**
+   * Load project tracks using fixed 20-second streaming blocks and minimp3.wasm
+   */
+  async loadProjectTracks(project, baseUrl) {
+    this.isPlaying = false;
+    this.stopAllSources();
+    this.stopPlayheadTracker();
+    this.tracks = [];
+    const targetPlayhead = (this.state && this.state.currentTime > 0) ? this.state.currentTime : 0;
+
+    // Ensure minimp3 WebAssembly decoder is initialized
+    if (window.mp3Decoder) {
+      try {
+        await window.mp3Decoder.init();
+      } catch (e) {
+        console.warn('WASM MP3 Decoder init warning:', e);
+      }
+    }
+
+    const rawTracks = project.tracks || [];
+    const defaultDuration = (this.state && this.state.getProjectDuration) ? this.state.getProjectDuration() : 266.0;
+    const CHUNK_DURATION = 20.0;
+
+    // 1. Immediately instantiate all track structures & 20s chunk blocks
+    for (let index = 0; index < rawTracks.length; index++) {
+      const t = rawTracks[index];
+      let resolvedUrl = t.url;
+      try {
+        resolvedUrl = new URL(t.url, baseUrl).href;
+      } catch (e) {
+        resolvedUrl = t.url;
+      }
+
+      const offset = Math.max(0, Number(t.offset) || 0);
+      const trackDuration = Math.max(5.0, Number(t.duration) || defaultDuration);
+      const numChunks = Math.ceil(trackDuration / CHUNK_DURATION);
+      const chunks = [];
+
+      for (let k = 0; k < numChunks; k++) {
+        chunks.push({
+          index: k,
+          startTime: k * CHUNK_DURATION,
+          duration: Math.min(CHUNK_DURATION, trackDuration - k * CHUNK_DURATION),
+          status: 'undecoded', // 'undecoded' | 'loading' | 'decoded' | 'error'
+          buffer: null,
+          minPeaks: null,
+          maxPeaks: null,
+          totalPoints: 0
+        });
+      }
+
+      const trackData = {
+        index,
+        name: t.name || `Track ${index + 1}`,
+        url: resolvedUrl,
+        offset,
+        duration: trackDuration,
+        chunks,
+        loader: new TrackDataLoader(index, resolvedUrl, this),
+        sourceNodes: new Map(),
+        gainNode: null,
+        analyserNode: null,
+        sourceNode: null,
+        color: t.color || '#00f2fe'
+      };
+
+      this.tracks[index] = trackData;
+    }
+
+    // Connect nodes if AudioContext is already active
+    this.reconnectAllTrackNodes();
+
+    // Default loop region
+    const totalDuration = this.getTotalDuration();
+    this.loopStart = 0;
+    this.loopEnd = totalDuration;
+
+    // 2. Immediately emit tracks_initialized so UI shell renders in <50ms!
+    this.emit('tracks_initialized', { tracks: this.tracks, totalDuration });
+
+    // Restore initial playhead position
+    if (targetPlayhead > 0) {
+      this.seek(targetPlayhead);
+    } else {
+      this.playheadPosition = 0;
+      this.emit('time_update', { time: 0 });
+    }
+
+    // 3. Start progressive chunk streaming and decoding in background
+    this.startBackgroundChunkStreaming(targetPlayhead);
+
+    return this.tracks;
+  }
+
+  /**
+   * Background loader: decodes initial chunk across all tracks in parallel, then streams rest
+   */
+  async startBackgroundChunkStreaming(initialPlayhead = 0) {
+    const CHUNK_DURATION = 20.0;
+    const targetChunkIdx = Math.floor(initialPlayhead / CHUNK_DURATION);
+
+    // Phase 1: Concurrently decode Chunk 0 (or target chunk) for ALL tracks!
+    const initialPromises = this.tracks.map(t => {
+      const k = (targetChunkIdx < t.chunks.length) ? targetChunkIdx : 0;
+      return this.decodeTrackChunk(t.index, k);
+    });
+    await Promise.all(initialPromises);
+
+    this.emit('initial_playback_ready', { time: initialPlayhead });
+
+    // Phase 2: Stream remaining chunks progressively across tracks
+    const maxChunks = Math.max(...this.tracks.map(t => t.chunks ? t.chunks.length : 0));
+    for (let k = 0; k < maxChunks; k++) {
+      for (let t of this.tracks) {
+        if (t.chunks && t.chunks[k] && t.chunks[k].status === 'undecoded') {
+          await this.decodeTrackChunk(t.index, k);
+          // 8ms micro-yield keeps UI 60fps silky smooth
+          await new Promise(r => setTimeout(r, 8));
+        }
+      }
+    }
+
+    this.emit('all_chunks_completed');
+  }
+
+  /**
+   * Decode a specific 20-second chunk for a track
+   */
+  async decodeTrackChunk(trackIndex, chunkIndex) {
+    const track = this.tracks[trackIndex];
+    if (!track || !track.chunks || !track.chunks[chunkIndex]) return;
+    const chunk = track.chunks[chunkIndex];
+    if (chunk.status === 'decoded') return chunk;
+    if (chunk.status === 'loading') return;
+
+    chunk.status = 'loading';
+    this.emit('chunk_loading', { trackIndex, chunkIndex });
+
+    try {
+      const CHUNK_DURATION = 20.0;
+      const bytes = await track.loader.getChunkBytes(chunkIndex, CHUNK_DURATION, track.duration);
+
+      this.ensureAudioContextUnlocked();
+
+      if (window.mp3Decoder && window.mp3Decoder.wasm) {
+        const decoded = window.mp3Decoder.decodeChunk(bytes, CHUNK_DURATION, 0.0, this.audioCtx);
+        chunk.buffer = decoded.audioBuffer;
+        chunk.minPeaks = decoded.minPeaks;
+        chunk.maxPeaks = decoded.maxPeaks;
+        chunk.totalPoints = decoded.totalPoints;
+        chunk.status = 'decoded';
+      } else {
+        const audioBuffer = await this.decodeAudio(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+        chunk.buffer = audioBuffer;
+        chunk.status = 'decoded';
+      }
+
+      this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
+
+      // If currently playing, seamlessly schedule this newly ready chunk!
+      if (this.isPlaying) {
+        this.scheduleSingleChunk(track, chunk);
+      }
+    } catch (err) {
+      console.warn(`Failed decoding track ${trackIndex} chunk ${chunkIndex}:`, err);
+      chunk.status = 'error';
+      this.emit('chunk_error', { trackIndex, chunkIndex, error: err.message });
+    }
+  }
+
+  /**
+   * React immediately to user seek by prioritizing chunks around the playhead
+   */
+  prioritizeSeek(targetTime) {
+    const CHUNK_DURATION = 20.0;
+    this.tracks.forEach((track, trackIndex) => {
+      if (!track || !track.chunks) return;
+      const relTime = Math.max(0, targetTime - track.offset);
+      const targetChunkIdx = Math.floor(relTime / CHUNK_DURATION);
+
+      // Prioritize target chunk and immediate adjacent chunks
+      for (let k of [targetChunkIdx, targetChunkIdx + 1]) {
+        if (track.chunks[k] && track.chunks[k].status === 'undecoded') {
+          this.decodeTrackChunk(trackIndex, k);
+        }
+      }
+    });
+  }
+
+  getTotalDuration() {
+    let maxEnd = 0;
+    this.tracks.forEach(t => {
+      if (t) {
+        const end = (t.offset || 0) + (t.duration || 0);
+        if (end > maxEnd) maxEnd = end;
+      }
+    });
+    if (maxEnd === 0 && this.state) {
+      maxEnd = this.state.getProjectDuration();
+    }
+    return Math.max(maxEnd, 5);
+  }
+
+  /**
+   * Apply effective gain / mute / solo to all tracks
+   */
+  updateAllGains() {
+    if (!this.audioCtx) return;
+    const states = this.state.tracksState;
+    const hasAnySolo = states.some(s => s && s.solo);
+
+    this.tracks.forEach((track, index) => {
+      if (!track || !track.gainNode) return;
+      const trackState = states[index] || { volume: 1.0, mute: false, solo: false };
+
+      let targetGain = typeof trackState.volume === 'number' ? trackState.volume : 1.0;
+
+      if (hasAnySolo) {
+        if (!trackState.solo) targetGain = 0;
+      } else if (trackState.mute) {
+        targetGain = 0;
+      }
+
+      track.gainNode.gain.value = targetGain;
+    });
+  }
+
+  handleStateChange(type, payload) {
+    if (type === 'track_volume' || type === 'track_mute' || type === 'track_solo' ||
+        type === 'all_unmuted' || type === 'solos_cleared') {
+      this.updateAllGains();
+    }
+  }
+
+  setMasterVolume(vol) {
+    const clamped = Math.max(0, Math.min(2.0, vol));
+    this.masterVolume = clamped;
+    if (this.masterGain) {
+      this.masterGain.gain.value = clamped;
+    }
+  }
+
+  /**
+   * Start multitrack playback from current playhead position
+   */
+  play() {
+    this.setPlaybackAudioSession();
+    this.ensureAudioContextUnlocked();
+
+    if (!this.audioCtx) return;
+    if (this.isPlaying) return;
+
+    const totalDur = this.getTotalDuration();
+    if (this.playheadPosition >= totalDur) {
+      this.playheadPosition = 0;
+    }
+
+    this.isPlaying = true;
+    this.playbackStartTime = this.audioCtx.currentTime;
+    this.playbackStartOffset = this.playheadPosition;
+
+    // Ensure chunks at playhead are prioritized
+    this.prioritizeSeek(this.playheadPosition);
+
+    this.scheduleTrackSources();
+    this.startPlayheadTracker();
+    this.emit('playback_started', { time: this.playheadPosition });
+  }
+
+  /**
+   * Schedule a single 20s chunk into Web Audio
+   */
+  scheduleSingleChunk(track, chunk) {
+    if (!this.audioCtx || !this.isPlaying || !chunk.buffer || !track.gainNode) return;
+    const audioNow = this.audioCtx.currentTime;
+    const currentPlayhead = this.playheadPosition;
+    const chunkStart = track.offset + chunk.startTime;
+    const chunkEnd = chunkStart + chunk.duration;
+
+    if (currentPlayhead >= chunkEnd) return; // In the past
+
+    if (!track.sourceNodes) track.sourceNodes = new Map();
+    if (track.sourceNodes.has(chunk.index)) return;
+
+    try {
+      const source = this.audioCtx.createBufferSource();
+      source.buffer = chunk.buffer;
+      source.connect(track.gainNode);
+      track.sourceNodes.set(chunk.index, source);
+
+      if (currentPlayhead < chunkStart) {
+        const delay = chunkStart - currentPlayhead;
+        source.start(audioNow + delay, 0);
+      } else {
+        const offsetInChunk = currentPlayhead - chunkStart;
+        source.start(audioNow, Math.max(0, offsetInChunk));
+      }
+
+      source.onended = () => {
+        if (track.sourceNodes) track.sourceNodes.delete(chunk.index);
+      };
+    } catch (e) {
+      console.warn('Error scheduling chunk:', e);
+    }
+  }
+
+  /**
+   * Schedule all track sources (chunked or legacy) based on playhead
+   */
+  scheduleTrackSources() {
+    if (!this.audioCtx) return;
+    this.reconnectAllTrackNodes();
+    this.stopAllSources();
+
+    this.tracks.forEach(track => {
+      if (!track || !track.gainNode) return;
+
+      if (track.chunks && track.chunks.length > 0) {
+        track.chunks.forEach(chunk => {
+          if (chunk.status === 'decoded' && chunk.buffer) {
+            this.scheduleSingleChunk(track, chunk);
+          }
+        });
+      } else if (track.buffer) {
+        const offset = track.offset;
+        const duration = track.duration;
+        const trackEnd = offset + duration;
+        if (this.playheadPosition < trackEnd) {
+          const source = this.audioCtx.createBufferSource();
+          source.buffer = track.buffer;
+          source.connect(track.gainNode);
+          track.sourceNode = source;
+          const audioNow = this.audioCtx.currentTime;
+          if (this.playheadPosition < offset) {
+            source.start(audioNow + (offset - this.playheadPosition), 0);
+          } else {
+            source.start(audioNow, this.playheadPosition - offset);
+          }
+        }
+      }
+    });
+  }
+
+  pause() {
+    if (!this.isPlaying) return;
+    this.isPlaying = false;
+    this.stopAllSources();
+    this.stopPlayheadTracker();
+    this.emit('playback_paused', { time: this.playheadPosition });
+    this.state.setCurrentTime(this.playheadPosition);
+  }
+
+  stop() {
+    this.isPlaying = false;
+    this.stopAllSources();
+    this.stopPlayheadTracker();
+    this.playheadPosition = 0;
+    this.emit('playback_stopped', { time: 0 });
+    this.state.setCurrentTime(0);
+  }
+
+  stopAllSources() {
+    this.tracks.forEach(track => {
+      if (track && track.sourceNodes) {
+        track.sourceNodes.forEach(source => {
+          try {
+            source.stop();
+            source.disconnect();
+          } catch (e) {}
+        });
+        track.sourceNodes.clear();
+      }
+      if (track && track.sourceNode) {
+        try {
+          track.sourceNode.stop();
+          track.sourceNode.disconnect();
+        } catch (e) {}
+        track.sourceNode = null;
+      }
+    });
+  }
+
+  seek(timeInSeconds) {
+    const totalDur = this.getTotalDuration();
+    const targetTime = Math.max(0, Math.min(totalDur, timeInSeconds));
+
+    this.playheadPosition = targetTime;
+    this.state.setCurrentTime(targetTime);
+
+    // Immediately trigger priority decode for the seek target!
+    this.prioritizeSeek(targetTime);
+
+    if (this.isPlaying && this.audioCtx) {
+      this.playbackStartTime = this.audioCtx.currentTime;
+      this.playbackStartOffset = this.playheadPosition;
+      this.scheduleTrackSources();
+    }
+
+    this.emit('time_update', { time: targetTime });
+  }
+
+
+  togglePlay() {
+    if (this.isPlaying) {
+      this.pause();
+    } else {
+      this.play();
+    }
+  }
+
+  setLoop(enabled, start = 0, end = null) {
+    this.isLooping = enabled;
+    this.loopStart = Math.max(0, start);
+    this.loopEnd = end !== null ? end : this.getTotalDuration();
+    this.emit('loop_changed', { isLooping: this.isLooping, start: this.loopStart, end: this.loopEnd });
+  }
+
+  /**
+   * High frequency loop to update playhead position and handle end of playback / loop
+   */
+  startPlayheadTracker() {
+    const tick = () => {
+      if (!this.isPlaying || !this.audioCtx) return;
+
+      const elapsed = this.audioCtx.currentTime - this.playbackStartTime;
+      const currentPos = this.playbackStartOffset + elapsed;
+      this.playheadPosition = currentPos;
+
+      // Check loop / song end
+      const totalDur = this.getTotalDuration();
+      const endThreshold = this.isLooping ? this.loopEnd : totalDur;
+
+      if (currentPos >= endThreshold) {
+        if (this.isLooping) {
+          this.seek(this.loopStart);
+        } else {
+          this.pause();
+          this.seek(0);
+          return;
+        }
+      }
+
+      // Proactively prioritize decoding ahead of playhead
+      if (this.isPlaying) {
+        this.prioritizeSeek(this.playheadPosition + 10.0);
+      }
+
+      this.emit('time_update', { time: this.playheadPosition });
+      this.rafId = requestAnimationFrame(tick);
+    };
+
+    if (this.rafId) cancelAnimationFrame(this.rafId);
+    this.rafId = requestAnimationFrame(tick);
+  }
+
+  stopPlayheadTracker() {
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+  }
+
+  /**
+   * Get real-time peak levels for VU meters
+   */
+  getTrackPeak(index) {
+    const track = this.tracks[index];
+    if (!track || !track.analyserNode || !this.isPlaying) return 0;
+
+    const data = new Uint8Array(track.analyserNode.frequencyBinCount);
+    track.analyserNode.getByteTimeDomainData(data);
+
+    let maxVal = 0;
+    for (let i = 0; i < data.length; i++) {
+      const val = Math.abs((data[i] - 128) / 128);
+      if (val > maxVal) maxVal = val;
+    }
+    return maxVal;
+  }
+
+  getMasterPeak() {
+    if (!this.masterAnalyser || !this.isPlaying) return 0;
+    const data = new Uint8Array(this.masterAnalyser.frequencyBinCount);
+    this.masterAnalyser.getByteTimeDomainData(data);
+
+    let maxVal = 0;
+    for (let i = 0; i < data.length; i++) {
+      const val = Math.abs((data[i] - 128) / 128);
+      if (val > maxVal) maxVal = val;
+    }
+    return maxVal;
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "title": "Neon Sunset Session (Test)",
+  "bpm": 120,
+  "tracks": [
+    {
+      "name": "Drums (Beat & Percussion)",
+      "url": "drums.mp3",
+      "offset": 0.0,
+      "color": "#00f2fe",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Bass (Warm Groove)",
+      "url": "bass.mp3",
+      "offset": 0.0,
+      "color": "#38ef7d",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Keys (Rhodes Chords)",
+      "url": "keys.mp3",
+      "offset": 0.0,
+      "color": "#ff758c",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Guitar (Rhythm & Melody)",
+      "url": "guitar.mp3",
+      "offset": 16.0,
+      "color": "#f7797d",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Synth Lead & Vocal Arp",
+      "url": "lead.mp3",
+      "offset": 32.0,
+      "color": "#c471ed",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    }
+  ],
+  "markers": [
+    {
+      "name": "Intro",
+      "time": 0.0
+    },
+    {
+      "name": "Verse 1",
+      "time": 16.0
+    },
+    {
+      "name": "Chorus 1",
+      "time": 32.0
+    },
+    {
+      "name": "Verse 2",
+      "time": 64.0
+    },
+    {
+      "name": "Chorus 2 (Climax)",
+      "time": 80.0
+    },
+    {
+      "name": "Outro",
+      "time": 104.0
+    }
+  ]
+}

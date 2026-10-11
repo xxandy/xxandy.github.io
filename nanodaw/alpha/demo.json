@@ -1,0 +1,42 @@
+{
+  "title": "Midnight Groove Session",
+  "bpm": 120,
+  "tracks": [
+    {
+      "name": "Drums",
+      "url": "stems/drums.wav",
+      "offset": 0.0,
+      "color": "#00f2fe"
+    },
+    {
+      "name": "Bassline",
+      "url": "stems/bass.wav",
+      "offset": 0.0,
+      "color": "#38ef7d"
+    },
+    {
+      "name": "Keys / Rhodes",
+      "url": "stems/chords.wav",
+      "offset": 0.0,
+      "color": "#ff758c"
+    },
+    {
+      "name": "Lead Melody",
+      "url": "stems/lead.wav",
+      "offset": 8.0,
+      "color": "#f7797d"
+    },
+    {
+      "name": "Arp FX",
+      "url": "stems/arp.wav",
+      "offset": 16.0,
+      "color": "#c471ed"
+    }
+  ],
+  "markers": [
+    { "name": "Intro", "time": 0.0 },
+    { "name": "Lead In", "time": 8.0 },
+    { "name": "Full Drop", "time": 16.0 },
+    { "name": "Climax", "time": 24.0 }
+  ]
+}
