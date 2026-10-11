@@ -834,45 +834,6 @@ class TimelineUI {
       canvas.dataset.index = index;
       lane.appendChild(canvas);
 
-      // Interactive timeline seeking on click or drag across waveform
-      lane.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return; // Only left-click seeks; middle-click bubbles to timelineScrollArea
-        const rect = canvas.getBoundingClientRect();
-        const clickX = e.clientX - rect.left;
-        const time = Math.max(0, clickX / this.pixelsPerSecond);
-
-        this.state.selectTrack(index);
-        this.isDraggingPlayhead = true;
-        this.audio.seek(time);
-
-        let rafScrubId = null;
-        const onMouseMove = (moveEvent) => {
-          if (!this.isDraggingPlayhead) return;
-          if (rafScrubId) return;
-          rafScrubId = requestAnimationFrame(() => {
-            rafScrubId = null;
-            if (!this.isDraggingPlayhead) return;
-            const currentRect = canvas.getBoundingClientRect();
-            const moveX = moveEvent.clientX - currentRect.left;
-            const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
-            this.audio.seek(scrubTime);
-          });
-        };
-
-        const onMouseUp = () => {
-          this.isDraggingPlayhead = false;
-          if (rafScrubId) {
-            cancelAnimationFrame(rafScrubId);
-            rafScrubId = null;
-          }
-          window.removeEventListener('mousemove', onMouseMove);
-          window.removeEventListener('mouseup', onMouseUp);
-        };
-
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-      });
-
       row.appendChild(lane);
       this.tracksContainer.appendChild(row);
     });
