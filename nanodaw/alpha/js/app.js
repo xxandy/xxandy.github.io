@@ -122,7 +122,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // --- Transport Controls ---
   const btnPlay = document.getElementById('btnPlay');
-  const btnStop = document.getElementById('btnStop');
   const btnRewind = document.getElementById('btnRewind');
   const btnLoop = document.getElementById('btnLoop');
   const btnPrevMarker = document.getElementById('btnPrevMarker');
@@ -134,17 +133,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (btnPlay) {
     btnPlay.addEventListener('click', () => {
       audio.togglePlay();
-    });
-  }
-
-  if (btnStop) {
-    btnStop.addEventListener('click', () => {
-      if (!audio.isPlaying) {
-        audio.hardReset();
-        showToast('Audio Engine Reset', 'info', 1500);
-      } else {
-        audio.stop();
-      }
     });
   }
 
@@ -313,43 +301,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Playback state UI changes
-  audio.on('playback_started', () => {
-    if (btnPlay) {
+  // Playback state UI changes: Toggle hero button between Play (green triangle) and Stop (red square)
+  function updatePlayButtonUI(isPlaying) {
+    if (!btnPlay) return;
+    if (isPlaying) {
       btnPlay.classList.add('playing');
+      btnPlay.title = 'Stop (Space)';
       btnPlay.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="6" y="4" width="4" height="16"/>
-          <rect x="14" y="4" width="4" height="16"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="5" y="5" width="14" height="14" rx="2"/>
         </svg>
-        <span>Pause</span>
       `;
-    }
-  });
-
-  audio.on('playback_paused', () => {
-    if (btnPlay) {
+    } else {
       btnPlay.classList.remove('playing');
+      btnPlay.title = 'Play (Space)';
       btnPlay.innerHTML = `
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <polygon points="5 3 19 12 5 21 5 3"/>
+          <polygon points="6 4 20 12 6 20 6 4"/>
         </svg>
-        <span>Play</span>
       `;
     }
-  });
+  }
 
-  audio.on('playback_stopped', () => {
-    if (btnPlay) {
-      btnPlay.classList.remove('playing');
-      btnPlay.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <polygon points="5 3 19 12 5 21 5 3"/>
-        </svg>
-        <span>Play</span>
-      `;
-    }
-  });
+  audio.on('playback_started', () => updatePlayButtonUI(true));
+  audio.on('playback_stopped', () => updatePlayButtonUI(false));
+  audio.on('playback_paused', () => updatePlayButtonUI(false));
 
   // --- Native OS Share & Clipboard Fallback ---
   const btnShare = document.getElementById('btnShare');

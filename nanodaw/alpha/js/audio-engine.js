@@ -881,13 +881,12 @@ class AudioEngine {
         }
       }
 
-      // Clean up past chunk source nodes
+      // Clean up past chunk source nodes (safe threshold: more than 1 chunk in past, so current boundary is never cut)
       if (track.sourceNodes) {
         for (const [idx, source] of track.sourceNodes) {
-          if (idx < currentChunkIdx) {
+          if (idx < currentChunkIdx - 1) {
             try {
               source.onended = null;
-              source.stop(0);
               source.disconnect();
             } catch (e) {}
             if (this.activeSources) this.activeSources.delete(source);
@@ -899,76 +898,67 @@ class AudioEngine {
   }
 
   pause() {
-    if (!this.isPlaying) return;
-    this.isPlaying = false;
-    this.playbackEpoch++;
-
-    if (this.masterGain && this.audioCtx) {
-      try {
-        this.masterGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
-        this.masterGain.gain.setValueAtTime(0, this.audioCtx.currentTime);
-      } catch (e) {}
-    }
-
-    this.stopAllSources();
-    this.stopPlayheadTracker();
-
-    if (this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
-      try {
-        this.audioCtx.suspend().catch(() => {});
-      } catch (e) {}
-    }
-
-    this.emit('playback_paused', { time: this.playheadPosition });
-    this.state.setCurrentTime(this.playheadPosition);
+    this.stop();
   }
 
   /**
-   * Complete hardware audio engine shutdown and reset to beginning
+   * Complete hardware audio engine shutdown and voice reset without resetting playhead position
    */
   stop() {
+    if (!this.isPlaying && (!this.audioCtx || this.audioCtx.state === 'suspended')) return;
     this.isPlaying = false;
-    this.isWindingDown = false;
     this.playbackEpoch++;
+    const currentEpoch = this.playbackEpoch;
 
-    // 1. Hardware-level instant master gain mute
-    if (this.masterGain && this.audioCtx) {
-      try {
-        this.masterGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
-        this.masterGain.gain.setValueAtTime(0, this.audioCtx.currentTime);
-      } catch (e) {}
-    }
-
-    // 2. Unconditionally stop and disconnect all source nodes
-    this.stopAllSources();
+    // 1. Stop playhead tracker immediately so UI and timecode freeze on current position
     this.stopPlayheadTracker();
 
-    // 3. Disconnect all track gain & analyser nodes
-    this.tracks.forEach(track => {
-      if (track) {
-        if (track.gainNode) {
-          try { track.gainNode.disconnect(); } catch (e) {}
-          track.gainNode = null;
-        }
-        if (track.analyserNode) {
-          try { track.analyserNode.disconnect(); } catch (e) {}
-          track.analyserNode = null;
-        }
-      }
-    });
+    // 2. Preserve playhead position (do NOT reset to 0)
+    this.state.setCurrentTime(this.playheadPosition);
+    this.emit('playback_stopped', { time: this.playheadPosition });
+    this.emit('time_update', { time: this.playheadPosition });
 
-    // 4. Suspend audio context hardware thread
-    if (this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+    // 3. Hardware-level smooth 20ms de-click ramp to zero so DAC never clicks
+    if (this.masterGain && this.audioCtx && this.audioCtx.state === 'running') {
       try {
-        this.audioCtx.suspend().catch(() => {});
-      } catch (e) {}
+        const now = this.audioCtx.currentTime;
+        this.masterGain.gain.cancelScheduledValues(now);
+        this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
+        this.masterGain.gain.linearRampToValueAtTime(0, now + 0.02);
+        // Schedule all playing sources to stop at now + 0.025 (when volume is already 0)
+        this.stopAllSources(now + 0.025);
+      } catch (e) {
+        this.stopAllSources(0);
+      }
+    } else {
+      this.stopAllSources(0);
     }
 
-    // 5. Reset playhead to 0
-    this.playheadPosition = 0;
-    this.state.setCurrentTime(0);
-    this.emit('playback_stopped', { time: 0 });
-    this.emit('time_update', { time: 0 });
+    // 4. Complete voice reset and suspend context after the 25ms de-click completes
+    setTimeout(() => {
+      // If user started playing again during the de-click fade, do NOT tear down!
+      if (this.isPlaying || this.playbackEpoch !== currentEpoch) return;
+
+      this.stopAllSources(0);
+      this.tracks.forEach(track => {
+        if (track) {
+          if (track.gainNode) {
+            try { track.gainNode.disconnect(); } catch (e) {}
+            track.gainNode = null;
+          }
+          if (track.analyserNode) {
+            try { track.analyserNode.disconnect(); } catch (e) {}
+            track.analyserNode = null;
+          }
+        }
+      });
+
+      if (this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+        try {
+          this.audioCtx.suspend().catch(() => {});
+        } catch (e) {}
+      }
+    }, 28);
   }
 
   /**
@@ -1000,17 +990,25 @@ class AudioEngine {
     this.emit('engine_reset');
   }
 
-  stopAllSources() {
+  stopAllSources(stopTime = 0) {
+    const isScheduled = typeof stopTime === 'number' && stopTime > 0;
+
     // 1. Terminate all globally tracked active sources across the engine
     if (this.activeSources) {
       for (const source of this.activeSources) {
         try {
-          source.onended = null;
-          source.stop(0);
-          source.disconnect();
+          if (isScheduled) {
+            source.stop(stopTime);
+          } else {
+            source.onended = null;
+            source.stop(0);
+            source.disconnect();
+          }
         } catch (e) {}
       }
-      this.activeSources.clear();
+      if (!isScheduled) {
+        this.activeSources.clear();
+      }
     }
 
     // 2. Clean all track source maps
@@ -1019,20 +1017,32 @@ class AudioEngine {
       if (track.sourceNodes) {
         for (const [idx, source] of track.sourceNodes) {
           try {
-            source.onended = null;
-            source.stop(0);
-            source.disconnect();
+            if (isScheduled) {
+              source.stop(stopTime);
+            } else {
+              source.onended = null;
+              source.stop(0);
+              source.disconnect();
+            }
           } catch (e) {}
         }
-        track.sourceNodes.clear();
+        if (!isScheduled) {
+          track.sourceNodes.clear();
+        }
       }
       if (track.sourceNode) {
         try {
-          track.sourceNode.onended = null;
-          track.sourceNode.stop(0);
-          track.sourceNode.disconnect();
+          if (isScheduled) {
+            track.sourceNode.stop(stopTime);
+          } else {
+            track.sourceNode.onended = null;
+            track.sourceNode.stop(0);
+            track.sourceNode.disconnect();
+          }
         } catch (e) {}
-        track.sourceNode = null;
+        if (!isScheduled) {
+          track.sourceNode = null;
+        }
       }
     });
   }
@@ -1059,7 +1069,7 @@ class AudioEngine {
 
   togglePlay() {
     if (this.isPlaying) {
-      this.pause();
+      this.stop();
     } else {
       this.play();
     }
@@ -1070,30 +1080,6 @@ class AudioEngine {
     this.loopStart = Math.max(0, start);
     this.loopEnd = end !== null ? end : this.getTotalDuration();
     this.emit('loop_changed', { isLooping: this.isLooping, start: this.loopStart, end: this.loopEnd });
-  }
-
-  /**
-   * Smooth wind down and stop: ramp master gain to 0 over 35ms before stopping
-   * Eliminates DAC DC offset popping at the end of the song
-   */
-  windDownAndStop() {
-    if (!this.isPlaying) return;
-    if (this.isWindingDown) return;
-    this.isWindingDown = true;
-
-    if (this.masterGain && this.audioCtx) {
-      try {
-        const now = this.audioCtx.currentTime;
-        this.masterGain.gain.cancelScheduledValues(now);
-        this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
-        this.masterGain.gain.linearRampToValueAtTime(0, now + 0.035);
-      } catch (e) {}
-    }
-
-    setTimeout(() => {
-      this.isWindingDown = false;
-      this.stop();
-    }, 40);
   }
 
   /**
@@ -1179,7 +1165,8 @@ class AudioEngine {
         if (this.isLooping) {
           this.performSeamlessLoop();
         } else {
-          this.windDownAndStop();
+          this.playheadPosition = totalDur;
+          this.stop();
           return;
         }
       }
