@@ -175,17 +175,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       for (let i = markers.length - 1; i >= 0; i--) {
         if (markers[i].time < currentTime - threshold) {
           audio.seek(markers[i].time);
+          if (timeline && timeline.scrollToMarker) timeline.scrollToMarker(markers[i].time);
           showToast(`Jumped to: ${markers[i].name}`, 'info', 1500);
           return;
         }
       }
       // If at start, jump to first marker or 0
       audio.seek(0);
+      if (timeline && timeline.scrollToMarker) timeline.scrollToMarker(0);
     } else {
       // Find next marker
       for (let i = 0; i < markers.length; i++) {
         if (markers[i].time > currentTime + threshold) {
           audio.seek(markers[i].time);
+          if (timeline && timeline.scrollToMarker) timeline.scrollToMarker(markers[i].time);
           showToast(`Jumped to: ${markers[i].name}`, 'info', 1500);
           return;
         }

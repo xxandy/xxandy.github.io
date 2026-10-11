@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=31">
+  <link rel="stylesheet" href="styles.css?v=32">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -72,12 +72,12 @@
         </svg>
       </button>
 
-      <!-- Always visible +Marker button -->
+      <!-- Always visible Marker button -->
       <button class="btn btn-secondary btn-transport-action" id="btnAddMarker" title="Add Marker at Playhead (Shift+M)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
           <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
         </svg>
-        <span>+ Marker</span>
+        <span>Marker</span>
       </button>
 
       <!-- Marker Jumps (Desktop & Tablet) -->
@@ -142,8 +142,8 @@
     </div>
   </section>
 
-  <!-- Quick Marker Jump Bar -->
-  <nav class="marker-nav-bar">
+  <!-- Quick Marker Jump Bar (Hidden when no markers exist) -->
+  <nav class="marker-nav-bar hidden">
     <div class="marker-bar-label">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
         <path d="M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z"/>
@@ -340,11 +340,11 @@
   <div class="app-toast" id="appToast"></div>
 
   <!-- Script Modules -->
-  <script src="js/mp3-decoder.js?v=31"></script>
-  <script src="js/state-manager.js?v=31"></script>
-  <script src="js/waveform-cache.js?v=31"></script>
-  <script src="js/audio-engine.js?v=31"></script>
-  <script src="js/timeline-ui.js?v=31"></script>
-  <script src="js/app.js?v=31"></script>
+  <script src="js/mp3-decoder.js?v=32"></script>
+  <script src="js/state-manager.js?v=32"></script>
+  <script src="js/waveform-cache.js?v=32"></script>
+  <script src="js/audio-engine.js?v=32"></script>
+  <script src="js/timeline-ui.js?v=32"></script>
+  <script src="js/app.js?v=32"></script>
 </body>
 </html>

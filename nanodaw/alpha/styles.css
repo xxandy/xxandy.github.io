@@ -376,6 +376,11 @@ body {
   flex-shrink: 0;
   overflow-x: auto;
   scrollbar-width: none;
+  transition: all 0.2s ease;
+}
+
+.marker-nav-bar.hidden {
+  display: none !important;
 }
 
 .marker-nav-bar::-webkit-scrollbar {
@@ -438,12 +443,12 @@ body {
   font-size: 9px;
 }
 
-/* --- Selected Track Inspector Pane (Mobile & Desktop) --- */
+/* --- Selected Track Inspector Pane (Mobile Only) --- */
 .selected-track-pane {
+  display: none !important; /* Hidden on desktop; shown only on mobile / small screens */
   height: 42px;
   background: rgba(18, 24, 34, 0.98);
   border-bottom: 1px solid var(--border-subtle);
-  display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 12px;
@@ -638,7 +643,6 @@ body {
 .marker-flag {
   position: absolute;
   top: 2px;
-  transform: translateX(-50%);
   pointer-events: auto;
   cursor: ew-resize;
   z-index: 29;
@@ -657,6 +661,22 @@ body {
   color: #fff;
   white-space: nowrap;
   box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  transition: transform 0.1s ease;
+}
+
+/* Default / Centered: Pin is centered under tag */
+.marker-flag.marker-align-center .marker-tag {
+  transform: translateX(-50%);
+}
+
+/* Near start (position zero or close to it): Tag renders to the right of pin */
+.marker-flag.marker-align-left .marker-tag {
+  transform: translateX(-4px);
+}
+
+/* Near end of timeline: Tag renders to the left of pin */
+.marker-flag.marker-align-right .marker-tag {
+  transform: translateX(calc(-100% + 4px));
 }
 
 .marker-dot {
@@ -689,7 +709,7 @@ body {
 .marker-guide-line {
   position: absolute;
   top: 22px;
-  left: 50%;
+  left: 0;
   width: 1px;
   height: 1000px;
   border-left: 1px dashed;
@@ -978,17 +998,29 @@ body {
   border-radius: 2px;
   background: #242c3d;
   outline: none;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none !important;
+  user-select: none;
+}
+
+.track-vol-slider:active {
+  cursor: grabbing;
 }
 
 .track-vol-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #cbd5e1;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none !important;
+}
+
+.track-vol-slider::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  background: var(--accent-cyan);
 }
 
 .vol-label {
@@ -1358,6 +1390,7 @@ body {
   }
 
   .selected-track-pane {
+    display: flex !important;
     height: 40px;
     padding: 0 8px;
   }

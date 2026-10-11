@@ -296,11 +296,31 @@ class TimelineUI {
         }
         this.render();
         this.updateInspectorPane();
-      } else if (type === 'track_volume' || type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
-        this.render();
+      } else if (type === 'track_volume') {
+        const { index, volume } = payload;
+        const slider = this.tracksContainer?.querySelector(`.track-vol-slider[data-index="${index}"]`);
+        if (slider && parseFloat(slider.value) !== volume) {
+          slider.value = volume;
+        }
+        const label = slider?.parentElement?.querySelector('.vol-label');
+        if (label) {
+          label.textContent = this.formatGainDb(volume);
+        }
+        if (index === this.state.selectedTrackIndex) {
+          this.updateInspectorPane();
+        }
+      } else if (type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
+        this.updateTrackControlStates();
+        this.renderWaveforms();
         this.updateInspectorPane();
       } else if (type === 'track_selected') {
-        this.render();
+        if (this.tracksContainer) {
+          this.tracksContainer.querySelectorAll('.track-row').forEach(row => {
+            const idx = parseInt(row.dataset.index, 10);
+            row.classList.toggle('track-selected', idx === this.state.selectedTrackIndex);
+          });
+        }
+        this.renderWaveforms();
         this.updateInspectorPane();
       } else if (type === 'zoom_changed') {
         if (payload.zoom && payload.zoom !== this.pixelsPerSecond) {
@@ -474,6 +494,17 @@ class TimelineUI {
     }
   }
 
+  scrollToMarker(time) {
+    if (!this.timelineScrollArea) return;
+    const markerCanvasX = time * this.pixelsPerSecond;
+    // Lead pixels: enough margin before the marker pin so that the entire tag label shows
+    const leadPaddingPixels = 90;
+    const targetScrollLeft = Math.max(0, markerCanvasX - leadPaddingPixels);
+    this.timelineScrollArea.scrollLeft = targetScrollLeft;
+    this.scrollLeft = targetScrollLeft;
+    this.updatePlayheadPosition();
+  }
+
   renderRuler() {
     if (!this.rulerCanvas) return;
 
@@ -563,6 +594,14 @@ class TimelineUI {
       el.style.left = `${markerX}px`;
       el.style.borderColor = marker.color;
 
+      if (markerX < 60) {
+        el.classList.add('marker-align-left');
+      } else if (markerX > this.timelineWidth - 120) {
+        el.classList.add('marker-align-right');
+      } else {
+        el.classList.add('marker-align-center');
+      }
+
       const mins = Math.floor(marker.time / 60);
       const secs = (marker.time % 60).toFixed(1).padStart(4, '0');
 
@@ -587,6 +626,7 @@ class TimelineUI {
         }
 
         this.audio.seek(marker.time);
+        this.scrollToMarker(marker.time);
       });
 
       const tag = el.querySelector('.marker-tag');
@@ -610,6 +650,11 @@ class TimelineUI {
           if (this.draggingMarkerId !== marker.id) return;
           const deltaX = moveEvent.clientX - startClientX;
           const newTime = Math.max(0, originalTime + (deltaX / this.pixelsPerSecond));
+          const currentX = newTime * this.pixelsPerSecond;
+          el.style.left = `${currentX}px`;
+          el.classList.toggle('marker-align-left', currentX < 60);
+          el.classList.toggle('marker-align-right', currentX > this.timelineWidth - 120);
+          el.classList.toggle('marker-align-center', currentX >= 60 && currentX <= this.timelineWidth - 120);
           this.state.updateMarker(marker.id, { time: newTime });
         };
 
@@ -630,16 +675,20 @@ class TimelineUI {
   }
 
   updateMarkerPillBar() {
+    const navBar = document.querySelector('.marker-nav-bar');
     const pillContainer = document.getElementById('markerPillList');
+    const markers = this.state.markers;
+
+    if (!markers || markers.length === 0) {
+      if (navBar) navBar.classList.add('hidden');
+      if (pillContainer) pillContainer.innerHTML = '';
+      return;
+    }
+
+    if (navBar) navBar.classList.remove('hidden');
     if (!pillContainer) return;
 
     pillContainer.innerHTML = '';
-    const markers = this.state.markers;
-
-    if (markers.length === 0) {
-      pillContainer.innerHTML = '<span class="empty-markers-hint">No markers. Double-click ruler or click "+ Marker"</span>';
-      return;
-    }
 
     markers.forEach(m => {
       const pill = document.createElement('button');
@@ -655,6 +704,7 @@ class TimelineUI {
 
       pill.addEventListener('click', () => {
         this.audio.seek(m.time);
+        this.scrollToMarker(m.time);
       });
 
       pillContainer.appendChild(pill);
@@ -853,6 +903,10 @@ class TimelineUI {
     });
 
     this.tracksContainer.querySelectorAll('.track-vol-slider').forEach(slider => {
+      ['mousedown', 'pointerdown', 'touchstart', 'click'].forEach(evt => {
+        slider.addEventListener(evt, (e) => e.stopPropagation());
+      });
+
       slider.addEventListener('input', (e) => {
         const idx = parseInt(slider.dataset.index, 10);
         const val = parseFloat(slider.value);
@@ -860,6 +914,28 @@ class TimelineUI {
         const label = slider.parentElement.querySelector('.vol-label');
         if (label) label.textContent = this.formatGainDb(val);
       });
+    });
+  }
+
+  updateTrackControlStates() {
+    if (!this.tracksContainer) return;
+    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
+
+    this.tracksContainer.querySelectorAll('.track-row').forEach(row => {
+      const idx = parseInt(row.dataset.index, 10);
+      const trackState = this.state.tracksState[idx] || { volume: 1.0, mute: false, solo: false };
+      const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
+
+      row.classList.toggle('track-dimmed', isDimmed);
+
+      const btnMute = row.querySelector('.btn-mute');
+      if (btnMute) btnMute.classList.toggle('active', trackState.mute);
+
+      const btnSolo = row.querySelector('.btn-solo');
+      if (btnSolo) btnSolo.classList.toggle('active', trackState.solo);
+
+      const handleDot = row.querySelector('.track-handle-dot');
+      if (handleDot) handleDot.classList.toggle('muted', trackState.mute);
     });
   }
 
