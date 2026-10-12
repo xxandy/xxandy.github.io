@@ -55,7 +55,6 @@ class TimelineUI {
     this.pinchFocalTime = 0;
     this.pinchAnchorScreenX = 0;
     this.pinchCanvasFocalX = 0;
-    this.pinchOverlayCanvas = null;
 
     // Runtime flag for Option C (hardware-stretched waveform) vs Option A (dots only, waveform suppressed)
     let storedStretch = null;
@@ -561,16 +560,6 @@ class TimelineUI {
     return this.pinchStretchWaveform;
   }
 
-  ensurePinchOverlay() {
-    if (!this.pinchOverlayCanvas && this.timelineScrollArea) {
-      this.pinchOverlayCanvas = document.createElement('canvas');
-      this.pinchOverlayCanvas.id = 'pinchOverlayCanvas';
-      this.pinchOverlayCanvas.className = 'pinch-overlay-canvas';
-      this.timelineScrollArea.appendChild(this.pinchOverlayCanvas);
-    }
-    return this.pinchOverlayCanvas;
-  }
-
   startPinch(e) {
     if (e.touches.length !== 2) return;
     const t1 = e.touches[0];
@@ -596,19 +585,10 @@ class TimelineUI {
     const canvasCssStartX = win ? win.startX : 0;
     this.pinchCanvasFocalX = (this.pinchFocalTime * this.pixelsPerSecond) - canvasCssStartX;
 
-    // Position overlay canvas over visible viewport
-    const overlay = this.ensurePinchOverlay();
-    if (overlay) {
-      const dpr = window.devicePixelRatio || 1;
-      const w = this.timelineScrollArea.clientWidth;
-      const h = this.timelineScrollArea.clientHeight;
-      overlay.style.left = `${this.timelineScrollArea.scrollLeft}px`;
-      overlay.style.top = `${this.timelineScrollArea.scrollTop}px`;
-      overlay.style.width = `${w}px`;
-      overlay.style.height = `${h}px`;
-      overlay.width = Math.round(w * dpr);
-      overlay.height = Math.round(h * dpr);
-      overlay.style.display = 'block';
+    // Do NOT apply GPU stretching to ruler canvas - it recomputes in realtime
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.transform = 'none';
+      this.rulerCanvas.style.transformOrigin = '';
     }
 
     if (window.zoomProfiler && window.ZOOM_OP) {
@@ -630,7 +610,7 @@ class TimelineUI {
     const effectiveRatio = clampedZoom / this.touchPinchInitialZoom;
     this.pinchTargetZoom = clampedZoom;
 
-    // Hardware CSS transform on track canvases & ruler (Option C vs Option A)
+    // 1. Hardware CSS transform on waveform tracks (Option C vs Option A)
     const canvases = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-canvas') : [];
     if (this.pinchStretchWaveform) {
       canvases.forEach(c => {
@@ -638,111 +618,26 @@ class TimelineUI {
         c.style.transform = `scaleX(${effectiveRatio})`;
         c.style.opacity = '1';
       });
-      if (this.rulerCanvas) {
-        this.rulerCanvas.style.transformOrigin = `${this.pinchCanvasFocalX}px 0`;
-        this.rulerCanvas.style.transform = `scaleX(${effectiveRatio})`;
-      }
     } else {
-      // Option A: Waveforms dimmed/suppressed, dots are the primary visual
+      // Option A: Waveforms dimmed/suppressed, cue dots on ruler are the primary visual
       canvases.forEach(c => {
         c.style.transform = 'none';
         c.style.opacity = '0.12';
       });
-      if (this.rulerCanvas) {
-        this.rulerCanvas.style.transform = 'none';
-      }
     }
 
-    // Render lightweight stretch dots on overlay
-    this.drawPinchDots(effectiveRatio);
-  }
-
-  drawPinchDots(effectiveRatio) {
-    if (!this.pinchOverlayCanvas) return;
-    const ctx = this.pinchOverlayCanvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-    const w = this.timelineScrollArea.clientWidth;
-    const h = this.timelineScrollArea.clientHeight;
-    const headerWidth = this.getTrackHeaderWidth();
-    const rulerHeight = this.getRulerHeight();
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
-
-    const anchor = this.pinchAnchorScreenX;
-    // Base dot spacing is 100px at start of pinch
-    const baseSpacing = 100;
-
-    // Determine horizontal dot positions
-    const dotXs = [];
-    for (let k = -30; k <= 30; k++) {
-      const dotX = anchor + (k * baseSpacing * effectiveRatio);
-      if (dotX >= headerWidth && dotX <= w) {
-        dotXs.push(dotX);
-      }
+    // 2. Timeline ruler recomputes timestamps and draws cue dots in realtime (NO GPU stretching)
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.transform = 'none';
     }
-
-    // Draw ruler tick indicators for each dot
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    dotXs.forEach(x => {
-      ctx.moveTo(x, rulerHeight - 7);
-      ctx.lineTo(x, rulerHeight - 1);
-    });
-    ctx.stroke();
-
-    // Get track row heights and vertical centers
-    const rows = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-row') : [];
-    const scrollAreaRect = this.timelineScrollArea.getBoundingClientRect();
-
-    rows.forEach(row => {
-      const rowRect = row.getBoundingClientRect();
-      const relTop = rowRect.top - scrollAreaRect.top;
-      const relMidY = relTop + (rowRect.height / 2);
-
-      // Only draw if within visible viewport
-      if (relMidY >= rulerHeight && relMidY <= h) {
-        // Subtle track guideline
-        ctx.strokeStyle = this.pinchStretchWaveform 
-          ? 'rgba(56, 189, 248, 0.18)' 
-          : 'rgba(56, 189, 248, 0.35)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 5]);
-        ctx.beginPath();
-        ctx.moveTo(headerWidth, relMidY);
-        ctx.lineTo(w, relMidY);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Stretched glowing dots
-        dotXs.forEach(x => {
-          ctx.beginPath();
-          ctx.arc(x, relMidY, 3.5, 0, Math.PI * 2);
-          ctx.fillStyle = '#38bdf8';
-          ctx.shadowColor = 'rgba(56, 189, 248, 0.8)';
-          ctx.shadowBlur = 6;
-          ctx.fill();
-        });
-      }
-    });
-
-    ctx.restore();
+    this.renderRuler(clampedZoom, true);
   }
 
   endPinch() {
     if (!this.isPinching) return;
     this.isPinching = false;
 
-    // Hide and clear overlay
-    if (this.pinchOverlayCanvas) {
-      const ctx = this.pinchOverlayCanvas.getContext('2d');
-      ctx.clearRect(0, 0, this.pinchOverlayCanvas.width, this.pinchOverlayCanvas.height);
-      this.pinchOverlayCanvas.style.display = 'none';
-    }
-
-    // Reset all CSS transforms & opacities
+    // Reset all CSS transforms & opacities on track canvases
     const canvases = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-canvas') : [];
     canvases.forEach(c => {
       c.style.transform = '';
@@ -754,9 +649,11 @@ class TimelineUI {
       this.rulerCanvas.style.transformOrigin = '';
     }
 
-    // Execute single clean rasterization at the final zoom
+    // Execute single clean rasterization at the final zoom (renders final waveforms & clean ruler)
     if (this.pinchTargetZoom && Math.abs(this.pinchTargetZoom - this.touchPinchInitialZoom) > 0.05) {
       this.applyZoom(this.pinchTargetZoom, this.touchPinchMidX);
+    } else {
+      this.renderRuler(); // Clean up cue dots if zoom did not change significantly
     }
 
     if (window.zoomProfiler) {
@@ -917,9 +814,10 @@ class TimelineUI {
     this.updatePlayheadPosition();
   }
 
-  renderRuler() {
+  renderRuler(overrideZoom = null, isPinching = false) {
     if (!this.rulerCanvas) return;
 
+    const zoom = overrideZoom || this.pixelsPerSecond;
     const profiler = window.zoomProfiler;
     const STEP = window.ZOOM_STEP;
 
@@ -933,16 +831,19 @@ class TimelineUI {
     const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
     const targetH = Math.min(maxDim, Math.round(height * dpr));
 
-    if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
-    if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
-      this.rulerCanvas.width = targetW;
-      this.rulerCanvas.height = targetH;
-    }
+    // Do NOT resize canvas backing store during pinch to prevent Metal texture stalls
+    if (!isPinching) {
+      if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
+      if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
+        this.rulerCanvas.width = targetW;
+        this.rulerCanvas.height = targetH;
+      }
 
-    this.rulerCanvas.style.width = `${canvasCssWidth}px`;
-    this.rulerCanvas.style.height = `${height}px`;
-    this.rulerCanvas.style.left = `${canvasCssStartX}px`;
-    if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
+      this.rulerCanvas.style.width = `${canvasCssWidth}px`;
+      this.rulerCanvas.style.height = `${height}px`;
+      this.rulerCanvas.style.left = `${canvasCssStartX}px`;
+      if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
+    }
 
     if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_PAINT);
     const ctx = this.rulerCanvas.getContext('2d');
@@ -969,26 +870,42 @@ class TimelineUI {
     // Adaptive Step Interval Ladder:
     // Ensures ticks always maintain between ~70px and 160px gap across all zoom levels
     const TIME_INTERVALS = [
-      0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, // seconds
-      60, 120, 300, 600, 900, 1800, 3600  // 1m, 2m, 5m, 10m, 15m, 30m, 1h
+      0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, // seconds
+      60, 120, 300, 600, 900, 1800, 3600       // 1m, 2m, 5m, 10m, 15m, 30m, 1h
     ];
     const minPixelGap = 80;
-    const minTimeGap = minPixelGap / this.pixelsPerSecond;
+    const minTimeGap = minPixelGap / zoom;
     let stepSec = TIME_INTERVALS.find(intv => intv >= minTimeGap) || 3600;
 
-    const totalSeconds = this.timelineWidth / this.pixelsPerSecond;
-    const startSec = win ? win.startSec : 0;
-    const endSec = win ? win.endSec : totalSeconds;
+    let startSec, endSec, timeToX;
+
+    if (isPinching && this.isPinching) {
+      // Anchored strictly to pinch focal point in realtime
+      const headerWidth = this.getTrackHeaderWidth();
+      const focalScreenX = this.pinchAnchorScreenX;
+      const focalTime = this.pinchFocalTime;
+      const focalTimelineX = (focalScreenX - headerWidth) + this.scrollLeft;
+
+      timeToX = (t) => focalTimelineX + ((t - focalTime) * zoom);
+      startSec = Math.max(0, focalTime - ((focalTimelineX - canvasCssStartX) / zoom));
+      endSec = focalTime + ((canvasCssWidth - (focalTimelineX - canvasCssStartX)) / zoom);
+    } else {
+      const totalSeconds = this.timelineWidth / zoom;
+      startSec = win ? win.startSec : 0;
+      endSec = win ? win.endSec : totalSeconds;
+      timeToX = (t) => t * zoom;
+    }
 
     const startTick = Math.max(0, Math.floor(startSec / stepSec) * stepSec);
-    const endTick = Math.min(totalSeconds, Math.ceil(endSec / stepSec) * stepSec);
+    const endTick = Math.ceil(endSec / stepSec) * stepSec;
 
     ctx.font = '9px "JetBrains Mono", monospace';
     ctx.fillStyle = '#94a3b8';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
 
     for (let t = startTick; t <= endTick; t += stepSec) {
-      const x = t * this.pixelsPerSecond;
+      const x = timeToX(t);
+      if (x < canvasCssStartX - 10 || x > canvasCssStartX + canvasCssWidth + 10) continue;
 
       const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0 || stepSec >= 300;
 
@@ -1019,6 +936,17 @@ class TimelineUI {
       }
 
       ctx.fillText(timeLabel, x + 3, 12);
+
+      // Visual cue dots only on the time ruler at the top during pinch
+      if (isPinching) {
+        ctx.beginPath();
+        ctx.arc(x, height - 13, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#38bdf8';
+        ctx.shadowColor = 'rgba(56, 189, 248, 0.9)';
+        ctx.shadowBlur = 5;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
     }
 
     ctx.restore();
