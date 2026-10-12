@@ -186,10 +186,11 @@ class WaveformCache {
 
     // --- Case A: Track has 20-second streaming chunks ---
     if (track.chunks && track.chunks.length > 0) {
+      // Pass 1: Chunk boundaries and loading/placeholder states
       track.chunks.forEach((chunk, k) => {
         const chunkStartX = Math.round((offset + chunk.startTime) * pixelsPerSecond);
         const chunkWidth = Math.max(2, Math.round(chunk.duration * pixelsPerSecond));
-        const chunkEndX = chunkStartX + chunkWidth;
+        const chunkEndX = Math.min(width, chunkStartX + chunkWidth);
 
         // 1. Chunk boundary separator line
         if (k > 0) {
@@ -204,32 +205,8 @@ class WaveformCache {
           ctx.restore();
         }
 
-        // 2. Render based on chunk status
-        if (chunk.status === 'decoded' && chunk.minPeaks && chunk.maxPeaks) {
-          // Decoded chunk: draw vibrant waveform!
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(chunkStartX, 4, chunkWidth, height - 8);
-          ctx.clip();
-
-          ctx.fillStyle = gradient;
-          const totalPoints = chunk.minPeaks.length;
-          const step = 2;
-          for (let x = chunkStartX; x < chunkEndX; x += step) {
-            const relX = x - chunkStartX;
-            const pointIdx = Math.floor((relX / chunkWidth) * totalPoints);
-            if (pointIdx >= 0 && pointIdx < totalPoints) {
-              const minVal = chunk.minPeaks[pointIdx];
-              const maxVal = chunk.maxPeaks[pointIdx];
-              const topY = midY - (maxVal * ampScale);
-              const botY = midY - (minVal * ampScale);
-              const barHeight = Math.max(1.5, botY - topY);
-              ctx.fillRect(x, topY, step - 0.5, barHeight);
-            }
-          }
-          ctx.restore();
-
-        } else if (chunk.status === 'loading') {
+        // 2. Render overlays for non-decoded states
+        if (chunk.status === 'loading') {
           // Loading chunk: diagonal animated stripes + loading badge
           ctx.save();
           ctx.beginPath();
@@ -256,7 +233,7 @@ class WaveformCache {
           }
           ctx.restore();
 
-        } else {
+        } else if (chunk.status !== 'decoded') {
           // Undecoded chunk: dimmed diagonal hatch pattern + timestamp label
           ctx.save();
           ctx.beginPath();
@@ -285,14 +262,46 @@ class WaveformCache {
         }
       });
 
+      // Pass 2: High-speed batched waveform rendering for all decoded chunks in a single GPU draw call!
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      const step = 2;
+      const barW = step - 0.5;
+
+      track.chunks.forEach((chunk) => {
+        if (chunk.status === 'decoded' && chunk.minPeaks && chunk.maxPeaks) {
+          const chunkStartX = Math.round((offset + chunk.startTime) * pixelsPerSecond);
+          const chunkWidth = Math.max(2, Math.round(chunk.duration * pixelsPerSecond));
+          const chunkEndX = Math.min(width, chunkStartX + chunkWidth);
+          const totalPoints = chunk.minPeaks.length;
+
+          for (let x = chunkStartX; x < chunkEndX; x += step) {
+            const relX = x - chunkStartX;
+            const pointIdx = Math.floor((relX / chunkWidth) * totalPoints);
+            if (pointIdx >= 0 && pointIdx < totalPoints) {
+              const minVal = chunk.minPeaks[pointIdx];
+              const maxVal = chunk.maxPeaks[pointIdx];
+              const topY = midY - (maxVal * ampScale);
+              const botY = midY - (minVal * ampScale);
+              const barHeight = Math.max(1.5, botY - topY);
+              ctx.rect(x, topY, barW, barHeight);
+            }
+          }
+        }
+      });
+      ctx.fill();
+
     } else {
       // --- Case B: Legacy / Monolithic buffer or pre-computed peaks ---
       const peakData = this.getPeaks(track.index, track);
       if (peakData) {
         const { minPeaks, maxPeaks, totalPoints } = peakData;
         ctx.fillStyle = gradient;
-        const step = 2; // draw bar every 2px
-        for (let x = trackStartX; x < trackEndX; x += step) {
+        const step = 2;
+        const barW = step - 0.5;
+        const maxDrawX = Math.min(width, trackEndX);
+        ctx.beginPath();
+        for (let x = trackStartX; x < maxDrawX; x += step) {
           const relX = x - trackStartX;
           const pointIdx = Math.floor((relX / trackWidth) * totalPoints);
 
@@ -302,9 +311,10 @@ class WaveformCache {
             const topY = midY - (maxVal * ampScale);
             const botY = midY - (minVal * ampScale);
             const barHeight = Math.max(1.5, botY - topY);
-            ctx.fillRect(x, topY, step - 0.5, barHeight);
+            ctx.rect(x, topY, barW, barHeight);
           }
         }
+        ctx.fill();
       }
     }
 
