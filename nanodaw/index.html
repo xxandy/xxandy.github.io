@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=22">
+  <link rel="stylesheet" href="styles.css?v=42">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -20,6 +20,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
+        <span class="version-badge" id="appVersionBadge">v42</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -52,33 +53,38 @@
 
   <!-- Transport Controls Bar -->
   <section class="transport-bar">
-    <div class="transport-main">
-      <!-- Key Transport Buttons Always Visible -->
+    <div class="transport-left-group">
+      <!-- Key Transport Buttons: Rewind and Play/Stop Toggle -->
       <button class="transport-btn" id="btnRewind" title="Rewind to Start (Enter)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
           <polygon points="11 18 2 12 11 6 11 18"/>
           <polygon points="20 18 11 12 20 6 20 18"/>
         </svg>
       </button>
-      <button class="transport-btn btn-play-hero" id="btnPlay" title="Play / Pause (Space)">
+
+      <!-- Play / Stop Toggle Hero Button (No text, green triangle when stopped, red square when playing) -->
+      <button class="transport-btn btn-play-hero" id="btnPlay" title="Play (Space)">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <polygon points="5 3 19 12 5 21 5 3"/>
-        </svg>
-        <span class="play-btn-text">Play</span>
-      </button>
-      <button class="transport-btn" id="btnStop" title="Stop">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="6" y="6" width="12" height="12"/>
+          <polygon points="6 4 20 12 6 20 6 4"/>
         </svg>
       </button>
 
-      <!-- Always visible +Marker button -->
-      <button class="btn btn-secondary btn-transport-action" id="btnAddMarker" title="Add Marker at Playhead (Shift+M)">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+      <!-- Compact Add Marker Button (+ ⚑) -->
+      <button class="btn btn-secondary btn-compact-marker" id="btnAddMarker" title="Add Marker at Playhead (Shift+M)">
+        <span class="marker-plus-sign">+</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z"/>
         </svg>
-        <span>+ Marker</span>
       </button>
+
+      <!-- Spacer: width of rewind button plus gap between rewind and play -->
+      <div class="transport-spacer" aria-hidden="true"></div>
+
+      <!-- Timecode Readout (Immediately to the right of the spacer) -->
+      <div class="time-display-box">
+        <span class="time-label">Time</span>
+        <span class="time-readout" id="timeDisplay">00:00.000</span>
+      </div>
 
       <!-- Marker Jumps (Desktop & Tablet) -->
       <div class="marker-jump-group desktop-only">
@@ -96,54 +102,56 @@
         </button>
       </div>
 
-      <!-- Timecode Readout (Always Visible) -->
-      <div class="time-display-box">
-        <span class="time-label">Time</span>
-        <span class="time-readout" id="timeDisplay">00:00.000</span>
+      <!-- Master Volume & Loop (Desktop Only) -->
+      <div class="transport-secondary desktop-only">
+        <div class="fader-control-wrap" title="Master Output Volume">
+          <span class="fader-icon">
+            <svg viewBox="0 0 24 24">
+              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+            </svg>
+          </span>
+          <input type="range" class="slider-styled" id="masterVolSlider" min="0" max="1.5" step="0.01" value="1.0">
+          <span class="fader-val-text" id="masterVolVal">0.0 dB</span>
+        </div>
+
+        <button class="transport-btn" id="btnLoop" title="Toggle Loop Mode (L)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/>
+          </svg>
+        </button>
       </div>
     </div>
 
-    <!-- Secondary Transport Controls (Desktop View) -->
-    <div class="transport-secondary desktop-only">
-      <!-- Master Volume -->
-      <div class="fader-control-wrap" title="Master Output Volume">
-        <span class="fader-icon">
-          <svg viewBox="0 0 24 24">
-            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
-          </svg>
-        </span>
-        <input type="range" class="slider-styled" id="masterVolSlider" min="0" max="1.5" step="0.01" value="1.0">
-        <span class="fader-val-text" id="masterVolVal">0.0 dB</span>
-      </div>
-
-      <!-- Loop mode -->
-      <button class="transport-btn" id="btnLoop" title="Toggle Loop Mode (L)">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/>
-        </svg>
-      </button>
-
-      <!-- Timeline Zoom Controls -->
+    <!-- Right-justified Cluster: Zoom Controls Trio -->
+    <div class="transport-right-group">
+      <!-- Zoom Controls Trio (Right-justified, constant size and gap) -->
       <div class="zoom-controls">
-        <button class="transport-btn" id="btnZoomOut" title="Zoom Out (-)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M19 13H5v-2h14v2z"/>
+        <button class="transport-btn btn-zoom-action" id="btnZoomOut" title="Zoom Out (-)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="6"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            <line x1="8.5" y1="11" x2="13.5" y2="11"/>
           </svg>
         </button>
-        <button class="transport-btn" id="btnZoomIn" title="Zoom In (+)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+        <button class="transport-btn btn-zoom-action" id="btnZoomFit" title="Fit All (F)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 6v12M20 6v12M8 12h8M11 9l-3 3 3 3M13 9l3 3-3 3"/>
           </svg>
         </button>
-        <button class="btn btn-secondary" id="btnZoomFit" title="Fit Timeline (F)" style="padding: 6px 10px; font-size: 11px;">
-          Fit All
+        <button class="transport-btn btn-zoom-action" id="btnZoomIn" title="Zoom In (+)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="7"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            <line x1="11" y1="7.5" x2="11" y2="14.5"/>
+            <line x1="7.5" y1="11" x2="14.5" y2="11"/>
+          </svg>
         </button>
       </div>
     </div>
   </section>
 
-  <!-- Quick Marker Jump Bar -->
-  <nav class="marker-nav-bar">
+  <!-- Quick Marker Jump Bar (Hidden when no markers exist) -->
+  <nav class="marker-nav-bar hidden">
     <div class="marker-bar-label">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
         <path d="M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z"/>
@@ -340,10 +348,11 @@
   <div class="app-toast" id="appToast"></div>
 
   <!-- Script Modules -->
-  <script src="js/state-manager.js?v=22"></script>
-  <script src="js/waveform-cache.js?v=22"></script>
-  <script src="js/audio-engine.js?v=22"></script>
-  <script src="js/timeline-ui.js?v=22"></script>
-  <script src="js/app.js?v=22"></script>
+  <script src="js/mp3-decoder.js?v=42"></script>
+  <script src="js/state-manager.js?v=42"></script>
+  <script src="js/waveform-cache.js?v=42"></script>
+  <script src="js/audio-engine.js?v=42"></script>
+  <script src="js/timeline-ui.js?v=42"></script>
+  <script src="js/app.js?v=42"></script>
 </body>
 </html>

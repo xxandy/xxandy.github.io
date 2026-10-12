@@ -11,7 +11,8 @@ class TimelineUI {
 
     // Viewport & Zoom settings
     this.pixelsPerSecond = this.state.zoom || 60; // Zoom level
-    this.minZoom = 15;
+    this.minZoomFloor = 0.1; // Supports fitting ~3+ hours on a 1200px screen
+    this.minZoom = 0.1;
     this.maxZoom = 300;
     this.scrollLeft = 0;
     this.timelineWidth = 1000;
@@ -79,15 +80,61 @@ class TimelineUI {
       this.updatePlayheadPosition();
     });
 
+    // Middle mouse button "hand scroll" (drag horizontally) in desktop mode
+    this.timelineScrollArea.addEventListener('mousedown', (e) => {
+      if (e.button === 1) { // Middle click / wheel button
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX;
+        const startScrollLeft = this.timelineScrollArea.scrollLeft;
+        this.isMiddlePanning = true;
+        document.body.classList.add('is-middle-panning');
+
+        const onMouseMove = (moveEvent) => {
+          if (!this.isMiddlePanning) return;
+          moveEvent.preventDefault();
+          const dx = moveEvent.clientX - startX;
+          // Drag right -> reveal left content (scrollLeft decreases)
+          this.timelineScrollArea.scrollLeft = startScrollLeft - dx;
+          this.scrollLeft = this.timelineScrollArea.scrollLeft;
+        };
+
+        const onMouseUp = (upEvent) => {
+          if (upEvent.button === 1 || (upEvent.buttons & 4) === 0) {
+            this.isMiddlePanning = false;
+            document.body.classList.remove('is-middle-panning');
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+            window.removeEventListener('pointerup', onMouseUp);
+          }
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        window.addEventListener('pointerup', onMouseUp);
+      }
+    });
+
+    // Prevent default browser autoscroll indicator on middle click
+    this.timelineScrollArea.addEventListener('auxclick', (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+
     // Zoom via Ctrl + Wheel or trackpad pinch
     this.timelineScrollArea.addEventListener('wheel', (e) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        const zoomDelta = -e.deltaY * 0.15;
-        this.applyZoom(this.pixelsPerSecond + zoomDelta, e.clientX);
+        // Exponential zoom scaling for smooth micro & macro control
+        const zoomFactor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+        this.applyZoom(this.pixelsPerSecond * zoomFactor, e.clientX);
       } else if (e.shiftKey) {
         e.preventDefault();
-        this.timelineScrollArea.scrollLeft += e.deltaY;
+        // Adaptive horizontal scroll step scaled by zoom density
+        const scrollFactor = Math.min(2.0, Math.max(0.3, Math.sqrt(this.pixelsPerSecond / 40)));
+        this.timelineScrollArea.scrollLeft += e.deltaY * scrollFactor;
       }
     }, { passive: false });
 
@@ -132,15 +179,26 @@ class TimelineUI {
       this.isDraggingPlayhead = true;
       this.audio.seek(time);
       
+      let rafScrubId = null;
       const onMouseMove = (moveEvent) => {
         if (!this.isDraggingPlayhead) return;
-        const moveX = moveEvent.clientX - rect.left;
-        const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
-        this.audio.seek(scrubTime);
+        if (rafScrubId) return;
+        rafScrubId = requestAnimationFrame(() => {
+          rafScrubId = null;
+          if (!this.isDraggingPlayhead) return;
+          const currentRect = this.rulerCanvas.getBoundingClientRect();
+          const moveX = moveEvent.clientX - currentRect.left;
+          const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
+          this.audio.seek(scrubTime);
+        });
       };
 
       const onMouseUp = () => {
         this.isDraggingPlayhead = false;
+        if (rafScrubId) {
+          cancelAnimationFrame(rafScrubId);
+          rafScrubId = null;
+        }
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
       };
@@ -163,20 +221,31 @@ class TimelineUI {
     // Playhead line / handle dragging
     if (this.playheadHandle) {
       this.playheadHandle.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
         e.stopPropagation();
         this.isDraggingPlayhead = true;
         const startX = e.clientX;
         const startTime = this.audio.playheadPosition;
 
+        let rafScrubId = null;
         const onMouseMove = (moveEvent) => {
           if (!this.isDraggingPlayhead) return;
-          const deltaX = moveEvent.clientX - startX;
-          const newTime = Math.max(0, startTime + (deltaX / this.pixelsPerSecond));
-          this.audio.seek(newTime);
+          if (rafScrubId) return;
+          rafScrubId = requestAnimationFrame(() => {
+            rafScrubId = null;
+            if (!this.isDraggingPlayhead) return;
+            const deltaX = moveEvent.clientX - startX;
+            const newTime = Math.max(0, startTime + (deltaX / this.pixelsPerSecond));
+            this.audio.seek(newTime);
+          });
         };
 
         const onMouseUp = () => {
           this.isDraggingPlayhead = false;
+          if (rafScrubId) {
+            cancelAnimationFrame(rafScrubId);
+            rafScrubId = null;
+          }
           window.removeEventListener('mousemove', onMouseMove);
           window.removeEventListener('mouseup', onMouseUp);
         };
@@ -196,6 +265,32 @@ class TimelineUI {
     this.audio.on('playback_paused', () => this.updatePlayheadPosition());
     this.audio.on('playback_stopped', () => this.updatePlayheadPosition());
 
+    // Chunk-based streaming & progressive decoding events
+    this.audio.on('tracks_initialized', () => {
+      this.render();
+    });
+
+    this.audio.on('chunk_loading', ({ trackIndex }) => {
+      this.renderWaveformForTrack(trackIndex);
+      this.updateTrackStatus(trackIndex);
+    });
+
+    this.audio.on('chunk_decoded', ({ trackIndex }) => {
+      this.renderWaveformForTrack(trackIndex);
+      this.updateTrackStatus(trackIndex);
+    });
+
+    this.audio.on('chunk_error', ({ trackIndex }) => {
+      this.renderWaveformForTrack(trackIndex);
+      this.updateTrackStatus(trackIndex);
+    });
+
+    this.audio.on('track_duration_updated', () => {
+      this.updateTimelineDimensions();
+      this.renderRuler();
+      this.renderWaveforms();
+    });
+
     // State changes
     this.state.subscribe((type, payload) => {
       if (type === 'project_loaded') {
@@ -205,11 +300,31 @@ class TimelineUI {
         }
         this.render();
         this.updateInspectorPane();
-      } else if (type === 'track_volume' || type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
-        this.render();
+      } else if (type === 'track_volume') {
+        const { index, volume } = payload;
+        const slider = this.tracksContainer?.querySelector(`.track-vol-slider[data-index="${index}"]`);
+        if (slider && parseFloat(slider.value) !== volume) {
+          slider.value = volume;
+        }
+        const label = slider?.parentElement?.querySelector('.vol-label');
+        if (label) {
+          label.textContent = this.formatGainDb(volume);
+        }
+        if (index === this.state.selectedTrackIndex) {
+          this.updateInspectorPane();
+        }
+      } else if (type === 'track_mute' || type === 'track_solo' || type === 'all_unmuted' || type === 'solos_cleared') {
+        this.updateTrackControlStates();
+        this.renderWaveforms();
         this.updateInspectorPane();
       } else if (type === 'track_selected') {
-        this.render();
+        if (this.tracksContainer) {
+          this.tracksContainer.querySelectorAll('.track-row').forEach(row => {
+            const idx = parseInt(row.dataset.index, 10);
+            row.classList.toggle('track-selected', idx === this.state.selectedTrackIndex);
+          });
+        }
+        this.renderWaveforms();
         this.updateInspectorPane();
       } else if (type === 'zoom_changed') {
         if (payload.zoom && payload.zoom !== this.pixelsPerSecond) {
@@ -292,6 +407,20 @@ class TimelineUI {
   }
 
   handleResize() {
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+
+    // If current zoom exceeds the newly recomputed maxZoom (e.g. switching from desktop to mobile),
+    // automatically zoom out to respect the new safe memory limit.
+    if (this.pixelsPerSecond > this.maxZoom) {
+      this.applyZoom(this.maxZoom);
+      return;
+    }
+    if (this.pixelsPerSecond < this.minZoom) {
+      this.applyZoom(this.minZoom);
+      return;
+    }
+
     this.updateTimelineDimensions();
     this.renderRuler();
     this.renderWaveforms();
@@ -299,15 +428,73 @@ class TimelineUI {
     this.renderMarkerElements();
   }
 
+  computeProjectMinZoom() {
+    const totalDur = Math.max(this.audio.getTotalDuration(), 5);
+    const headerWidth = this.getTrackHeaderWidth();
+    const visibleW = Math.max(100, this.timelineScrollArea.clientWidth - headerWidth - 30);
+    const fitLevel = visibleW / totalDur;
+    return Math.max(this.minZoomFloor, fitLevel);
+  }
+
+  computeProjectMaxZoom() {
+    const isMob = this.isMobile();
+    // Conservative total canvas memory budget across all tracks and ruler:
+    // Mobile: 128 MB (134,217,728 bytes) - safe for iOS Safari and Android Chrome
+    // Desktop: 384 MB (402,653,184 bytes) - safe for low-end laptops with integrated graphics
+    const maxMemoryBytes = isMob ? (128 * 1024 * 1024) : (384 * 1024 * 1024);
+
+    // Hard physical canvas texture width ceilings:
+    // Mobile: 16,384px (hardware OpenGL ES MAX_TEXTURE_SIZE on mobile GPUs)
+    // Desktop: 32,768px (browser / GPU 2D canvas dimension ceiling)
+    const maxPhysicalCanvasWidth = isMob ? 16384 : 32768;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const totalDuration = Math.max(this.audio.getTotalDuration(), 5);
+
+    // Number of tracks and total vertical canvas height (tracks + ruler)
+    const trackCount = Math.max(1, this.audio.tracks?.length || this.state.project?.tracks?.length || 1);
+    const trackHeight = this.getTrackHeight();
+    const rulerHeight = this.getRulerHeight();
+    const totalCanvasHeight = (trackCount * trackHeight) + rulerHeight;
+
+    // Memory-driven ceiling: Total Bytes = duration * zoom * dpr * totalCanvasHeight * dpr * 4
+    const bytesPerCssSec = totalCanvasHeight * dpr * dpr * 4;
+    const maxZoomMem = maxMemoryBytes / (totalDuration * bytesPerCssSec);
+
+    // Texture dimension-driven ceiling: physical canvas width = (duration * zoom + 100) * dpr
+    const maxCssWidth = (maxPhysicalCanvasWidth / dpr) - 100;
+    const maxZoomDim = Math.max(0.5, maxCssWidth / totalDuration);
+
+    let calculatedMaxZoom = Math.min(maxZoomMem, maxZoomDim);
+
+    // Cap at a clean upper bound of 300 px/sec
+    calculatedMaxZoom = Math.min(300, calculatedMaxZoom);
+
+    // Ensure maxZoom is at least the min/fit zoom level so a project can always fit
+    const minZoomLevel = this.computeProjectMinZoom();
+    return Math.max(minZoomLevel, calculatedMaxZoom);
+  }
+
   updateTimelineDimensions() {
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+
+    // Safety clamp zoom level within dynamic bounds
+    if (this.pixelsPerSecond > this.maxZoom) {
+      this.pixelsPerSecond = this.maxZoom;
+      this.state.setZoom(this.pixelsPerSecond);
+    } else if (this.pixelsPerSecond < this.minZoom) {
+      this.pixelsPerSecond = this.minZoom;
+      this.state.setZoom(this.pixelsPerSecond);
+    }
+
     const headerWidth = this.getTrackHeaderWidth();
     const totalDuration = Math.max(this.audio.getTotalDuration(), 10);
-    const visibleWaveAreaW = Math.max(
-      this.timelineScrollArea.clientWidth - headerWidth - 20,
-      totalDuration * this.pixelsPerSecond + 150
-    );
+    const availableW = Math.max(100, this.timelineScrollArea.clientWidth - headerWidth - 10);
+    const projectContentW = totalDuration * this.pixelsPerSecond;
+    const visibleWaveAreaW = projectContentW <= availableW ? availableW : (projectContentW + 100);
 
-    this.timelineWidth = Math.round(visibleWaveAreaW);
+    this.timelineWidth = Math.round(Math.max(100, visibleWaveAreaW));
 
     if (this.timelineContent) {
       this.timelineContent.style.setProperty('--timeline-width', `${this.timelineWidth}px`);
@@ -322,32 +509,53 @@ class TimelineUI {
   }
 
   applyZoom(newZoom, originClientX = null) {
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+
     const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, newZoom));
     if (clampedZoom === this.pixelsPerSecond) return;
 
     const headerWidth = this.getTrackHeaderWidth();
+    const clientWidth = this.timelineScrollArea.clientWidth;
+    const visibleWaveW = Math.max(10, clientWidth - headerWidth);
 
-    let focalTime = (this.scrollLeft + (this.timelineScrollArea.clientWidth / 2) - headerWidth) / this.pixelsPerSecond;
+    let focalTime;
+    let anchorScreenX;
+
     if (originClientX !== null) {
       const rect = this.timelineScrollArea.getBoundingClientRect();
       const originX = originClientX - rect.left;
-      focalTime = (this.scrollLeft + originX - headerWidth) / this.pixelsPerSecond;
-    }
 
-    focalTime = Math.max(0, focalTime);
+      if (originX <= headerWidth) {
+        // Pointer is over the left sticky track headers or margin.
+        // Pin the focal point strictly to Time 0:00 at the left bound of the waveform lane.
+        focalTime = 0;
+        anchorScreenX = headerWidth;
+      } else {
+        // Pointer is over the waveform timeline.
+        focalTime = Math.max(0, (this.scrollLeft + originX - headerWidth) / this.pixelsPerSecond);
+        anchorScreenX = originX;
+      }
+    } else {
+      // Zoom via button or shortcut.
+      // If the timeline is at the left bound (scrollLeft <= 2) or the project fits within the visible wave area:
+      // anchor at Time 0:00 so the project start never expands/scrolls into or behind the track headers.
+      if (this.scrollLeft <= 2) {
+        focalTime = 0;
+        anchorScreenX = headerWidth;
+      } else {
+        // Anchor to the visual center of the visible waveform lane
+        anchorScreenX = headerWidth + (visibleWaveW / 2);
+        focalTime = Math.max(0, (this.scrollLeft + anchorScreenX - headerWidth) / this.pixelsPerSecond);
+      }
+    }
 
     this.pixelsPerSecond = clampedZoom;
     this.state.setZoom(this.pixelsPerSecond);
     this.updateTimelineDimensions();
 
-    if (originClientX !== null) {
-      const rect = this.timelineScrollArea.getBoundingClientRect();
-      const originX = originClientX - rect.left;
-      this.timelineScrollArea.scrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - originX;
-    } else {
-      this.timelineScrollArea.scrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - (this.timelineScrollArea.clientWidth / 2);
-    }
-
+    const targetScrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - anchorScreenX;
+    this.timelineScrollArea.scrollLeft = Math.max(0, targetScrollLeft);
     this.scrollLeft = this.timelineScrollArea.scrollLeft;
 
     this.renderRuler();
@@ -357,7 +565,7 @@ class TimelineUI {
   }
 
   checkAutoScroll(time) {
-    if (!this.followPlayhead || !this.audio.isPlaying) return;
+    if (!this.followPlayhead || !this.audio.isPlaying || this.isMiddlePanning) return;
 
     const headerWidth = this.getTrackHeaderWidth();
     const playheadX = headerWidth + (time * this.pixelsPerSecond);
@@ -366,10 +574,17 @@ class TimelineUI {
     const viewRight = viewLeft + viewWidth;
 
     if (playheadX > viewRight - 80) {
-      this.timelineScrollArea.scrollLeft = playheadX - 120;
+      this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - 120);
     } else if (playheadX < viewLeft + headerWidth) {
       this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - headerWidth - 40);
     }
+  }
+
+  scrollToStart() {
+    if (!this.timelineScrollArea) return;
+    this.timelineScrollArea.scrollLeft = 0;
+    this.scrollLeft = 0;
+    this.updatePlayheadPosition();
   }
 
   scrollToTime(time) {
@@ -383,6 +598,17 @@ class TimelineUI {
     }
   }
 
+  scrollToMarker(time) {
+    if (!this.timelineScrollArea) return;
+    const markerCanvasX = time * this.pixelsPerSecond;
+    // Lead pixels: enough margin before the marker pin so that the entire tag label shows
+    const leadPaddingPixels = 90;
+    const targetScrollLeft = Math.max(0, markerCanvasX - leadPaddingPixels);
+    this.timelineScrollArea.scrollLeft = targetScrollLeft;
+    this.scrollLeft = targetScrollLeft;
+    this.updatePlayheadPosition();
+  }
+
   renderRuler() {
     if (!this.rulerCanvas) return;
 
@@ -390,8 +616,9 @@ class TimelineUI {
     const width = this.timelineWidth;
     const height = this.getRulerHeight();
 
-    const targetW = Math.round(width * dpr);
-    const targetH = Math.round(height * dpr);
+    const maxDim = 32768;
+    const targetW = Math.min(maxDim, Math.round(width * dpr));
+    const targetH = Math.min(maxDim, Math.round(height * dpr));
 
     if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
       this.rulerCanvas.width = targetW;
@@ -418,13 +645,15 @@ class TimelineUI {
     ctx.lineTo(width, height - 0.5);
     ctx.stroke();
 
-    // Step interval
-    let stepSec = 1;
-    if (this.pixelsPerSecond < 25) stepSec = 10;
-    else if (this.pixelsPerSecond < 50) stepSec = 5;
-    else if (this.pixelsPerSecond < 100) stepSec = 2;
-    else if (this.pixelsPerSecond < 200) stepSec = 1;
-    else stepSec = 0.5;
+    // Adaptive Step Interval Ladder:
+    // Ensures ticks always maintain between ~70px and 160px gap across all zoom levels
+    const TIME_INTERVALS = [
+      0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, // seconds
+      60, 120, 300, 600, 900, 1800, 3600  // 1m, 2m, 5m, 10m, 15m, 30m, 1h
+    ];
+    const minPixelGap = 80;
+    const minTimeGap = minPixelGap / this.pixelsPerSecond;
+    let stepSec = TIME_INTERVALS.find(intv => intv >= minTimeGap) || 3600;
 
     const totalSeconds = width / this.pixelsPerSecond;
 
@@ -436,23 +665,35 @@ class TimelineUI {
       const x = t * this.pixelsPerSecond;
       if (x < 0 || x > width) continue;
 
-      const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0;
+      const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0 || stepSec >= 300;
 
       ctx.beginPath();
       ctx.moveTo(x, height);
       ctx.lineTo(x, isMajor ? height - 10 : height - 5);
       ctx.stroke();
 
-      if (isMajor || this.pixelsPerSecond >= 70) {
+      // Format time label adaptively:
+      let timeLabel = '';
+      if (stepSec >= 3600) {
+        const hrs = Math.floor(t / 3600);
+        const mins = Math.floor((t % 3600) / 60);
+        timeLabel = `${hrs}h${mins > 0 ? ` ${mins}m` : ''}`;
+      } else if (stepSec >= 60) {
+        const mins = Math.floor(t / 60);
+        const secs = Math.floor(t % 60);
+        timeLabel = secs === 0 ? `${mins}m` : `${mins}:${secs.toString().padStart(2, '0')}`;
+      } else if (stepSec >= 1) {
+        const mins = Math.floor(t / 60);
+        const secs = Math.floor(t % 60);
+        timeLabel = `${mins}:${secs.toString().padStart(2, '0')}`;
+      } else {
         const mins = Math.floor(t / 60);
         const secs = Math.floor(t % 60);
         const millis = Math.floor((t % 1) * 10);
-        let timeLabel = `${mins}:${secs.toString().padStart(2, '0')}`;
-        if (stepSec < 1) {
-          timeLabel += `.${millis}`;
-        }
-        ctx.fillText(timeLabel, x + 3, 12);
+        timeLabel = `${mins}:${secs.toString().padStart(2, '0')}.${millis}`;
       }
+
+      ctx.fillText(timeLabel, x + 3, 12);
     }
 
     ctx.restore();
@@ -471,6 +712,14 @@ class TimelineUI {
       el.dataset.id = marker.id;
       el.style.left = `${markerX}px`;
       el.style.borderColor = marker.color;
+
+      if (markerX < 60) {
+        el.classList.add('marker-align-left');
+      } else if (markerX > this.timelineWidth - 120) {
+        el.classList.add('marker-align-right');
+      } else {
+        el.classList.add('marker-align-center');
+      }
 
       const mins = Math.floor(marker.time / 60);
       const secs = (marker.time % 60).toFixed(1).padStart(4, '0');
@@ -496,6 +745,7 @@ class TimelineUI {
         }
 
         this.audio.seek(marker.time);
+        this.scrollToMarker(marker.time);
       });
 
       const tag = el.querySelector('.marker-tag');
@@ -519,6 +769,11 @@ class TimelineUI {
           if (this.draggingMarkerId !== marker.id) return;
           const deltaX = moveEvent.clientX - startClientX;
           const newTime = Math.max(0, originalTime + (deltaX / this.pixelsPerSecond));
+          const currentX = newTime * this.pixelsPerSecond;
+          el.style.left = `${currentX}px`;
+          el.classList.toggle('marker-align-left', currentX < 60);
+          el.classList.toggle('marker-align-right', currentX > this.timelineWidth - 120);
+          el.classList.toggle('marker-align-center', currentX >= 60 && currentX <= this.timelineWidth - 120);
           this.state.updateMarker(marker.id, { time: newTime });
         };
 
@@ -539,16 +794,20 @@ class TimelineUI {
   }
 
   updateMarkerPillBar() {
+    const navBar = document.querySelector('.marker-nav-bar');
     const pillContainer = document.getElementById('markerPillList');
+    const markers = this.state.markers;
+
+    if (!markers || markers.length === 0) {
+      if (navBar) navBar.classList.add('hidden');
+      if (pillContainer) pillContainer.innerHTML = '';
+      return;
+    }
+
+    if (navBar) navBar.classList.remove('hidden');
     if (!pillContainer) return;
 
     pillContainer.innerHTML = '';
-    const markers = this.state.markers;
-
-    if (markers.length === 0) {
-      pillContainer.innerHTML = '<span class="empty-markers-hint">No markers. Double-click ruler or click "+ Marker"</span>';
-      return;
-    }
 
     markers.forEach(m => {
       const pill = document.createElement('button');
@@ -564,6 +823,7 @@ class TimelineUI {
 
       pill.addEventListener('click', () => {
         this.audio.seek(m.time);
+        this.scrollToMarker(m.time);
       });
 
       pillContainer.appendChild(pill);
@@ -623,6 +883,23 @@ class TimelineUI {
 
       const offsetStr = offset > 0 ? `+${offset.toFixed(2)}s` : 't0 (0.0s)';
 
+      // Determine initial status text
+      let statusText = 'Loading...';
+      let isChunkLoading = false;
+      if (loadedTrack?.chunks && loadedTrack.chunks.length > 0) {
+        const total = loadedTrack.chunks.length;
+        const decoded = loadedTrack.chunks.filter(c => c.status === 'decoded').length;
+        if (decoded === total) {
+          statusText = `${loadedTrack.duration.toFixed(1)}s`;
+        } else {
+          const decodedSec = Math.min(loadedTrack.duration, decoded * 20);
+          statusText = `${Math.round(decodedSec)}s / ${Math.round(loadedTrack.duration)}s`;
+          isChunkLoading = loadedTrack.chunks.some(c => c.status === 'loading');
+        }
+      } else if (loadedTrack?.buffer) {
+        statusText = `${loadedTrack.duration.toFixed(1)}s`;
+      }
+
       // 1. Desktop Track Header content
       const desktopHeader = document.createElement('div');
       desktopHeader.className = 'desktop-track-header';
@@ -633,7 +910,7 @@ class TimelineUI {
             <span class="track-offset-badge" title="Start Offset from t0">${offsetStr}</span>
           </div>
           <div class="track-sub-info">
-            <span class="track-status">${loadedTrack?.buffer ? `${(loadedTrack.duration).toFixed(1)}s` : 'Loading...'}</span>
+            <span class="track-status ${isChunkLoading ? 'loading-pulse' : ''}" id="track_status_${index}">${statusText}</span>
             <span class="track-vu-meter" id="vu_${index}">
               <span class="vu-led"></span>
               <span class="vu-led"></span>
@@ -706,6 +983,10 @@ class TimelineUI {
     });
 
     this.tracksContainer.querySelectorAll('.track-vol-slider').forEach(slider => {
+      ['mousedown', 'pointerdown', 'touchstart', 'click'].forEach(evt => {
+        slider.addEventListener(evt, (e) => e.stopPropagation());
+      });
+
       slider.addEventListener('input', (e) => {
         const idx = parseInt(slider.dataset.index, 10);
         const val = parseFloat(slider.value);
@@ -713,6 +994,28 @@ class TimelineUI {
         const label = slider.parentElement.querySelector('.vol-label');
         if (label) label.textContent = this.formatGainDb(val);
       });
+    });
+  }
+
+  updateTrackControlStates() {
+    if (!this.tracksContainer) return;
+    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
+
+    this.tracksContainer.querySelectorAll('.track-row').forEach(row => {
+      const idx = parseInt(row.dataset.index, 10);
+      const trackState = this.state.tracksState[idx] || { volume: 1.0, mute: false, solo: false };
+      const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
+
+      row.classList.toggle('track-dimmed', isDimmed);
+
+      const btnMute = row.querySelector('.btn-mute');
+      if (btnMute) btnMute.classList.toggle('active', trackState.mute);
+
+      const btnSolo = row.querySelector('.btn-solo');
+      if (btnSolo) btnSolo.classList.toggle('active', trackState.solo);
+
+      const handleDot = row.querySelector('.track-handle-dot');
+      if (handleDot) handleDot.classList.toggle('muted', trackState.mute);
     });
   }
 
@@ -742,6 +1045,57 @@ class TimelineUI {
     });
   }
 
+  renderWaveformForTrack(trackIndex) {
+    if (!this.tracksContainer) return;
+    const canvas = this.tracksContainer.querySelector(`.track-canvas[data-index="${trackIndex}"]`);
+    if (!canvas) return;
+
+    const loadedTrack = this.audio.tracks[trackIndex];
+    const trackState = this.state.tracksState[trackIndex] || { volume: 1.0, mute: false, solo: false };
+    const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
+    const isDimmed = hasAnySolo ? !trackState.solo : trackState.mute;
+    const isSelected = trackIndex === this.state.selectedTrackIndex;
+    const trackHeight = this.getTrackHeight();
+
+    this.waveforms.renderTrackCanvas(
+      canvas,
+      loadedTrack,
+      this.pixelsPerSecond,
+      this.timelineWidth,
+      trackHeight,
+      { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
+    );
+  }
+
+  updateTrackStatus(trackIndex) {
+    const statusEl = document.getElementById(`track_status_${trackIndex}`);
+    if (!statusEl) return;
+    const loadedTrack = this.audio.tracks[trackIndex];
+    if (!loadedTrack) return;
+
+    if (loadedTrack.chunks && loadedTrack.chunks.length > 0) {
+      const total = loadedTrack.chunks.length;
+      const decoded = loadedTrack.chunks.filter(c => c.status === 'decoded').length;
+      if (decoded === total) {
+        statusEl.textContent = `${loadedTrack.duration.toFixed(1)}s`;
+        statusEl.classList.remove('loading-pulse');
+      } else {
+        const decodedSec = Math.min(loadedTrack.duration, decoded * 20);
+        statusEl.textContent = `${Math.round(decodedSec)}s / ${Math.round(loadedTrack.duration)}s`;
+        if (loadedTrack.chunks.some(c => c.status === 'loading')) {
+          statusEl.classList.add('loading-pulse');
+        } else {
+          statusEl.classList.remove('loading-pulse');
+        }
+      }
+    } else if (loadedTrack.buffer) {
+      statusEl.textContent = `${loadedTrack.duration.toFixed(1)}s`;
+      statusEl.classList.remove('loading-pulse');
+    } else {
+      statusEl.textContent = 'Loading...';
+    }
+  }
+
   updatePlayheadPosition() {
     const time = (this.audio && this.audio.playheadPosition !== undefined && this.audio.playheadPosition > 0)
       ? this.audio.playheadPosition
@@ -751,6 +1105,8 @@ class TimelineUI {
 
     if (this.playheadLine) {
       this.playheadLine.style.transform = `translateX(${playheadX}px)`;
+      const isBehindSidebar = playheadX < (this.scrollLeft + headerWidth - 1);
+      this.playheadLine.style.display = isBehindSidebar ? 'none' : 'block';
     }
 
     const timeDisplay = document.getElementById('timeDisplay');

@@ -40,7 +40,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Track loading events
+  // Track loading & chunk streaming events
+  audio.on('tracks_initialized', ({ tracks }) => {
+    setLoading(false);
+    timeline.render();
+    if (state.currentTime > 0) {
+      timeline.scrollToTime(state.currentTime);
+    }
+  });
+
+  audio.on('initial_playback_ready', () => {
+    setLoading(false);
+    showToast('Ready to play! Streaming remaining tracks...', 'info', 2500);
+  });
+
+  audio.on('all_chunks_completed', () => {
+    showToast('All audio tracks fully decoded into memory', 'success', 2500);
+  });
+
   audio.on('track_loaded', ({ loadedCount, total, track }) => {
     const pct = Math.round((loadedCount / total) * 100);
     setLoading(true, `Loaded ${track.name} (${loadedCount}/${total})`, pct);
@@ -82,6 +99,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const baseUrl = new URL('.', fullUrl).href;
       await audio.loadProjectTracks(projectData, baseUrl);
 
+      // Dismiss loading modal as soon as tracks are initialized
+      setLoading(false);
+
       // Seek to initial time if provided in URL
       if (state.currentTime > 0) {
         audio.seek(state.currentTime);
@@ -102,7 +122,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // --- Transport Controls ---
   const btnPlay = document.getElementById('btnPlay');
-  const btnStop = document.getElementById('btnStop');
   const btnRewind = document.getElementById('btnRewind');
   const btnLoop = document.getElementById('btnLoop');
   const btnPrevMarker = document.getElementById('btnPrevMarker');
@@ -117,15 +136,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  if (btnStop) {
-    btnStop.addEventListener('click', () => {
-      audio.stop();
-    });
+  function handleRewind() {
+    audio.seek(0);
+    if (timeline && timeline.scrollToStart) {
+      timeline.scrollToStart();
+    }
   }
 
   if (btnRewind) {
     btnRewind.addEventListener('click', () => {
-      audio.seek(0);
+      handleRewind();
     });
   }
 
@@ -150,17 +170,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       for (let i = markers.length - 1; i >= 0; i--) {
         if (markers[i].time < currentTime - threshold) {
           audio.seek(markers[i].time);
+          if (timeline && timeline.scrollToMarker) timeline.scrollToMarker(markers[i].time);
           showToast(`Jumped to: ${markers[i].name}`, 'info', 1500);
           return;
         }
       }
       // If at start, jump to first marker or 0
       audio.seek(0);
+      if (timeline && timeline.scrollToMarker) timeline.scrollToMarker(0);
     } else {
       // Find next marker
       for (let i = 0; i < markers.length; i++) {
         if (markers[i].time > currentTime + threshold) {
           audio.seek(markers[i].time);
+          if (timeline && timeline.scrollToMarker) timeline.scrollToMarker(markers[i].time);
           showToast(`Jumped to: ${markers[i].name}`, 'info', 1500);
           return;
         }
@@ -276,50 +299,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnZoomFit) {
     btnZoomFit.addEventListener('click', () => {
-      const totalDur = audio.getTotalDuration();
-      const visibleW = timeline.timelineScrollArea.clientWidth - timeline.getTrackHeaderWidth() - 40;
-      const fitZoom = Math.max(timeline.minZoom, visibleW / totalDur);
+      const fitZoom = timeline.computeProjectMinZoom();
       timeline.applyZoom(fitZoom);
+      if (timeline.timelineScrollArea) {
+        timeline.timelineScrollArea.scrollLeft = 0;
+        timeline.scrollLeft = 0;
+      }
     });
   }
 
-  // Playback state UI changes
-  audio.on('playback_started', () => {
-    if (btnPlay) {
+  // Playback state UI changes: Toggle hero button between Play (green triangle) and Stop (red square)
+  function updatePlayButtonUI(isPlaying) {
+    if (!btnPlay) return;
+    if (isPlaying) {
       btnPlay.classList.add('playing');
+      btnPlay.title = 'Stop (Space)';
       btnPlay.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="6" y="4" width="4" height="16"/>
-          <rect x="14" y="4" width="4" height="16"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <rect x="5" y="5" width="14" height="14" rx="2"/>
         </svg>
-        <span>Pause</span>
       `;
-    }
-  });
-
-  audio.on('playback_paused', () => {
-    if (btnPlay) {
+    } else {
       btnPlay.classList.remove('playing');
+      btnPlay.title = 'Play (Space)';
       btnPlay.innerHTML = `
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <polygon points="5 3 19 12 5 21 5 3"/>
+          <polygon points="6 4 20 12 6 20 6 4"/>
         </svg>
-        <span>Play</span>
       `;
     }
-  });
+  }
 
-  audio.on('playback_stopped', () => {
-    if (btnPlay) {
-      btnPlay.classList.remove('playing');
-      btnPlay.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <polygon points="5 3 19 12 5 21 5 3"/>
-        </svg>
-        <span>Play</span>
-      `;
-    }
-  });
+  audio.on('playback_started', () => updatePlayButtonUI(true));
+  audio.on('playback_stopped', () => updatePlayButtonUI(false));
+  audio.on('playback_paused', () => updatePlayButtonUI(false));
 
   // --- Native OS Share & Clipboard Fallback ---
   const btnShare = document.getElementById('btnShare');
@@ -458,10 +471,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         e.preventDefault();
         audio.togglePlay();
         break;
+      case 'Escape':
+        e.preventDefault();
+        if (!audio.isPlaying) {
+          audio.hardReset();
+          showToast('Audio Engine Reset', 'info', 1500);
+        } else {
+          audio.stop();
+        }
+        break;
       case 'Enter':
       case 'Home':
         e.preventDefault();
-        audio.seek(0);
+        handleRewind();
         break;
       case 'KeyL':
         e.preventDefault();
