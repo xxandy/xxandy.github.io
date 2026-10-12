@@ -58,6 +58,7 @@ async function getWasmModule() {
 class Mp3BlockDecoder {
   constructor() {
     this.wasm = null;
+    this.lastWrittenMp3End = 0;
   }
 
   async init() {
@@ -87,8 +88,27 @@ class Mp3BlockDecoder {
     const wasmMem = wasm.memory.buffer;
     const mp3Offset = wasm.decoder_mp3_data_offset();
     const mp3Size = wasm.decoder_mp3_data_size();
+
+    // If previously written MP3 memory was larger, zero out the residual bytes
+    if (this.lastWrittenMp3End && this.lastWrittenMp3End > mp3Offset + mp3Size) {
+      const clearLen = Math.min(this.lastWrittenMp3End - (mp3Offset + mp3Size), wasmMem.byteLength - (mp3Offset + mp3Size));
+      if (clearLen > 0) {
+        new Uint8Array(wasmMem, mp3Offset + mp3Size, clearLen).fill(0);
+      }
+    }
+    this.lastWrittenMp3End = mp3Offset + mp3Size;
+
     const dest = new Uint8Array(wasmMem, mp3Offset, mp3Size);
     dest.set(mp3Bytes);
+
+    // Pre-zero PCM output buffer area in WASM memory so that if minimp3 reaches EOF
+    // early, unwritten trailing samples never retain residual dirty memory from previous tracks
+    const pcmOffset = wasm.decoder_pcm_data_offset();
+    const expectedPcmBytes = Math.ceil(durationSec * 48000 * 2 * 2 + 65536);
+    const availablePcmBytes = Math.min(expectedPcmBytes, wasm.memory.buffer.byteLength - pcmOffset);
+    if (availablePcmBytes > 0) {
+      new Uint8Array(wasm.memory.buffer, pcmOffset, availablePcmBytes).fill(0);
+    }
 
     if (seekSec > 0) {
       wasm.decoder_seek(seekSec);
@@ -98,15 +118,15 @@ class Mp3BlockDecoder {
 
     wasm.decoder_decode(durationSec);
 
-    const pcmOffset = wasm.decoder_pcm_data_offset();
+    const actualPcmOffset = wasm.decoder_pcm_data_offset();
     const numSamples = wasm.decode_results_num_samples();
     const samplingRate = wasm.decode_results_sampling_rate() || 44100;
     const numChannels = wasm.decode_results_num_channels() || 2;
     const frames = Math.floor(numSamples / numChannels);
     const actualDuration = frames / samplingRate;
 
-    // Copy PCM data out of WebAssembly memory
-    const pcmSource = new Int16Array(wasm.memory.buffer, pcmOffset, numSamples);
+    // Copy PCM data out of WebAssembly memory (refresh memory.buffer in case WASM grew)
+    const pcmSource = new Int16Array(wasm.memory.buffer, actualPcmOffset, numSamples);
     const pcm = new Int16Array(pcmSource);
 
     // Compute peaks (at 80 points per second)
@@ -165,7 +185,20 @@ class Mp3BlockDecoder {
     const wasm = this.wasm;
     wasm.decoder_init();
     wasm.decoder_set_mp3_data_size(mp3Bytes.byteLength);
-    const dest = new Uint8Array(wasm.memory.buffer, wasm.decoder_mp3_data_offset(), wasm.decoder_mp3_data_size());
+
+    const wasmMem = wasm.memory.buffer;
+    const mp3Offset = wasm.decoder_mp3_data_offset();
+    const mp3Size = wasm.decoder_mp3_data_size();
+
+    if (this.lastWrittenMp3End && this.lastWrittenMp3End > mp3Offset + mp3Size) {
+      const clearLen = Math.min(this.lastWrittenMp3End - (mp3Offset + mp3Size), wasmMem.byteLength - (mp3Offset + mp3Size));
+      if (clearLen > 0) {
+        new Uint8Array(wasmMem, mp3Offset + mp3Size, clearLen).fill(0);
+      }
+    }
+    this.lastWrittenMp3End = mp3Offset + mp3Size;
+
+    const dest = new Uint8Array(wasmMem, mp3Offset, mp3Size);
     dest.set(mp3Bytes);
     wasm.decoder_seek(-1);
     const dur = wasm.decoder_current_time();
