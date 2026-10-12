@@ -1539,3 +1539,14 @@ body.is-middle-panning * {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1.0; }
 }
+
+/* --- Mobile Pinch-to-Zoom Stretch Dots Overlay --- */
+.pinch-overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 60;
+  display: none;
+}
+

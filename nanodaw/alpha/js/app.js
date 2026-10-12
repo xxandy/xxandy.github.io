@@ -308,6 +308,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // Pinch Feedback Stretch Toggle in Overlay
+  const overlayBtnTogglePinchStretch = document.getElementById('overlayBtnTogglePinchStretch');
+  function updatePinchStretchBtnUI() {
+    if (!overlayBtnTogglePinchStretch) return;
+    const isStretch = timeline.pinchStretchWaveform;
+    overlayBtnTogglePinchStretch.textContent = isStretch 
+      ? 'Waveform Stretch: ON' 
+      : 'Waveform Stretch: OFF (Dots Only)';
+    overlayBtnTogglePinchStretch.style.color = isStretch ? '#38bdf8' : 'var(--text-secondary)';
+    overlayBtnTogglePinchStretch.style.borderColor = isStretch ? 'rgba(56, 189, 248, 0.4)' : 'var(--border-subtle)';
+  }
+  updatePinchStretchBtnUI();
+
+  if (overlayBtnTogglePinchStretch) {
+    overlayBtnTogglePinchStretch.addEventListener('click', () => {
+      const next = !timeline.pinchStretchWaveform;
+      timeline.setPinchStretchWaveform(next);
+      updatePinchStretchBtnUI();
+      showToast(next ? 'Pinch: Hardware Stretch ON (Option C)' : 'Pinch: Dots Only (Option A, no waveform stretch)', 'info', 2500);
+    });
+  }
+
+  // Global runtime helpers
+  window.setPinchStretch = (enabled) => {
+    const val = timeline.setPinchStretchWaveform(enabled);
+    updatePinchStretchBtnUI();
+    return val;
+  };
+  window.getPinchStretch = () => timeline.pinchStretchWaveform;
+
   // Get Zoom Profile Download Action
   if (overlayBtnGetProfile) {
     overlayBtnGetProfile.addEventListener('click', () => {
