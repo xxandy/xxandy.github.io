@@ -85,9 +85,10 @@ class WaveformCache {
     const width = Math.max(100, Math.round(timelineWidth));
     const height = Math.max(40, Math.round(trackHeight));
 
-    // Ensure physical canvas dimensions match timeline width & DPR
-    const targetW = Math.round(width * dpr);
-    const targetH = Math.round(height * dpr);
+    // Ensure physical canvas dimensions match timeline width & DPR (safety capped at 32k)
+    const maxDim = 32768;
+    const targetW = Math.min(maxDim, Math.round(width * dpr));
+    const targetH = Math.min(maxDim, Math.round(height * dpr));
 
     if (canvas.width !== targetW || canvas.height !== targetH) {
       canvas.width = targetW;

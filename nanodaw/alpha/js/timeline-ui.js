@@ -407,6 +407,20 @@ class TimelineUI {
   }
 
   handleResize() {
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+
+    // If current zoom exceeds the newly recomputed maxZoom (e.g. switching from desktop to mobile),
+    // automatically zoom out to respect the new safe memory limit.
+    if (this.pixelsPerSecond > this.maxZoom) {
+      this.applyZoom(this.maxZoom);
+      return;
+    }
+    if (this.pixelsPerSecond < this.minZoom) {
+      this.applyZoom(this.minZoom);
+      return;
+    }
+
     this.updateTimelineDimensions();
     this.renderRuler();
     this.renderWaveforms();
@@ -422,7 +436,58 @@ class TimelineUI {
     return Math.max(this.minZoomFloor, fitLevel);
   }
 
+  computeProjectMaxZoom() {
+    const isMob = this.isMobile();
+    // Conservative total canvas memory budget across all tracks and ruler:
+    // Mobile: 128 MB (134,217,728 bytes) - safe for iOS Safari and Android Chrome
+    // Desktop: 384 MB (402,653,184 bytes) - safe for low-end laptops with integrated graphics
+    const maxMemoryBytes = isMob ? (128 * 1024 * 1024) : (384 * 1024 * 1024);
+
+    // Hard physical canvas texture width ceilings:
+    // Mobile: 16,384px (hardware OpenGL ES MAX_TEXTURE_SIZE on mobile GPUs)
+    // Desktop: 32,768px (browser / GPU 2D canvas dimension ceiling)
+    const maxPhysicalCanvasWidth = isMob ? 16384 : 32768;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const totalDuration = Math.max(this.audio.getTotalDuration(), 5);
+
+    // Number of tracks and total vertical canvas height (tracks + ruler)
+    const trackCount = Math.max(1, this.audio.tracks?.length || this.state.project?.tracks?.length || 1);
+    const trackHeight = this.getTrackHeight();
+    const rulerHeight = this.getRulerHeight();
+    const totalCanvasHeight = (trackCount * trackHeight) + rulerHeight;
+
+    // Memory-driven ceiling: Total Bytes = duration * zoom * dpr * totalCanvasHeight * dpr * 4
+    const bytesPerCssSec = totalCanvasHeight * dpr * dpr * 4;
+    const maxZoomMem = maxMemoryBytes / (totalDuration * bytesPerCssSec);
+
+    // Texture dimension-driven ceiling: physical canvas width = (duration * zoom + 100) * dpr
+    const maxCssWidth = (maxPhysicalCanvasWidth / dpr) - 100;
+    const maxZoomDim = Math.max(0.5, maxCssWidth / totalDuration);
+
+    let calculatedMaxZoom = Math.min(maxZoomMem, maxZoomDim);
+
+    // Cap at a clean upper bound of 300 px/sec
+    calculatedMaxZoom = Math.min(300, calculatedMaxZoom);
+
+    // Ensure maxZoom is at least the min/fit zoom level so a project can always fit
+    const minZoomLevel = this.computeProjectMinZoom();
+    return Math.max(minZoomLevel, calculatedMaxZoom);
+  }
+
   updateTimelineDimensions() {
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+
+    // Safety clamp zoom level within dynamic bounds
+    if (this.pixelsPerSecond > this.maxZoom) {
+      this.pixelsPerSecond = this.maxZoom;
+      this.state.setZoom(this.pixelsPerSecond);
+    } else if (this.pixelsPerSecond < this.minZoom) {
+      this.pixelsPerSecond = this.minZoom;
+      this.state.setZoom(this.pixelsPerSecond);
+    }
+
     const headerWidth = this.getTrackHeaderWidth();
     const totalDuration = Math.max(this.audio.getTotalDuration(), 10);
     const availableW = Math.max(100, this.timelineScrollArea.clientWidth - headerWidth - 10);
@@ -444,7 +509,10 @@ class TimelineUI {
   }
 
   applyZoom(newZoom, originClientX = null) {
-    const clampedZoom = Math.max(this.minZoomFloor, Math.min(this.maxZoom, newZoom));
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+
+    const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, newZoom));
     if (clampedZoom === this.pixelsPerSecond) return;
 
     const headerWidth = this.getTrackHeaderWidth();
@@ -523,8 +591,9 @@ class TimelineUI {
     const width = this.timelineWidth;
     const height = this.getRulerHeight();
 
-    const targetW = Math.round(width * dpr);
-    const targetH = Math.round(height * dpr);
+    const maxDim = 32768;
+    const targetW = Math.min(maxDim, Math.round(width * dpr));
+    const targetH = Math.min(maxDim, Math.round(height * dpr));
 
     if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
       this.rulerCanvas.width = targetW;
