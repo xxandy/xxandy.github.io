@@ -138,6 +138,21 @@ body {
   -webkit-text-fill-color: transparent;
 }
 
+.version-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  background: rgba(0, 242, 254, 0.1);
+  border: 1px solid rgba(0, 242, 254, 0.28);
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  line-height: 1.2;
+  user-select: none;
+  white-space: nowrap;
+}
+
 .project-title-badge {
   display: flex;
   align-items: center;
@@ -686,6 +701,7 @@ body {
   flex: 0 0 auto;
   width: var(--timeline-width);
   height: 100%;
+  overflow: hidden;
 }
 
 #rulerCanvas {
@@ -829,8 +845,13 @@ body {
   min-width: 100%;
 }
 
-.track-row.track-dimmed {
+.track-row.track-dimmed .track-lane {
   opacity: 0.35;
+}
+
+.track-row.track-dimmed .desktop-track-header,
+.track-row.track-dimmed .mobile-track-handle {
+  opacity: 0.55;
 }
 
 .track-row.track-selected {
@@ -847,7 +868,7 @@ body {
   border-right: 1px solid var(--border-subtle);
   position: sticky;
   left: 0;
-  z-index: 25;
+  z-index: 35;
   flex-shrink: 0;
   overflow: hidden;
 }
@@ -1105,6 +1126,7 @@ body {
   cursor: pointer;
   flex: 0 0 auto;
   width: var(--timeline-width);
+  overflow: hidden;
 }
 
 .track-canvas {
@@ -1421,6 +1443,11 @@ body {
 
   .app-title {
     font-size: 14px;
+  }
+
+  .version-badge {
+    font-size: 9px;
+    padding: 1px 4px;
   }
 
   .project-title-badge {

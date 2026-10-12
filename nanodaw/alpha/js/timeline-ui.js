@@ -516,28 +516,46 @@ class TimelineUI {
     if (clampedZoom === this.pixelsPerSecond) return;
 
     const headerWidth = this.getTrackHeaderWidth();
+    const clientWidth = this.timelineScrollArea.clientWidth;
+    const visibleWaveW = Math.max(10, clientWidth - headerWidth);
 
-    let focalTime = (this.scrollLeft + (this.timelineScrollArea.clientWidth / 2) - headerWidth) / this.pixelsPerSecond;
+    let focalTime;
+    let anchorScreenX;
+
     if (originClientX !== null) {
       const rect = this.timelineScrollArea.getBoundingClientRect();
       const originX = originClientX - rect.left;
-      focalTime = (this.scrollLeft + originX - headerWidth) / this.pixelsPerSecond;
-    }
 
-    focalTime = Math.max(0, focalTime);
+      if (originX <= headerWidth) {
+        // Pointer is over the left sticky track headers or margin.
+        // Pin the focal point strictly to Time 0:00 at the left bound of the waveform lane.
+        focalTime = 0;
+        anchorScreenX = headerWidth;
+      } else {
+        // Pointer is over the waveform timeline.
+        focalTime = Math.max(0, (this.scrollLeft + originX - headerWidth) / this.pixelsPerSecond);
+        anchorScreenX = originX;
+      }
+    } else {
+      // Zoom via button or shortcut.
+      // If the timeline is at the left bound (scrollLeft <= 2) or the project fits within the visible wave area:
+      // anchor at Time 0:00 so the project start never expands/scrolls into or behind the track headers.
+      if (this.scrollLeft <= 2) {
+        focalTime = 0;
+        anchorScreenX = headerWidth;
+      } else {
+        // Anchor to the visual center of the visible waveform lane
+        anchorScreenX = headerWidth + (visibleWaveW / 2);
+        focalTime = Math.max(0, (this.scrollLeft + anchorScreenX - headerWidth) / this.pixelsPerSecond);
+      }
+    }
 
     this.pixelsPerSecond = clampedZoom;
     this.state.setZoom(this.pixelsPerSecond);
     this.updateTimelineDimensions();
 
-    if (originClientX !== null) {
-      const rect = this.timelineScrollArea.getBoundingClientRect();
-      const originX = originClientX - rect.left;
-      this.timelineScrollArea.scrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - originX;
-    } else {
-      this.timelineScrollArea.scrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - (this.timelineScrollArea.clientWidth / 2);
-    }
-
+    const targetScrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - anchorScreenX;
+    this.timelineScrollArea.scrollLeft = Math.max(0, targetScrollLeft);
     this.scrollLeft = this.timelineScrollArea.scrollLeft;
 
     this.renderRuler();
@@ -556,7 +574,7 @@ class TimelineUI {
     const viewRight = viewLeft + viewWidth;
 
     if (playheadX > viewRight - 80) {
-      this.timelineScrollArea.scrollLeft = playheadX - 120;
+      this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - 120);
     } else if (playheadX < viewLeft + headerWidth) {
       this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - headerWidth - 40);
     }
@@ -1080,6 +1098,8 @@ class TimelineUI {
 
     if (this.playheadLine) {
       this.playheadLine.style.transform = `translateX(${playheadX}px)`;
+      const isBehindSidebar = playheadX < (this.scrollLeft + headerWidth - 1);
+      this.playheadLine.style.display = isBehindSidebar ? 'none' : 'block';
     }
 
     const timeDisplay = document.getElementById('timeDisplay');
