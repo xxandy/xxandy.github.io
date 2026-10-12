@@ -136,9 +136,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  function handleRewind() {
+    audio.seek(0);
+    if (timeline && timeline.scrollToStart) {
+      timeline.scrollToStart();
+    }
+  }
+
   if (btnRewind) {
     btnRewind.addEventListener('click', () => {
-      audio.seek(0);
+      handleRewind();
     });
   }
 
@@ -476,7 +483,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       case 'Enter':
       case 'Home':
         e.preventDefault();
-        audio.seek(0);
+        handleRewind();
         break;
       case 'KeyL':
         e.preventDefault();

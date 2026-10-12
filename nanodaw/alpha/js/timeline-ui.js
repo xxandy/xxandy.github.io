@@ -580,6 +580,13 @@ class TimelineUI {
     }
   }
 
+  scrollToStart() {
+    if (!this.timelineScrollArea) return;
+    this.timelineScrollArea.scrollLeft = 0;
+    this.scrollLeft = 0;
+    this.updatePlayheadPosition();
+  }
+
   scrollToTime(time) {
     if (!this.timelineScrollArea) return;
     const headerWidth = this.getTrackHeaderWidth();
