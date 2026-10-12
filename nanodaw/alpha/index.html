@@ -281,6 +281,18 @@
             Open Another Project / File
           </button>
         </div>
+
+        <div class="divider-text" style="margin: 12px 0 8px 0;">DIAGNOSTICS & PROFILING</div>
+
+        <!-- Get Profile Button in Settings Overlay -->
+        <div class="tools-actions-stack">
+          <button class="btn btn-primary" id="overlayBtnGetProfile" style="width: 100%; justify-content: center; padding: 10px; background: linear-gradient(135deg, #0284c7, #4f46e5); border: none; font-weight: 600; box-shadow: 0 2px 8px rgba(2, 132, 199, 0.3);">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+            Get Profile (<span id="profileEventCount">0</span> events)
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -348,6 +360,7 @@
   <div class="app-toast" id="appToast"></div>
 
   <!-- Script Modules -->
+  <script src="js/profiler.js?v=44"></script>
   <script src="js/mp3-decoder.js?v=44"></script>
   <script src="js/state-manager.js?v=44"></script>
   <script src="js/waveform-cache.js?v=44"></script>

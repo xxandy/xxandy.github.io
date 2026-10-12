@@ -87,11 +87,16 @@ class WaveformCache {
     const canvasCssStartX = win ? win.startX : 0;
     const height = Math.max(40, Math.round(trackHeight));
 
+    const profiler = window.zoomProfiler;
+    const STEP = window.ZOOM_STEP;
+    const trackIdx = typeof track?.index === 'number' ? track.index : 255;
+
     // Ensure physical canvas dimensions match window width & DPR
     const maxDim = 32768;
     const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
     const targetH = Math.min(maxDim, Math.round(height * dpr));
 
+    if (profiler && STEP) profiler.startStep(STEP.TRACK_CANVAS_RESIZE, trackIdx, targetW);
     if (canvas.width !== targetW || canvas.height !== targetH) {
       canvas.width = targetW;
       canvas.height = targetH;
@@ -100,7 +105,9 @@ class WaveformCache {
     canvas.style.width = `${canvasCssWidth}px`;
     canvas.style.height = `${height}px`;
     canvas.style.left = `${canvasCssStartX}px`;
+    if (profiler && STEP) profiler.endStep(STEP.TRACK_CANVAS_RESIZE, trackIdx, targetW);
 
+    if (profiler && STEP) profiler.startStep(STEP.TRACK_CANVAS_CLEAR, trackIdx);
     const ctx = canvas.getContext('2d');
     ctx.save();
     ctx.scale(dpr, dpr);
@@ -122,12 +129,15 @@ class WaveformCache {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.01)';
       ctx.fillRect(0, 0, canvasCssWidth, height);
     }
+    if (profiler && STEP) profiler.endStep(STEP.TRACK_CANVAS_CLEAR, trackIdx);
 
     if (!track || (!track.buffer && !track.peaks && (!track.chunks || track.chunks.length === 0))) {
       // Empty or loading lane
       ctx.restore();
       return;
     }
+
+    if (profiler && STEP) profiler.startStep(STEP.TRACK_WAVEFORM_PAINT, trackIdx);
 
     // Apply viewport window horizontal translation
     if (win) {
@@ -370,5 +380,6 @@ class WaveformCache {
 
     ctx.restore(); // restores clip
     ctx.restore(); // restores scale & translate
+    if (profiler && STEP) profiler.endStep(STEP.TRACK_WAVEFORM_PAINT, trackIdx);
   }
 }

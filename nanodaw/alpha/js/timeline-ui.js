@@ -135,7 +135,13 @@ class TimelineUI {
         e.preventDefault();
         // Exponential zoom scaling for smooth micro & macro control
         const zoomFactor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+        if (window.zoomProfiler && window.ZOOM_OP) {
+          window.zoomProfiler.startOp(e.deltaY < 0 ? window.ZOOM_OP.ZOOM_IN : window.ZOOM_OP.ZOOM_OUT);
+        }
         this.applyZoom(this.pixelsPerSecond * zoomFactor, e.clientX);
+        if (window.zoomProfiler) {
+          window.zoomProfiler.endOp();
+        }
       } else if (e.shiftKey) {
         e.preventDefault();
         // Adaptive horizontal scroll step scaled by zoom density
@@ -163,7 +169,13 @@ class TimelineUI {
         if (this.touchPinchInitialDist > 0) {
           const ratio = currentDist / this.touchPinchInitialDist;
           const targetZoom = this.touchPinchInitialZoom * ratio;
+          if (window.zoomProfiler && window.ZOOM_OP) {
+            window.zoomProfiler.startOp(window.ZOOM_OP.PINCH);
+          }
           this.applyZoom(targetZoom, this.touchPinchMidX);
+          if (window.zoomProfiler) {
+            window.zoomProfiler.endOp();
+          }
         }
       }
     }, { passive: true });
@@ -540,12 +552,29 @@ class TimelineUI {
   }
 
   applyZoom(newZoom, originClientX = null) {
+    const profiler = window.zoomProfiler;
+    const STEP = window.ZOOM_STEP;
+    const OP = window.ZOOM_OP;
+
+    let autoStartedOp = false;
+    if (profiler && (!profiler.activeStepStarts || profiler.activeStepStarts.size === 0)) {
+      profiler.startOp(OP ? OP.ZOOM_IN : 1);
+      autoStartedOp = true;
+    }
+
+    if (profiler && STEP) profiler.startStep(STEP.COMPUTE_BOUNDS);
     this.maxZoom = this.computeProjectMaxZoom();
     this.minZoom = this.computeProjectMinZoom();
 
     const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, newZoom));
-    if (clampedZoom === this.pixelsPerSecond) return;
+    if (clampedZoom === this.pixelsPerSecond) {
+      if (profiler && STEP) profiler.endStep(STEP.COMPUTE_BOUNDS);
+      if (autoStartedOp && profiler) profiler.endOp();
+      return;
+    }
+    if (profiler && STEP) profiler.endStep(STEP.COMPUTE_BOUNDS);
 
+    if (profiler && STEP) profiler.startStep(STEP.CALC_FOCAL_ANCHOR);
     const headerWidth = this.getTrackHeaderWidth();
     const clientWidth = this.timelineScrollArea.clientWidth;
     const visibleWaveW = Math.max(10, clientWidth - headerWidth);
@@ -580,20 +609,40 @@ class TimelineUI {
         focalTime = Math.max(0, (this.scrollLeft + anchorScreenX - headerWidth) / this.pixelsPerSecond);
       }
     }
+    if (profiler && STEP) profiler.endStep(STEP.CALC_FOCAL_ANCHOR);
 
+    if (profiler && STEP) profiler.startStep(STEP.UPDATE_DIMENSIONS);
     this.pixelsPerSecond = clampedZoom;
     this.state.setZoom(this.pixelsPerSecond);
     this.updateTimelineDimensions();
+    if (profiler && STEP) profiler.endStep(STEP.UPDATE_DIMENSIONS);
 
+    if (profiler && STEP) profiler.startStep(STEP.DOM_SCROLL_UPDATE);
     const targetScrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - anchorScreenX;
     this.timelineScrollArea.scrollLeft = Math.max(0, targetScrollLeft);
     this.scrollLeft = this.timelineScrollArea.scrollLeft;
+    if (profiler && STEP) profiler.endStep(STEP.DOM_SCROLL_UPDATE);
 
+    if (profiler && STEP) profiler.startStep(STEP.UPDATE_VIEWPORT_WIN);
     this.updateViewportWindow();
+    if (profiler && STEP) profiler.endStep(STEP.UPDATE_VIEWPORT_WIN);
+
+    if (profiler && STEP) profiler.startStep(STEP.RENDER_RULER_TOTAL);
     this.renderRuler();
+    if (profiler && STEP) profiler.endStep(STEP.RENDER_RULER_TOTAL);
+
+    if (profiler && STEP) profiler.startStep(STEP.RENDER_WAVEFORMS_TOTAL);
     this.renderWaveforms();
+    if (profiler && STEP) profiler.endStep(STEP.RENDER_WAVEFORMS_TOTAL);
+
+    if (profiler && STEP) profiler.startStep(STEP.UPDATE_PLAYHEAD);
     this.updatePlayheadPosition();
     this.renderMarkerElements();
+    if (profiler && STEP) profiler.endStep(STEP.UPDATE_PLAYHEAD);
+
+    if (autoStartedOp && profiler) {
+      profiler.endOp();
+    }
   }
 
   checkAutoScroll(time) {
@@ -653,6 +702,9 @@ class TimelineUI {
   renderRuler() {
     if (!this.rulerCanvas) return;
 
+    const profiler = window.zoomProfiler;
+    const STEP = window.ZOOM_STEP;
+
     const win = this.activeWindow || this.getViewportWindow();
     const dpr = window.devicePixelRatio || 1;
     const canvasCssWidth = win ? win.width : this.timelineWidth;
@@ -663,6 +715,7 @@ class TimelineUI {
     const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
     const targetH = Math.min(maxDim, Math.round(height * dpr));
 
+    if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
     if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
       this.rulerCanvas.width = targetW;
       this.rulerCanvas.height = targetH;
@@ -671,7 +724,9 @@ class TimelineUI {
     this.rulerCanvas.style.width = `${canvasCssWidth}px`;
     this.rulerCanvas.style.height = `${height}px`;
     this.rulerCanvas.style.left = `${canvasCssStartX}px`;
+    if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
 
+    if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_PAINT);
     const ctx = this.rulerCanvas.getContext('2d');
     ctx.save();
     ctx.scale(dpr, dpr);
@@ -749,6 +804,7 @@ class TimelineUI {
     }
 
     ctx.restore();
+    if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_PAINT);
   }
 
   renderMarkerElements() {
