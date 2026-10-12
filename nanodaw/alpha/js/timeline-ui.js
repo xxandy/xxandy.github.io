@@ -26,6 +26,11 @@ class TimelineUI {
     this.playheadHandle = document.getElementById('playheadHandle');
     this.timelineScrollArea = document.getElementById('timelineScrollArea');
     this.timelineContent = document.getElementById('timelineContent');
+    this.rulerWrap = document.getElementById('rulerWrap');
+
+    // Windowed Viewport Rendering State
+    this.activeWindow = null;
+    this.rafWindowRenderId = null;
 
     // Selected Track Pane DOM
     this.paneTrackDot = document.getElementById('paneTrackDot');
@@ -78,7 +83,8 @@ class TimelineUI {
     this.timelineScrollArea.addEventListener('scroll', () => {
       this.scrollLeft = this.timelineScrollArea.scrollLeft;
       this.updatePlayheadPosition();
-    });
+      this.checkWindowedScroll();
+    }, { passive: true });
 
     // Middle mouse button "hand scroll" (drag horizontally) in desktop mode
     this.timelineScrollArea.addEventListener('mousedown', (e) => {
@@ -170,53 +176,56 @@ class TimelineUI {
     });
 
     // Ruler click / drag for playhead scrub
-    this.rulerCanvas.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      const rect = this.rulerCanvas.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const time = Math.max(0, clickX / this.pixelsPerSecond);
-      
-      this.isDraggingPlayhead = true;
-      this.audio.seek(time);
-      
-      let rafScrubId = null;
-      const onMouseMove = (moveEvent) => {
-        if (!this.isDraggingPlayhead) return;
-        if (rafScrubId) return;
-        rafScrubId = requestAnimationFrame(() => {
-          rafScrubId = null;
+    const rulerTarget = this.rulerWrap || this.rulerCanvas;
+    if (rulerTarget) {
+      rulerTarget.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        const rect = rulerTarget.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const time = Math.max(0, clickX / this.pixelsPerSecond);
+        
+        this.isDraggingPlayhead = true;
+        this.audio.seek(time);
+        
+        let rafScrubId = null;
+        const onMouseMove = (moveEvent) => {
           if (!this.isDraggingPlayhead) return;
-          const currentRect = this.rulerCanvas.getBoundingClientRect();
-          const moveX = moveEvent.clientX - currentRect.left;
-          const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
-          this.audio.seek(scrubTime);
-        });
-      };
+          if (rafScrubId) return;
+          rafScrubId = requestAnimationFrame(() => {
+            rafScrubId = null;
+            if (!this.isDraggingPlayhead) return;
+            const currentRect = rulerTarget.getBoundingClientRect();
+            const moveX = moveEvent.clientX - currentRect.left;
+            const scrubTime = Math.max(0, moveX / this.pixelsPerSecond);
+            this.audio.seek(scrubTime);
+          });
+        };
 
-      const onMouseUp = () => {
-        this.isDraggingPlayhead = false;
-        if (rafScrubId) {
-          cancelAnimationFrame(rafScrubId);
-          rafScrubId = null;
+        const onMouseUp = () => {
+          this.isDraggingPlayhead = false;
+          if (rafScrubId) {
+            cancelAnimationFrame(rafScrubId);
+            rafScrubId = null;
+          }
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+
+      // Double click ruler to add marker
+      rulerTarget.addEventListener('dblclick', (e) => {
+        const rect = rulerTarget.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const time = Math.max(0, clickX / this.pixelsPerSecond);
+        const markerName = prompt('Enter name for new marker:', `Marker ${this.state.markers.length + 1}`);
+        if (markerName !== null) {
+          this.state.addMarker(markerName, time);
         }
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-      };
-
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
-    });
-
-    // Double click ruler to add marker
-    this.rulerCanvas.addEventListener('dblclick', (e) => {
-      const rect = this.rulerCanvas.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const time = Math.max(0, clickX / this.pixelsPerSecond);
-      const markerName = prompt('Enter name for new marker:', `Marker ${this.state.markers.length + 1}`);
-      if (markerName !== null) {
-        this.state.addMarker(markerName, time);
-      }
-    });
+      });
+    }
 
     // Playhead line / handle dragging
     if (this.playheadHandle) {
@@ -437,42 +446,67 @@ class TimelineUI {
   }
 
   computeProjectMaxZoom() {
-    const isMob = this.isMobile();
-    // Conservative total canvas memory budget across all tracks and ruler:
-    // Mobile: 128 MB (134,217,728 bytes) - safe for iOS Safari and Android Chrome
-    // Desktop: 384 MB (402,653,184 bytes) - safe for low-end laptops with integrated graphics
-    const maxMemoryBytes = isMob ? (128 * 1024 * 1024) : (384 * 1024 * 1024);
-
-    // Hard physical canvas texture width ceilings:
-    // Mobile: 16,384px (hardware OpenGL ES MAX_TEXTURE_SIZE on mobile GPUs)
-    // Desktop: 32,768px (browser / GPU 2D canvas dimension ceiling)
-    const maxPhysicalCanvasWidth = isMob ? 16384 : 32768;
-
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const totalDuration = Math.max(this.audio.getTotalDuration(), 5);
-
-    // Number of tracks and total vertical canvas height (tracks + ruler)
-    const trackCount = Math.max(1, this.audio.tracks?.length || this.state.project?.tracks?.length || 1);
-    const trackHeight = this.getTrackHeight();
-    const rulerHeight = this.getRulerHeight();
-    const totalCanvasHeight = (trackCount * trackHeight) + rulerHeight;
-
-    // Memory-driven ceiling: Total Bytes = duration * zoom * dpr * totalCanvasHeight * dpr * 4
-    const bytesPerCssSec = totalCanvasHeight * dpr * dpr * 4;
-    const maxZoomMem = maxMemoryBytes / (totalDuration * bytesPerCssSec);
-
-    // Texture dimension-driven ceiling: physical canvas width = (duration * zoom + 100) * dpr
-    const maxCssWidth = (maxPhysicalCanvasWidth / dpr) - 100;
-    const maxZoomDim = Math.max(0.5, maxCssWidth / totalDuration);
-
-    let calculatedMaxZoom = Math.min(maxZoomMem, maxZoomDim);
-
-    // Cap at a clean upper bound of 300 px/sec
-    calculatedMaxZoom = Math.min(300, calculatedMaxZoom);
-
-    // Ensure maxZoom is at least the min/fit zoom level so a project can always fit
+    // With windowed viewport rendering, memory is strictly O(1) (<1MB per track)
+    // and canvas dimensions never exceed ~2500px, so we can support deep audio inspection (300 px/s)
     const minZoomLevel = this.computeProjectMinZoom();
-    return Math.max(minZoomLevel, calculatedMaxZoom);
+    return Math.max(minZoomLevel, 300);
+  }
+
+  getViewportWindow() {
+    const scrollLeft = this.timelineScrollArea ? this.timelineScrollArea.scrollLeft : 0;
+    const clientWidth = this.timelineScrollArea ? this.timelineScrollArea.clientWidth : 1200;
+    const headerWidth = this.getTrackHeaderWidth();
+    const visibleWaveWidth = Math.max(100, clientWidth - headerWidth);
+
+    // If project fits within visible wave area, full timeline is visible without overscan
+    if (this.timelineWidth <= visibleWaveWidth + 100) {
+      return {
+        startX: 0,
+        width: this.timelineWidth,
+        startSec: 0,
+        endSec: Math.max(10, this.audio.getTotalDuration()),
+        overscan: 0,
+        visibleWaveWidth
+      };
+    }
+
+    // Overscan margin: 50% of visible waveform width on either side (minimum 300px)
+    const overscan = Math.max(300, Math.round(visibleWaveWidth * 0.5));
+    const startX = Math.max(0, Math.floor(scrollLeft - overscan));
+    const endX = Math.min(this.timelineWidth, Math.ceil(scrollLeft + visibleWaveWidth + overscan));
+    const width = Math.max(100, endX - startX);
+
+    const startSec = Math.max(0, startX / this.pixelsPerSecond);
+    const endSec = Math.min(Math.max(10, this.audio.getTotalDuration()), endX / this.pixelsPerSecond);
+
+    return { startX, width, startSec, endSec, overscan, visibleWaveWidth };
+  }
+
+  updateViewportWindow() {
+    this.activeWindow = this.getViewportWindow();
+    return this.activeWindow;
+  }
+
+  checkWindowedScroll() {
+    if (!this.activeWindow || !this.timelineScrollArea) return;
+
+    const scrollLeft = this.timelineScrollArea.scrollLeft;
+    const headerWidth = this.getTrackHeaderWidth();
+    const visibleWaveWidth = Math.max(100, this.timelineScrollArea.clientWidth - headerWidth);
+
+    const distToLeft = scrollLeft - this.activeWindow.startX;
+    const distToRight = (this.activeWindow.startX + this.activeWindow.width) - (scrollLeft + visibleWaveWidth);
+    const threshold = Math.max(80, this.activeWindow.overscan * 0.25);
+
+    if (distToLeft < threshold || distToRight < threshold) {
+      if (this.rafWindowRenderId) return;
+      this.rafWindowRenderId = requestAnimationFrame(() => {
+        this.rafWindowRenderId = null;
+        this.updateViewportWindow();
+        this.renderRuler();
+        this.renderWaveforms();
+      });
+    }
   }
 
   updateTimelineDimensions() {
@@ -500,9 +534,6 @@ class TimelineUI {
       this.timelineContent.style.setProperty('--timeline-width', `${this.timelineWidth}px`);
     }
 
-    if (this.rulerCanvas) {
-      this.rulerCanvas.style.width = `${this.timelineWidth}px`;
-    }
     if (this.markerLayer) {
       this.markerLayer.style.width = `${this.timelineWidth}px`;
     }
@@ -558,6 +589,7 @@ class TimelineUI {
     this.timelineScrollArea.scrollLeft = Math.max(0, targetScrollLeft);
     this.scrollLeft = this.timelineScrollArea.scrollLeft;
 
+    this.updateViewportWindow();
     this.renderRuler();
     this.renderWaveforms();
     this.updatePlayheadPosition();
@@ -584,6 +616,9 @@ class TimelineUI {
     if (!this.timelineScrollArea) return;
     this.timelineScrollArea.scrollLeft = 0;
     this.scrollLeft = 0;
+    this.updateViewportWindow();
+    this.renderRuler();
+    this.renderWaveforms();
     this.updatePlayheadPosition();
   }
 
@@ -595,6 +630,9 @@ class TimelineUI {
     if (playheadX > viewWidth - 80 || playheadX < headerWidth + 40) {
       this.timelineScrollArea.scrollLeft = Math.max(0, playheadX - (viewWidth / 2));
       this.scrollLeft = this.timelineScrollArea.scrollLeft;
+      this.updateViewportWindow();
+      this.renderRuler();
+      this.renderWaveforms();
     }
   }
 
@@ -606,18 +644,23 @@ class TimelineUI {
     const targetScrollLeft = Math.max(0, markerCanvasX - leadPaddingPixels);
     this.timelineScrollArea.scrollLeft = targetScrollLeft;
     this.scrollLeft = targetScrollLeft;
+    this.updateViewportWindow();
+    this.renderRuler();
+    this.renderWaveforms();
     this.updatePlayheadPosition();
   }
 
   renderRuler() {
     if (!this.rulerCanvas) return;
 
+    const win = this.activeWindow || this.getViewportWindow();
     const dpr = window.devicePixelRatio || 1;
-    const width = this.timelineWidth;
+    const canvasCssWidth = win ? win.width : this.timelineWidth;
+    const canvasCssStartX = win ? win.startX : 0;
     const height = this.getRulerHeight();
 
     const maxDim = 32768;
-    const targetW = Math.min(maxDim, Math.round(width * dpr));
+    const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
     const targetH = Math.min(maxDim, Math.round(height * dpr));
 
     if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
@@ -625,24 +668,29 @@ class TimelineUI {
       this.rulerCanvas.height = targetH;
     }
 
-    this.rulerCanvas.style.width = `${width}px`;
+    this.rulerCanvas.style.width = `${canvasCssWidth}px`;
     this.rulerCanvas.style.height = `${height}px`;
+    this.rulerCanvas.style.left = `${canvasCssStartX}px`;
 
     const ctx = this.rulerCanvas.getContext('2d');
     ctx.save();
     ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, canvasCssWidth, height);
 
     // Ruler Background
     ctx.fillStyle = 'rgba(14, 18, 26, 0.98)';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, canvasCssWidth, height);
+
+    if (win) {
+      ctx.translate(-canvasCssStartX, 0);
+    }
 
     // Bottom border line
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, height - 0.5);
-    ctx.lineTo(width, height - 0.5);
+    ctx.moveTo(canvasCssStartX, height - 0.5);
+    ctx.lineTo(canvasCssStartX + canvasCssWidth, height - 0.5);
     ctx.stroke();
 
     // Adaptive Step Interval Ladder:
@@ -655,15 +703,19 @@ class TimelineUI {
     const minTimeGap = minPixelGap / this.pixelsPerSecond;
     let stepSec = TIME_INTERVALS.find(intv => intv >= minTimeGap) || 3600;
 
-    const totalSeconds = width / this.pixelsPerSecond;
+    const totalSeconds = this.timelineWidth / this.pixelsPerSecond;
+    const startSec = win ? win.startSec : 0;
+    const endSec = win ? win.endSec : totalSeconds;
+
+    const startTick = Math.max(0, Math.floor(startSec / stepSec) * stepSec);
+    const endTick = Math.min(totalSeconds, Math.ceil(endSec / stepSec) * stepSec);
 
     ctx.font = '9px "JetBrains Mono", monospace';
     ctx.fillStyle = '#94a3b8';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
 
-    for (let t = 0; t <= totalSeconds; t += stepSec) {
+    for (let t = startTick; t <= endTick; t += stepSec) {
       const x = t * this.pixelsPerSecond;
-      if (x < 0 || x > width) continue;
 
       const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0 || stepSec >= 300;
 
@@ -1022,6 +1074,9 @@ class TimelineUI {
   renderWaveforms() {
     if (!this.tracksContainer) return;
 
+    const win = this.getViewportWindow();
+    this.activeWindow = win;
+
     const canvases = this.tracksContainer.querySelectorAll('.track-canvas');
     const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
     const selectedIdx = this.state.selectedTrackIndex;
@@ -1040,7 +1095,13 @@ class TimelineUI {
         this.pixelsPerSecond,
         this.timelineWidth,
         trackHeight,
-        { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
+        {
+          isMuted: trackState.mute,
+          isSoloed: trackState.solo,
+          isDimmed,
+          isSelected,
+          window: win
+        }
       );
     });
   }
@@ -1050,6 +1111,7 @@ class TimelineUI {
     const canvas = this.tracksContainer.querySelector(`.track-canvas[data-index="${trackIndex}"]`);
     if (!canvas) return;
 
+    const win = this.activeWindow || this.getViewportWindow();
     const loadedTrack = this.audio.tracks[trackIndex];
     const trackState = this.state.tracksState[trackIndex] || { volume: 1.0, mute: false, solo: false };
     const hasAnySolo = this.state.tracksState.some(s => s && s.solo);
@@ -1063,7 +1125,13 @@ class TimelineUI {
       this.pixelsPerSecond,
       this.timelineWidth,
       trackHeight,
-      { isMuted: trackState.mute, isSoloed: trackState.solo, isDimmed, isSelected }
+      {
+        isMuted: trackState.mute,
+        isSoloed: trackState.solo,
+        isDimmed,
+        isSelected,
+        window: win
+      }
     );
   }
 

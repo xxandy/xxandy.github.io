@@ -12,12 +12,12 @@ try {
   }
 } catch (e) {}
 
-let wasmInstancePromise = null;
+let wasmCompiledModulePromise = null;
 
-async function getWasmModule() {
-  if (wasmInstancePromise) return wasmInstancePromise;
+async function getWasmCompiledModule() {
+  if (wasmCompiledModulePromise) return wasmCompiledModulePromise;
 
-  wasmInstancePromise = (async () => {
+  wasmCompiledModulePromise = (async () => {
     let wasmBuffer;
     try {
       // 1. Try fetching the .wasm file if on HTTP/HTTPS
@@ -48,39 +48,30 @@ async function getWasmModule() {
       wasmBuffer = bytes.buffer;
     }
 
-    const wasmModule = await WebAssembly.instantiate(wasmBuffer, {});
-    return wasmModule.instance.exports;
+    return await WebAssembly.compile(wasmBuffer);
   })();
 
-  return wasmInstancePromise;
+  return wasmCompiledModulePromise;
 }
 
 class Mp3BlockDecoder {
   constructor() {
     this.wasm = null;
     this.lastWrittenMp3End = 0;
+    this.loadedBytes = null;
+    this.currentPositionSec = 0;
   }
 
   async init() {
     if (!this.wasm) {
-      this.wasm = await getWasmModule();
+      const module = await getWasmCompiledModule();
+      this.wasm = new WebAssembly.Instance(module, {}).exports;
     }
     return this;
   }
 
-  /**
-   * Decode a specific duration (in seconds) from mp3Data at a given seek offset
-   * @param {Uint8Array} mp3Bytes - Raw MP3 bytes
-   * @param {number} durationSec - Duration to decode in seconds (e.g. 20.0)
-   * @param {number} seekSec - Position in seconds to seek to before decoding
-   * @param {AudioContext} audioCtx - Optional AudioContext to create AudioBuffer
-   * @returns {{ pcm: Int16Array, audioBuffer?: AudioBuffer, duration: number, samplingRate: number, numChannels: number, minPeaks: Float32Array, maxPeaks: Float32Array }}
-   */
-  decodeChunk(mp3Bytes, durationSec = 20.0, seekSec = 0.0, audioCtx = null) {
-    if (!this.wasm) {
-      throw new Error('Mp3BlockDecoder not initialized. Call await decoder.init() first.');
-    }
-
+  loadFile(mp3Bytes) {
+    if (this.loadedBytes === mp3Bytes) return;
     const wasm = this.wasm;
     wasm.decoder_init();
     wasm.decoder_set_mp3_data_size(mp3Bytes.byteLength);
@@ -89,7 +80,7 @@ class Mp3BlockDecoder {
     const mp3Offset = wasm.decoder_mp3_data_offset();
     const mp3Size = wasm.decoder_mp3_data_size();
 
-    // If previously written MP3 memory was larger, zero out the residual bytes
+    // If previously written MP3 memory was larger, zero out residual bytes
     if (this.lastWrittenMp3End && this.lastWrittenMp3End > mp3Offset + mp3Size) {
       const clearLen = Math.min(this.lastWrittenMp3End - (mp3Offset + mp3Size), wasmMem.byteLength - (mp3Offset + mp3Size));
       if (clearLen > 0) {
@@ -101,8 +92,49 @@ class Mp3BlockDecoder {
     const dest = new Uint8Array(wasmMem, mp3Offset, mp3Size);
     dest.set(mp3Bytes);
 
-    // Pre-zero PCM output buffer area in WASM memory so that if minimp3 reaches EOF
-    // early, unwritten trailing samples never retain residual dirty memory from previous tracks
+    this.loadedBytes = mp3Bytes;
+    this.currentPositionSec = 0;
+    wasm.decoder_seek(0);
+  }
+
+  /**
+   * Decode a specific duration (in seconds) from mp3Data at a given targetStartTime
+   * @param {Uint8Array} mp3Bytes - Raw MP3 bytes
+   * @param {number} durationSec - Duration to decode in seconds (e.g. 20.0)
+   * @param {number} targetStartTime - Position in seconds where chunk should start
+   * @param {AudioContext} audioCtx - Optional AudioContext to create AudioBuffer
+   */
+  decodeChunk(mp3Bytes, durationSec = 20.0, targetStartTime = 0.0, audioCtx = null) {
+    if (!this.wasm) {
+      throw new Error('Mp3BlockDecoder not initialized. Call await decoder.init() first.');
+    }
+
+    this.loadFile(mp3Bytes);
+    const wasm = this.wasm;
+
+    const isContiguous = Math.abs(targetStartTime - this.currentPositionSec) < 0.05;
+
+    if (!isContiguous) {
+      if (targetStartTime > this.currentPositionSec) {
+        // Fast-forward decode intervening chunks to keep filterbank & reservoir primed
+        while (targetStartTime - this.currentPositionSec > 0.05) {
+          const step = Math.min(20.0, targetStartTime - this.currentPositionSec);
+          wasm.decoder_decode(step);
+          const s = wasm.decode_results_num_samples();
+          if (s <= 0) break;
+          this.currentPositionSec = wasm.decoder_current_time();
+        }
+      } else {
+        // Seeking backwards: warm-up seek (1 frame before target)
+        const frameDur = 1152 / 44100;
+        const warmUpSeek = Math.max(0, targetStartTime - frameDur);
+        wasm.decoder_seek(warmUpSeek);
+        wasm.decoder_decode(frameDur * 0.9);
+        this.currentPositionSec = wasm.decoder_current_time();
+      }
+    }
+
+    // Pre-zero PCM output buffer area in WASM memory
     const pcmOffset = wasm.decoder_pcm_data_offset();
     const expectedPcmBytes = Math.ceil(durationSec * 48000 * 2 * 2 + 65536);
     const availablePcmBytes = Math.min(expectedPcmBytes, wasm.memory.buffer.byteLength - pcmOffset);
@@ -110,12 +142,7 @@ class Mp3BlockDecoder {
       new Uint8Array(wasm.memory.buffer, pcmOffset, availablePcmBytes).fill(0);
     }
 
-    if (seekSec > 0) {
-      wasm.decoder_seek(seekSec);
-    } else {
-      wasm.decoder_seek(0);
-    }
-
+    const actualStartSec = this.currentPositionSec;
     wasm.decoder_decode(durationSec);
 
     const actualPcmOffset = wasm.decoder_pcm_data_offset();
@@ -125,9 +152,10 @@ class Mp3BlockDecoder {
     const frames = Math.floor(numSamples / numChannels);
     const actualDuration = frames / samplingRate;
 
-    // Copy PCM data out of WebAssembly memory (refresh memory.buffer in case WASM grew)
     const pcmSource = new Int16Array(wasm.memory.buffer, actualPcmOffset, numSamples);
     const pcm = new Int16Array(pcmSource);
+
+    this.currentPositionSec = wasm.decoder_current_time();
 
     // Compute peaks (at 80 points per second)
     const pointsPerSec = 80;
@@ -141,7 +169,7 @@ class Mp3BlockDecoder {
       let max = -1.0;
       const start = p * samplesPerPoint * numChannels;
       const end = Math.min((p + 1) * samplesPerPoint * numChannels, pcm.length);
-      const stride = Math.max(numChannels, numChannels * 4); // Subsample stride for speed
+      const stride = Math.max(numChannels, numChannels * 4);
 
       for (let s = start; s < end; s += stride) {
         const val = pcm[s] / 32768.0;
@@ -167,6 +195,7 @@ class Mp3BlockDecoder {
     return {
       pcm,
       audioBuffer,
+      startTime: actualStartSec,
       duration: actualDuration,
       samplingRate,
       numChannels,
@@ -182,26 +211,12 @@ class Mp3BlockDecoder {
    */
   getDuration(mp3Bytes) {
     if (!this.wasm) return 0;
+    this.loadFile(mp3Bytes);
     const wasm = this.wasm;
-    wasm.decoder_init();
-    wasm.decoder_set_mp3_data_size(mp3Bytes.byteLength);
-
-    const wasmMem = wasm.memory.buffer;
-    const mp3Offset = wasm.decoder_mp3_data_offset();
-    const mp3Size = wasm.decoder_mp3_data_size();
-
-    if (this.lastWrittenMp3End && this.lastWrittenMp3End > mp3Offset + mp3Size) {
-      const clearLen = Math.min(this.lastWrittenMp3End - (mp3Offset + mp3Size), wasmMem.byteLength - (mp3Offset + mp3Size));
-      if (clearLen > 0) {
-        new Uint8Array(wasmMem, mp3Offset + mp3Size, clearLen).fill(0);
-      }
-    }
-    this.lastWrittenMp3End = mp3Offset + mp3Size;
-
-    const dest = new Uint8Array(wasmMem, mp3Offset, mp3Size);
-    dest.set(mp3Bytes);
     wasm.decoder_seek(-1);
     const dur = wasm.decoder_current_time();
+    wasm.decoder_seek(0);
+    this.currentPositionSec = 0;
     return Math.max(0, dur);
   }
 }

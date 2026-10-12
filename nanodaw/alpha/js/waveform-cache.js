@@ -82,12 +82,14 @@ class WaveformCache {
     if (!canvas) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.max(100, Math.round(timelineWidth));
+    const win = options.window;
+    const canvasCssWidth = win ? win.width : Math.max(100, Math.round(timelineWidth));
+    const canvasCssStartX = win ? win.startX : 0;
     const height = Math.max(40, Math.round(trackHeight));
 
-    // Ensure physical canvas dimensions match timeline width & DPR (safety capped at 32k)
+    // Ensure physical canvas dimensions match window width & DPR
     const maxDim = 32768;
-    const targetW = Math.min(maxDim, Math.round(width * dpr));
+    const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
     const targetH = Math.min(maxDim, Math.round(height * dpr));
 
     if (canvas.width !== targetW || canvas.height !== targetH) {
@@ -95,15 +97,16 @@ class WaveformCache {
       canvas.height = targetH;
     }
 
-    canvas.style.width = `${width}px`;
+    canvas.style.width = `${canvasCssWidth}px`;
     canvas.style.height = `${height}px`;
+    canvas.style.left = `${canvasCssStartX}px`;
 
     const ctx = canvas.getContext('2d');
     ctx.save();
     ctx.scale(dpr, dpr);
 
     // Clear background
-    ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, canvasCssWidth, height);
 
     const isSelected = Boolean(options.isSelected);
     const isMuted = Boolean(options.isMuted);
@@ -114,10 +117,10 @@ class WaveformCache {
     // Lane background wash
     if (isSelected) {
       ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.02)' : 'rgba(0, 242, 254, 0.06)';
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillRect(0, 0, canvasCssWidth, height);
     } else {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.01)';
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillRect(0, 0, canvasCssWidth, height);
     }
 
     if (!track || (!track.buffer && !track.peaks && (!track.chunks || track.chunks.length === 0))) {
@@ -126,11 +129,22 @@ class WaveformCache {
       return;
     }
 
+    // Apply viewport window horizontal translation
+    if (win) {
+      ctx.translate(-canvasCssStartX, 0);
+    }
+
     const offset = Math.max(0, Number(track.offset) || 0);
     const duration = Math.max(0.1, Number(track.duration) || (track.buffer ? track.buffer.duration : 0) || 30);
     const trackStartX = Math.round(offset * pixelsPerSecond);
     const trackWidth = Math.max(4, Math.round(duration * pixelsPerSecond));
     const trackEndX = trackStartX + trackWidth;
+
+    // If track is completely outside the visible canvas window, skip drawing
+    if (win && (trackEndX < canvasCssStartX || trackStartX > canvasCssStartX + canvasCssWidth)) {
+      ctx.restore();
+      return;
+    }
 
     // Draw track block background
     if (isSelected) {
@@ -157,11 +171,14 @@ class WaveformCache {
     ctx.fillStyle = color;
     ctx.fillRect(trackStartX, 4, isSelected ? 4 : 3, height - 8);
 
-    // Track label pill at start of block
+    // Track label pill at start of block (pinned adaptively if scrolled past start)
     ctx.font = '10px "Inter", -apple-system, sans-serif';
     ctx.fillStyle = isDimmed ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.85)';
     const nameLabel = track.name || 'Audio Track';
-    ctx.fillText(nameLabel, trackStartX + 8, 16);
+    const labelX = Math.max(trackStartX + 8, canvasCssStartX + 8);
+    if (labelX < trackEndX - 40) {
+      ctx.fillText(nameLabel, labelX, 16);
+    }
 
     const midY = height / 2;
     const ampScale = (height - 24) / 2;
@@ -188,9 +205,17 @@ class WaveformCache {
     if (track.chunks && track.chunks.length > 0) {
       // Pass 1: Chunk boundaries and loading/placeholder states
       track.chunks.forEach((chunk, k) => {
-        const chunkStartX = Math.round((offset + chunk.startTime) * pixelsPerSecond);
+        const chunkStartTime = offset + chunk.startTime;
+        const chunkEndTime = chunkStartTime + chunk.duration;
+
+        // Skip chunk if outside visible time window
+        if (win && (chunkEndTime < win.startSec || chunkStartTime > win.endSec)) {
+          return;
+        }
+
+        const chunkStartX = Math.round(chunkStartTime * pixelsPerSecond);
         const chunkWidth = Math.max(2, Math.round(chunk.duration * pixelsPerSecond));
-        const chunkEndX = Math.min(width, chunkStartX + chunkWidth);
+        const chunkEndX = Math.min(trackEndX, chunkStartX + chunkWidth);
 
         // 1. Chunk boundary separator line
         if (k > 0) {
@@ -262,20 +287,34 @@ class WaveformCache {
         }
       });
 
-      // Pass 2: High-speed batched waveform rendering for all decoded chunks in a single GPU draw call!
+      // Pass 2: High-speed batched waveform rendering for visible decoded chunks
       ctx.fillStyle = gradient;
       ctx.beginPath();
       const step = 2;
       const barW = step - 0.5;
 
+      const windowStartX = win ? win.startX : 0;
+      const windowEndX = win ? (win.startX + win.width) : (trackEndX + 100);
+
       track.chunks.forEach((chunk) => {
         if (chunk.status === 'decoded' && chunk.minPeaks && chunk.maxPeaks) {
-          const chunkStartX = Math.round((offset + chunk.startTime) * pixelsPerSecond);
+          const chunkStartTime = offset + chunk.startTime;
+          const chunkEndTime = chunkStartTime + chunk.duration;
+
+          // Skip chunk if outside visible time window
+          if (win && (chunkEndTime < win.startSec || chunkStartTime > win.endSec)) {
+            return;
+          }
+
+          const chunkStartX = Math.round(chunkStartTime * pixelsPerSecond);
           const chunkWidth = Math.max(2, Math.round(chunk.duration * pixelsPerSecond));
-          const chunkEndX = Math.min(width, chunkStartX + chunkWidth);
+          const chunkEndX = Math.min(trackEndX, chunkStartX + chunkWidth);
           const totalPoints = chunk.minPeaks.length;
 
-          for (let x = chunkStartX; x < chunkEndX; x += step) {
+          const drawStartX = Math.max(chunkStartX, Math.floor(windowStartX));
+          const drawEndX = Math.min(chunkEndX, Math.ceil(windowEndX));
+
+          for (let x = drawStartX; x < drawEndX; x += step) {
             const relX = x - chunkStartX;
             const pointIdx = Math.floor((relX / chunkWidth) * totalPoints);
             if (pointIdx >= 0 && pointIdx < totalPoints) {
@@ -299,9 +338,12 @@ class WaveformCache {
         ctx.fillStyle = gradient;
         const step = 2;
         const barW = step - 0.5;
-        const maxDrawX = Math.min(width, trackEndX);
+        const windowStartX = win ? win.startX : 0;
+        const windowEndX = win ? (win.startX + win.width) : trackEndX;
+        const drawStartX = Math.max(trackStartX, Math.floor(windowStartX));
+        const maxDrawX = Math.min(trackEndX, Math.ceil(windowEndX));
         ctx.beginPath();
-        for (let x = trackStartX; x < maxDrawX; x += step) {
+        for (let x = drawStartX; x < maxDrawX; x += step) {
           const relX = x - trackStartX;
           const pointIdx = Math.floor((relX / trackWidth) * totalPoints);
 
@@ -326,8 +368,7 @@ class WaveformCache {
     ctx.lineTo(trackEndX, midY);
     ctx.stroke();
 
-    ctx.restore();
-    ctx.restore();
-
+    ctx.restore(); // restores clip
+    ctx.restore(); // restores scale & translate
   }
 }

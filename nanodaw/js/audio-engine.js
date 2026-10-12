@@ -376,6 +376,9 @@ class AudioEngine {
         durationDetected: false,
         chunks,
         loader: new TrackDataLoader(index, resolvedUrl, this),
+        mp3Decoder: new Mp3BlockDecoder(),
+        fullAudioBuffer: null,
+        fullAudioPromise: null,
         sourceNodes: new Map(),
         gainNode: null,
         analyserNode: null,
@@ -536,6 +539,20 @@ class AudioEngine {
   }
 
   /**
+   * Find index of chunk that contains the given relative track time
+   */
+  getTrackChunkIndexAtTime(track, relTime) {
+    if (!track.chunks || track.chunks.length === 0) return 0;
+    for (let i = 0; i < track.chunks.length; i++) {
+      const c = track.chunks[i];
+      if (relTime < c.startTime + c.duration) {
+        return i;
+      }
+    }
+    return Math.max(0, track.chunks.length - 1);
+  }
+
+  /**
    * Decode a specific 20-second chunk for a track
    */
   async decodeTrackChunk(trackIndex, chunkIndex) {
@@ -543,102 +560,202 @@ class AudioEngine {
     if (!track || !track.chunks || !track.chunks[chunkIndex]) return;
     const chunk = track.chunks[chunkIndex];
     if (chunk.status === 'decoded') return chunk;
-    if (chunk.status === 'loading') return;
+    if (chunk.decodePromise) return chunk.decodePromise;
 
     chunk.status = 'loading';
     this.emit('chunk_loading', { trackIndex, chunkIndex });
 
-    try {
-      const bytes = await track.loader.ensureBuffer();
-      this.ensureAudioContextUnlocked();
+    chunk.decodePromise = (async () => {
+      try {
+        const bytes = await track.loader.ensureBuffer();
+        this.ensureAudioContextUnlocked();
 
-      // Detect actual media duration if not explicitly specified in project JSON
-      if (!track.hasExplicitDuration && !track.durationDetected) {
-        const detectedDur = track.loader.detectDuration(bytes);
-        if (detectedDur && detectedDur > 1.0) {
-          track.duration = detectedDur;
-          track.durationDetected = true;
-          this.syncTrackChunks(track);
-          this.emit('track_duration_updated', {
-            trackIndex,
-            duration: track.duration,
-            totalDuration: this.getTotalDuration()
-          });
-        }
-      }
-
-      const isWav = track.url.toLowerCase().endsWith('.wav');
-      if (isWav) {
-        if (!track.fullWavBuffer) {
-          track.fullWavBuffer = await this.decodeAudio(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-        }
-        const fullBuf = track.fullWavBuffer;
-        const startFrame = Math.floor(chunk.startTime * fullBuf.sampleRate);
-        const endFrame = Math.min(fullBuf.length, Math.floor((chunk.startTime + chunk.duration) * fullBuf.sampleRate));
-        const frames = Math.max(0, endFrame - startFrame);
-        let chunkBuf = null;
-        if (this.audioCtx && frames > 0) {
-          chunkBuf = this.audioCtx.createBuffer(fullBuf.numberOfChannels, frames, fullBuf.sampleRate);
-          for (let ch = 0; ch < fullBuf.numberOfChannels; ch++) {
-            chunkBuf.getChannelData(ch).set(fullBuf.getChannelData(ch).subarray(startFrame, endFrame));
+        // Detect actual media duration if not explicitly specified in project JSON
+        if (!track.hasExplicitDuration && !track.durationDetected) {
+          const detectedDur = track.loader.detectDuration(bytes);
+          if (detectedDur && detectedDur > 1.0) {
+            track.duration = detectedDur;
+            track.durationDetected = true;
+            this.syncTrackChunks(track);
+            this.emit('track_duration_updated', {
+              trackIndex,
+              duration: track.duration,
+              totalDuration: this.getTotalDuration()
+            });
           }
         }
-        chunk.buffer = chunkBuf;
-        const p = this.computePeaks(fullBuf.getChannelData(0).subarray(startFrame, endFrame), frames / fullBuf.sampleRate);
-        chunk.minPeaks = p.minPeaks;
-        chunk.maxPeaks = p.maxPeaks;
-        chunk.totalPoints = p.totalPoints;
-        chunk.status = 'decoded';
-      } else {
-        if (!window.mp3Decoder || !window.mp3Decoder.wasm) {
-          if (window.mp3Decoder) await window.mp3Decoder.init();
-        }
-        const decoded = window.mp3Decoder.decodeChunk(bytes, chunk.duration, chunk.startTime, this.audioCtx);
-        chunk.buffer = decoded.audioBuffer;
-        chunk.duration = decoded.duration;
-        chunk.minPeaks = decoded.minPeaks;
-        chunk.maxPeaks = decoded.maxPeaks;
-        chunk.totalPoints = decoded.totalPoints;
-        chunk.status = 'decoded';
-      }
 
-      // Smooth buffer boundaries: micro-fade in on start chunk, micro-fade out on final chunk
-      if (chunk.buffer) {
-        if (chunkIndex === 0) {
-          this.applyBufferMicroFadeStart(chunk.buffer, 0.005);
-        }
-        if (chunkIndex === track.chunks.length - 1) {
-          this.applyBufferMicroFadeEnd(chunk.buffer, 0.05);
-        }
-      }
+        // Feature flag: USE_NATIVE_DECODER
+        // Kept in codebase as fallback for future reference, but disabled for now
+        // so minimp3.wasm is the primary audio engine across all platforms (including iOS).
+        const USE_NATIVE_DECODER = false;
+        let decodedViaNative = false;
 
-      this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
+        if (USE_NATIVE_DECODER) {
+          try {
+            if (!track.fullAudioBuffer) {
+              if (!track.fullAudioPromise) {
+                track.fullAudioPromise = this.decodeAudio(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+              }
+              track.fullAudioBuffer = await track.fullAudioPromise;
+            }
 
-      // If currently playing, seamlessly schedule this newly ready chunk only if within lookahead!
-      if (this.isPlaying) {
-        const relTime = Math.max(0, this.playheadPosition - track.offset);
-        const currentChunkIdx = Math.floor(relTime / 20.0);
-        if (chunkIndex === currentChunkIdx || chunkIndex === currentChunkIdx + 1) {
-          this.scheduleSingleChunk(track, chunk);
+            const fullBuf = track.fullAudioBuffer;
+            if (fullBuf) {
+              // Detect actual media duration from full decoded buffer
+              if (!track.hasExplicitDuration || !track.durationDetected) {
+                if (Math.abs(track.duration - fullBuf.duration) > 0.05) {
+                  track.duration = fullBuf.duration;
+                  track.durationDetected = true;
+                  this.syncTrackChunks(track);
+                  this.emit('track_duration_updated', {
+                    trackIndex,
+                    duration: track.duration,
+                    totalDuration: this.getTotalDuration()
+                  });
+                }
+              }
+
+              const startFrame = Math.floor(chunk.startTime * fullBuf.sampleRate);
+              const endFrame = Math.min(fullBuf.length, Math.floor((chunk.startTime + chunk.duration) * fullBuf.sampleRate));
+              const frames = Math.max(0, endFrame - startFrame);
+              let chunkBuf = null;
+              if (this.audioCtx && frames > 0) {
+                chunkBuf = this.audioCtx.createBuffer(fullBuf.numberOfChannels, frames, fullBuf.sampleRate);
+                for (let ch = 0; ch < fullBuf.numberOfChannels; ch++) {
+                  chunkBuf.getChannelData(ch).set(fullBuf.getChannelData(ch).subarray(startFrame, endFrame));
+                }
+              }
+              chunk.buffer = chunkBuf;
+              chunk.duration = frames / fullBuf.sampleRate;
+              const p = this.computePeaks(fullBuf.getChannelData(0).subarray(startFrame, endFrame), chunk.duration);
+              chunk.minPeaks = p.minPeaks;
+              chunk.maxPeaks = p.maxPeaks;
+              chunk.totalPoints = p.totalPoints;
+              chunk.status = 'decoded';
+              decodedViaNative = true;
+            }
+          } catch (nativeErr) {
+            console.warn(`Native audio decode failed for track ${trackIndex}, falling back to minimp3:`, nativeErr);
+          }
         }
+
+        if (!decodedViaNative) {
+          // Primary path: minimp3.wasm with per-track isolated instance and sequential stream continuity
+          const isWav = bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46; // 'RIFF'
+
+          if (isWav) {
+            // For WAV files, decode via decodeAudio
+            if (!track.fullAudioBuffer) {
+              if (!track.fullAudioPromise) {
+                track.fullAudioPromise = this.decodeAudio(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+              }
+              track.fullAudioBuffer = await track.fullAudioPromise;
+            }
+            const fullBuf = track.fullAudioBuffer;
+            const startFrame = Math.floor(chunk.startTime * fullBuf.sampleRate);
+            const endFrame = Math.min(fullBuf.length, Math.floor((chunk.startTime + chunk.duration) * fullBuf.sampleRate));
+            const frames = Math.max(0, endFrame - startFrame);
+            let chunkBuf = null;
+            if (this.audioCtx && frames > 0) {
+              chunkBuf = this.audioCtx.createBuffer(fullBuf.numberOfChannels, frames, fullBuf.sampleRate);
+              for (let ch = 0; ch < fullBuf.numberOfChannels; ch++) {
+                chunkBuf.getChannelData(ch).set(fullBuf.getChannelData(ch).subarray(startFrame, endFrame));
+              }
+            }
+            chunk.buffer = chunkBuf;
+            chunk.duration = frames / fullBuf.sampleRate;
+            const p = this.computePeaks(fullBuf.getChannelData(0).subarray(startFrame, endFrame), chunk.duration);
+            chunk.minPeaks = p.minPeaks;
+            chunk.maxPeaks = p.maxPeaks;
+            chunk.totalPoints = p.totalPoints;
+            chunk.status = 'decoded';
+          } else {
+            // MP3 audio stream: decode via track.mp3Decoder
+            if (!track.mp3Decoder) {
+              track.mp3Decoder = new Mp3BlockDecoder();
+            }
+            if (!track.mp3Decoder.wasm) {
+              await track.mp3Decoder.init();
+            }
+
+            // Ensure any preceding chunks 0 ... chunkIndex - 1 are decoded sequentially first
+            // to keep the IMDCT synthesis filterbank and bit-reservoir perfectly primed!
+            for (let p = 0; p < chunkIndex; p++) {
+              const prevChunk = track.chunks[p];
+              if (prevChunk && prevChunk.status !== 'decoded') {
+                await this.decodeTrackChunk(trackIndex, p);
+              }
+            }
+
+            // Compute exact contiguous starting time
+            let targetStartTime = 0.0;
+            if (chunkIndex > 0) {
+              const prev = track.chunks[chunkIndex - 1];
+              if (prev && prev.status === 'decoded') {
+                targetStartTime = prev.startTime + prev.duration;
+              } else {
+                targetStartTime = chunk.startTime;
+              }
+            }
+
+            const decoded = track.mp3Decoder.decodeChunk(bytes, 20.0, targetStartTime, this.audioCtx);
+            chunk.startTime = targetStartTime;
+            chunk.buffer = decoded.audioBuffer;
+            chunk.duration = decoded.duration;
+            chunk.minPeaks = decoded.minPeaks;
+            chunk.maxPeaks = decoded.maxPeaks;
+            chunk.totalPoints = decoded.totalPoints;
+            chunk.status = 'decoded';
+
+            // Pre-align the start time of the subsequent chunk so there is 0 gap
+            if (chunkIndex + 1 < track.chunks.length) {
+              track.chunks[chunkIndex + 1].startTime = chunk.startTime + chunk.duration;
+            }
+          }
+        }
+
+        // Smooth buffer boundaries: micro-fade in on start chunk, micro-fade out on final chunk
+        if (chunk.buffer) {
+          if (chunkIndex === 0) {
+            this.applyBufferMicroFadeStart(chunk.buffer, 0.005);
+          }
+          if (chunkIndex === track.chunks.length - 1) {
+            this.applyBufferMicroFadeEnd(chunk.buffer, 0.05);
+          }
+        }
+
+        this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
+
+        // If currently playing, seamlessly schedule this newly ready chunk only if within lookahead!
+        if (this.isPlaying) {
+          const relTime = Math.max(0, this.playheadPosition - track.offset);
+          const currentChunkIdx = this.getTrackChunkIndexAtTime(track, relTime);
+          if (chunkIndex === currentChunkIdx || chunkIndex === currentChunkIdx + 1) {
+            this.scheduleSingleChunk(track, chunk);
+          }
+        }
+        chunk.decodePromise = null;
+        return chunk;
+      } catch (err) {
+        console.warn(`Failed decoding track ${trackIndex} chunk ${chunkIndex}:`, err);
+        chunk.status = 'error';
+        chunk.decodePromise = null;
+        this.emit('chunk_error', { trackIndex, chunkIndex, error: err.message });
       }
-      return chunk;
-    } catch (err) {
-      console.warn(`Failed decoding track ${trackIndex} chunk ${chunkIndex}:`, err);
-      chunk.status = 'error';
-      this.emit('chunk_error', { trackIndex, chunkIndex, error: err.message });
-    }
+    })();
+
+    return chunk.decodePromise;
   }
 
   /**
    * React immediately to user seek by prioritizing chunks around the playhead
    */
   prioritizeSeek(targetTime) {
-    const CHUNK_DURATION = 20.0;
     this.tracks.forEach((track, trackIndex) => {
       if (!track || !track.chunks) return;
       const relTime = Math.max(0, targetTime - track.offset);
-      const targetChunkIdx = Math.floor(relTime / CHUNK_DURATION);
+      const targetChunkIdx = this.getTrackChunkIndexAtTime(track, relTime);
 
       // Prioritize target chunk and immediate adjacent chunks
       for (let k of [targetChunkIdx, targetChunkIdx + 1]) {
@@ -814,7 +931,7 @@ class AudioEngine {
 
       if (track.chunks && track.chunks.length > 0) {
         const relTime = Math.max(0, currentPos - track.offset);
-        const currentChunkIdx = Math.floor(relTime / CHUNK_DURATION);
+        const currentChunkIdx = this.getTrackChunkIndexAtTime(track, relTime);
 
         // Schedule only current and immediate next chunk (lookahead)
         for (let k of [currentChunkIdx, currentChunkIdx + 1]) {
@@ -863,7 +980,7 @@ class AudioEngine {
     this.tracks.forEach(track => {
       if (!track || !track.chunks || !track.gainNode) return;
       const relTime = Math.max(0, this.playheadPosition - track.offset);
-      const currentChunkIdx = Math.floor(relTime / CHUNK_DURATION);
+      const currentChunkIdx = this.getTrackChunkIndexAtTime(track, relTime);
 
       // Ensure current chunk is scheduled
       const curChunk = track.chunks[currentChunkIdx];
@@ -984,6 +1101,9 @@ class AudioEngine {
         track.analyserNode = null;
         track.sourceNode = null;
         if (track.sourceNodes) track.sourceNodes.clear();
+        track.fullAudioBuffer = null;
+        track.fullAudioPromise = null;
+        track.mp3Decoder = null;
       }
     });
 

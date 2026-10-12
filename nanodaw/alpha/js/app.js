@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Instantiate UI
   const timelineEl = document.getElementById('timelineApp');
   const timeline = new TimelineUI(timelineEl, state, audio, waveforms);
+  window.__nanodaw = { state, audio, waveforms, timeline };
 
   // Toast helper
   function showToast(message, type = 'info', duration = 3000) {
