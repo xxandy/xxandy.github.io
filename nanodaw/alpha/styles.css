@@ -1137,6 +1137,13 @@ body {
   display: block;
 }
 
+.pinch-tracks-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 20;
+  display: none;
+}
+
 /* --- Stackable Tools Overlay (Mobile Drawer/Popover) --- */
 .tools-overlay-backdrop {
   position: fixed;

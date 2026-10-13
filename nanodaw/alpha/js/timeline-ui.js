@@ -55,6 +55,7 @@ class TimelineUI {
     this.pinchFocalTime = 0;
     this.pinchAnchorScreenX = 0;
     this.pinchCanvasFocalX = 0;
+    this.pinchTracksOverlay = null;
 
     // Runtime flag for Option C (hardware-stretched waveform) vs Option A (dots only, waveform suppressed)
     let storedStretch = null;
@@ -569,6 +570,11 @@ class TimelineUI {
     this.touchPinchMidX = (t1.clientX + t2.clientX) / 2;
     this.isPinching = true;
 
+    // In pinch mode, do not display full marker elements/labels
+    if (this.markerLayer) {
+      this.markerLayer.style.display = 'none';
+    }
+
     const rect = this.timelineScrollArea.getBoundingClientRect();
     const headerWidth = this.getTrackHeaderWidth();
     const originX = this.touchPinchMidX - rect.left;
@@ -583,6 +589,7 @@ class TimelineUI {
 
     const win = this.activeWindow || this.getViewportWindow();
     const canvasCssStartX = win ? win.startX : 0;
+    const canvasCssWidth = win ? win.width : this.timelineWidth;
     this.pinchCanvasFocalX = (this.pinchFocalTime * this.pixelsPerSecond) - canvasCssStartX;
 
     // Do NOT apply GPU stretching to ruler canvas - it recomputes in realtime
@@ -590,6 +597,8 @@ class TimelineUI {
       this.rulerCanvas.style.transform = 'none';
       this.rulerCanvas.style.transformOrigin = '';
     }
+
+    this.ensurePinchTracksOverlay(canvasCssStartX, canvasCssWidth);
 
     if (window.zoomProfiler && window.ZOOM_OP) {
       window.zoomProfiler.startOp(window.ZOOM_OP.PINCH);
@@ -637,6 +646,18 @@ class TimelineUI {
     if (!this.isPinching) return;
     this.isPinching = false;
 
+    // Hide uncached tracks cue overlay
+    if (this.pinchTracksOverlay) {
+      this.pinchTracksOverlay.style.display = 'none';
+      const ctx = this.pinchTracksOverlay.getContext('2d');
+      ctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+    }
+
+    // Restore marker elements layer
+    if (this.markerLayer) {
+      this.markerLayer.style.display = '';
+    }
+
     // Reset all CSS transforms & opacities on track canvases
     const canvases = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-canvas') : [];
     canvases.forEach(c => {
@@ -654,6 +675,7 @@ class TimelineUI {
       this.applyZoom(this.pinchTargetZoom, this.touchPinchMidX);
     } else {
       this.renderRuler(); // Clean up cue dots if zoom did not change significantly
+      this.renderMarkerElements();
     }
 
     if (window.zoomProfiler) {
@@ -664,6 +686,99 @@ class TimelineUI {
     this.touchPinchInitialZoom = null;
     this.touchPinchMidX = null;
     this.pinchTargetZoom = null;
+  }
+
+  ensurePinchTracksOverlay(canvasCssStartX, canvasCssWidth) {
+    if (!this.pinchTracksOverlay) {
+      this.pinchTracksOverlay = document.createElement('canvas');
+      this.pinchTracksOverlay.id = 'pinchTracksOverlay';
+      this.pinchTracksOverlay.className = 'pinch-tracks-overlay';
+      if (this.timelineContent) {
+        this.timelineContent.appendChild(this.pinchTracksOverlay);
+      }
+    }
+    const headerWidth = this.getTrackHeaderWidth();
+    const tracksH = this.tracksContainer ? this.tracksContainer.offsetHeight : 0;
+    const tracksTop = this.tracksContainer ? this.tracksContainer.offsetTop : 0;
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.min(32768, Math.round(canvasCssWidth * dpr));
+    const targetH = Math.min(32768, Math.round(tracksH * dpr));
+
+    if (this.pinchTracksOverlay.width !== targetW || this.pinchTracksOverlay.height !== targetH) {
+      this.pinchTracksOverlay.width = targetW;
+      this.pinchTracksOverlay.height = targetH;
+    }
+    this.pinchTracksOverlay.style.position = 'absolute';
+    this.pinchTracksOverlay.style.top = `${tracksTop}px`;
+    this.pinchTracksOverlay.style.left = `${headerWidth + canvasCssStartX}px`;
+    this.pinchTracksOverlay.style.width = `${canvasCssWidth}px`;
+    this.pinchTracksOverlay.style.height = `${tracksH}px`;
+    this.pinchTracksOverlay.style.pointerEvents = 'none';
+    this.pinchTracksOverlay.style.zIndex = '20';
+    this.pinchTracksOverlay.style.display = 'block';
+
+    const ctx = this.pinchTracksOverlay.getContext('2d');
+    ctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+  }
+
+  renderPinchTracksOverlay({ zoom, timeToX, stepSec, startTick, endTick, canvasCssStartX, canvasCssWidth }) {
+    const isZoomOut = this.isPinching && this.touchPinchInitialZoom && zoom < this.touchPinchInitialZoom;
+    if (!isZoomOut) {
+      if (this.pinchTracksOverlay) {
+        this.pinchTracksOverlay.style.display = 'none';
+        const ctx = this.pinchTracksOverlay.getContext('2d');
+        ctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+      }
+      return;
+    }
+
+    this.ensurePinchTracksOverlay(canvasCssStartX, canvasCssWidth);
+
+    const rows = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-row') : [];
+    if (rows.length === 0) return;
+
+    const containerRect = this.tracksContainer.getBoundingClientRect();
+    const centerYs = [];
+    for (let i = 0; i < rows.length; i++) {
+      const rowRect = rows[i].getBoundingClientRect();
+      centerYs.push((rowRect.top - containerRect.top) + (rowRect.height / 2));
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    const tracksH = this.tracksContainer.offsetHeight;
+    const ctx = this.pinchTracksOverlay.getContext('2d');
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, canvasCssWidth, tracksH);
+    ctx.translate(-canvasCssStartX, 0);
+
+    const effectiveRatio = zoom / this.touchPinchInitialZoom;
+    const focalX = this.pinchCanvasFocalX || 0;
+    const scaledCanvasLeft = canvasCssStartX + focalX * (1 - effectiveRatio);
+    const scaledCanvasRight = canvasCssStartX + focalX + (canvasCssWidth - focalX) * effectiveRatio;
+
+    ctx.fillStyle = '#38bdf8';
+    ctx.shadowColor = 'rgba(56, 189, 248, 0.9)';
+    ctx.shadowBlur = 5;
+
+    for (let t = startTick; t <= endTick; t += stepSec) {
+      const x = timeToX(t);
+      if (x < canvasCssStartX - 10 || x > canvasCssStartX + canvasCssWidth + 10) continue;
+
+      // Draw blue circles ONLY on portions where waveforms aren't cached
+      const isUncached = !this.pinchStretchWaveform || (x < scaledCanvasLeft - 2 || x > scaledCanvasRight + 2);
+      if (!isUncached) continue;
+
+      for (let j = 0; j < centerYs.length; j++) {
+        ctx.beginPath();
+        ctx.arc(x, centerYs[j], 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.shadowBlur = 0;
+    ctx.restore();
   }
 
   applyZoom(newZoom, originClientX = null) {
@@ -949,12 +1064,61 @@ class TimelineUI {
       }
     }
 
+    // Simplified marker indicators on ruler during pinch mode:
+    // A circle (slightly larger than scroll indicator) with a thin line pointing down,
+    // both colored the same color as the marker.
+    if (isPinching && this.state.markers && this.state.markers.length > 0) {
+      const markerRadius = 4.5;
+      const circleY = height - 13;
+
+      this.state.markers.forEach(marker => {
+        const mx = timeToX(marker.time);
+        if (mx < canvasCssStartX - 15 || mx > canvasCssStartX + canvasCssWidth + 15) return;
+
+        const markerColor = marker.color || '#38bdf8';
+
+        // Thin line pointing down to the bottom of the ruler bar
+        ctx.beginPath();
+        ctx.strokeStyle = markerColor;
+        ctx.lineWidth = 1;
+        ctx.moveTo(mx, circleY);
+        ctx.lineTo(mx, height);
+        ctx.stroke();
+
+        // Circle colored the same color as the marker
+        ctx.beginPath();
+        ctx.arc(mx, circleY, markerRadius, 0, Math.PI * 2);
+        ctx.fillStyle = markerColor;
+        ctx.shadowColor = markerColor;
+        ctx.shadowBlur = 4;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      });
+    }
+
     ctx.restore();
     if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_PAINT);
+
+    // Render blue circles on uncached portions of tracks during pinch-to-zoom-out
+    if (isPinching && this.isPinching) {
+      this.renderPinchTracksOverlay({
+        zoom,
+        timeToX,
+        stepSec,
+        startTick,
+        endTick,
+        canvasCssStartX,
+        canvasCssWidth
+      });
+    } else if (this.pinchTracksOverlay) {
+      this.pinchTracksOverlay.style.display = 'none';
+      const pctx = this.pinchTracksOverlay.getContext('2d');
+      pctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+    }
   }
 
   renderMarkerElements() {
-    if (!this.markerLayer) return;
+    if (!this.markerLayer || this.isPinching) return;
     this.markerLayer.innerHTML = '';
 
     const markers = this.state.markers;
