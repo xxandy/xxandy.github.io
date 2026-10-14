@@ -8,12 +8,12 @@
 (function(global) {
   'use strict';
 
-  // Base64 encoding of the pre-compiled ~230-byte profiler WebAssembly module
-  // Exports: memory, record_event(op_id, op_type, step_id, phase, track_index, timestamp_ms, duration_ms, extra_data),
-  //          get_event_count(), get_buffer_ptr(), reset_profiler()
-  const WASM_PROFILER_BASE64 = 'AGFzbQEAAAABFANgCH9/f39/fHx/AX9gAAF/YAAAAwUEAAEBAgUDAQAQBgYBfwFBAAsHTQUGbWVtb3J5AgAMcmVjb3JkX2V2ZW50AAAPZ2V0X2V2ZW50X2NvdW50AAEOZ2V0X2J1ZmZlcl9wdHIAAg5yZXNldF9wcm9maWxlcgADCmQEUAEBfyMAQQV0QcAAaiEIIAggADYCACAIIAE7AQQgCCACOwEGIAggAzoACCAIIAQ6AAkgCCAHNgIMIAggBTkDECAIIAY5AxgjAEEBaiQAIwALBAAjAAsFAEHAAAsGAEEAJAAL';
+  // Base64 encoding of the pre-compiled 259-byte circular ring buffer WebAssembly module (16,384 events capacity, 576 KB memory)
+  // Exports: memory, record_event, get_event_count, get_buffer_ptr, reset_profiler, get_capacity
+  const WASM_PROFILER_BASE64 = 'AGFzbQEAAAABFANgCH9/f39/fHx/AX9gAAF/YAAAAwYFAAEBAgEFAwEACQYGAX8BQQALB1wGBm1lbW9yeQIADHJlY29yZF9ldmVudAAAD2dldF9ldmVudF9jb3VudAABDmdldF9idWZmZXJfcHRyAAIOcmVzZXRfcHJvZmlsZXIAAwxnZXRfY2FwYWNpdHkABApwBVUBAX8jAEH//wBxQQV0QYABaiEIIAggADYCACAIIAE7AQQgCCACOwEGIAggAzoACCAIIAQ6AAkgCCAHNgIMIAggBTkDECAIIAY5AxgjAEEBaiQAIwALBAAjAAsFAEGAAQsGAEEAJAALBgBBgIABCw==';
 
   const STEP = {
+    // Zoom & Viewport operations
     ZOOM_OP_TOTAL: 1,
     COMPUTE_BOUNDS: 2,
     CALC_FOCAL_ANCHOR: 3,
@@ -24,11 +24,42 @@
     RULER_CANVAS_RESIZE: 8,
     RULER_CANVAS_PAINT: 9,
     RENDER_WAVEFORMS_TOTAL: 10,
-    TRACK_CANVAS_RESIZE: 11,
-    TRACK_CANVAS_CLEAR: 12,
+    TRACK_CANVAS_RESIZE: 11, // High-frequency pruned
+    TRACK_CANVAS_CLEAR: 12,  // High-frequency pruned
     TRACK_WAVEFORM_PAINT: 13,
     UPDATE_PLAYHEAD: 14,
-    POST_RENDER_RAF: 15
+    POST_RENDER_RAF: 15,
+    PINCH_START: 16,
+    PINCH_END: 17,
+    WINDOW_SCROLL: 18,
+
+    // Audio & Transport
+    AUDIO_PLAY: 20,
+    AUDIO_PAUSE: 21,
+    AUDIO_STOP: 22,
+    AUDIO_SEEK: 23,
+    AUDIO_LOOP_TOGGLE: 24,
+    AUDIO_CTX_RESUME: 25,
+
+    // Mixer & Tracks
+    TRACK_VOLUME: 30,
+    TRACK_MUTE: 31,
+    TRACK_SOLO: 32,
+    MASTER_VOLUME: 33,
+    TRACK_SELECT: 34,
+
+    // Project & Chunks
+    PROJECT_LOAD: 40,
+    CHUNK_DECODE_START: 41,
+    CHUNK_DECODE_END: 42,
+
+    // Markers
+    MARKER_ADD: 50,
+    MARKER_UPDATE: 51,
+    MARKER_DELETE: 52,
+
+    // System Telemetry & Errors
+    SYSTEM_ERROR: 90
   };
 
   const STEP_NAMES = {
@@ -46,21 +77,59 @@
     12: 'TRACK_CANVAS_CLEAR',
     13: 'TRACK_WAVEFORM_PAINT',
     14: 'UPDATE_PLAYHEAD',
-    15: 'POST_RENDER_RAF'
+    15: 'POST_RENDER_RAF',
+    16: 'PINCH_START',
+    17: 'PINCH_END',
+    18: 'WINDOW_SCROLL',
+
+    20: 'AUDIO_PLAY',
+    21: 'AUDIO_PAUSE',
+    22: 'AUDIO_STOP',
+    23: 'AUDIO_SEEK',
+    24: 'AUDIO_LOOP_TOGGLE',
+    25: 'AUDIO_CTX_RESUME',
+
+    30: 'TRACK_VOLUME',
+    31: 'TRACK_MUTE',
+    32: 'TRACK_SOLO',
+    33: 'MASTER_VOLUME',
+    34: 'TRACK_SELECT',
+
+    40: 'PROJECT_LOAD',
+    41: 'CHUNK_DECODE_START',
+    42: 'CHUNK_DECODE_END',
+
+    50: 'MARKER_ADD',
+    51: 'MARKER_UPDATE',
+    52: 'MARKER_DELETE',
+
+    90: 'SYSTEM_ERROR'
   };
 
   const OP = {
     ZOOM_IN: 1,
     ZOOM_OUT: 2,
     ZOOM_FIT: 3,
-    PINCH: 4
+    PINCH: 4,
+    TRANSPORT: 5,
+    MIXER: 6,
+    PROJECT: 7,
+    MARKER: 8,
+    SCROLL: 9,
+    SYSTEM: 10
   };
 
   const OP_NAMES = {
     1: 'ZOOM_IN',
     2: 'ZOOM_OUT',
     3: 'ZOOM_FIT',
-    4: 'PINCH'
+    4: 'PINCH',
+    5: 'TRANSPORT',
+    6: 'MIXER',
+    7: 'PROJECT',
+    8: 'MARKER',
+    9: 'SCROLL',
+    10: 'SYSTEM'
   };
 
   const PHASE = {
@@ -94,9 +163,9 @@
         this.wasmInstance = new WebAssembly.Instance(module, {});
         this.wasmExports = this.wasmInstance.exports;
         this.isReady = true;
-        console.log('[ZoomProfiler] Low-overhead WASM profiler initialized.');
+        console.log('[Profiler] Circular WASM ring-buffer profiler initialized (Capacity: 16,384 events, 576 KB).');
       } catch (e) {
-        console.warn('[ZoomProfiler] Failed to compile WASM profiler, falling back:', e);
+        console.warn('[Profiler] Failed to compile WASM profiler, falling back:', e);
       }
     }
 
@@ -125,16 +194,18 @@
           const rafEnd = performance.now();
           const rafDur = rafEnd - rafStart;
           if (this.wasmExports) {
-            this.wasmExports.record_event(
-              opId,
-              opType,
-              STEP.POST_RENDER_RAF,
-              PHASE.END,
-              255,
-              rafEnd,
-              rafDur,
-              0
-            );
+            try {
+              this.wasmExports.record_event(
+                opId,
+                opType,
+                STEP.POST_RENDER_RAF,
+                PHASE.END,
+                255,
+                rafEnd,
+                rafDur,
+                0
+              );
+            } catch (e) {}
           }
         });
       }
@@ -149,16 +220,20 @@
       this.activeStepStarts.set(key, now);
 
       if (this.wasmExports) {
-        this.wasmExports.record_event(
-          this.currentOpId,
-          this.currentOpType,
-          stepId,
-          PHASE.START,
-          trackIndex,
-          now,
-          0.0,
-          extraData
-        );
+        try {
+          this.wasmExports.record_event(
+            this.currentOpId,
+            this.currentOpType,
+            stepId,
+            PHASE.START,
+            trackIndex,
+            now,
+            0.0,
+            extraData
+          );
+        } catch (e) {
+          console.warn('[Profiler] record_event error:', e);
+        }
       }
     }
 
@@ -173,25 +248,67 @@
       const duration = Math.max(0, now - start);
 
       if (this.wasmExports) {
-        this.wasmExports.record_event(
-          this.currentOpId,
-          this.currentOpType,
-          stepId,
-          PHASE.END,
-          trackIndex,
-          now,
-          duration,
-          extraData
-        );
+        try {
+          this.wasmExports.record_event(
+            this.currentOpId,
+            this.currentOpType,
+            stepId,
+            PHASE.END,
+            trackIndex,
+            now,
+            duration,
+            extraData
+          );
+        } catch (e) {
+          console.warn('[Profiler] record_event error:', e);
+        }
       }
       return duration;
     }
 
     /**
-     * Total number of events currently in the buffer
+     * Log an instantaneous or standalone event point into the ring buffer
+     */
+    logEvent(stepId, options = {}) {
+      if (!this.wasmExports) return;
+      const now = performance.now();
+      const opType = typeof options.opType === 'number' ? options.opType : (this.currentOpType || 0);
+      const trackIndex = typeof options.trackIndex === 'number' ? options.trackIndex : 255;
+      const duration = typeof options.duration === 'number' ? options.duration : 0.0;
+      const extraData = typeof options.extraData === 'number' ? Math.round(options.extraData) : 0;
+      const phase = typeof options.phase === 'number' ? options.phase : PHASE.POINT;
+      const opId = typeof options.opId === 'number' ? options.opId : this.currentOpId;
+
+      try {
+        this.wasmExports.record_event(
+          opId,
+          opType,
+          stepId,
+          phase,
+          trackIndex,
+          now,
+          duration,
+          extraData
+        );
+      } catch (e) {
+        console.warn('[Profiler] record_event error:', e);
+      }
+    }
+
+    /**
+     * Total number of events recorded since start/reset
      */
     getEventCount() {
       return this.wasmExports ? this.wasmExports.get_event_count() : 0;
+    }
+
+    /**
+     * Ring buffer capacity (e.g. 16,384 slots)
+     */
+    getCapacity() {
+      return this.wasmExports && typeof this.wasmExports.get_capacity === 'function'
+        ? this.wasmExports.get_capacity()
+        : 16384;
     }
 
     /**
@@ -199,7 +316,9 @@
      */
     reset() {
       if (this.wasmExports) {
-        this.wasmExports.reset_profiler();
+        try {
+          this.wasmExports.reset_profiler();
+        } catch (e) {}
       }
       this.currentOpId = 0;
       this.currentOpType = 0;
@@ -207,12 +326,13 @@
     }
 
     /**
-     * Export all recorded profile events and device metadata into a structured JSON object
+     * Export recorded profile events in chronological order from circular ring buffer
      */
     exportProfile(extraMeta = {}) {
       if (!this.wasmExports) return null;
 
-      const count = this.wasmExports.get_event_count();
+      const totalCount = this.wasmExports.get_event_count();
+      const capacity = typeof this.wasmExports.get_capacity === 'function' ? this.wasmExports.get_capacity() : 16384;
       const ptr = this.wasmExports.get_buffer_ptr();
       const memory = this.wasmExports.memory.buffer;
       const view = new DataView(memory, ptr);
@@ -220,8 +340,12 @@
       const events = [];
       const STRIDE = 32;
 
-      for (let i = 0; i < count; i++) {
-        const offset = i * STRIDE;
+      // Extract events in chronological order from circular ring buffer
+      const startSeq = totalCount > capacity ? totalCount - capacity : 0;
+
+      for (let s = startSeq; s < totalCount; s++) {
+        const slot = s & (capacity - 1);
+        const offset = slot * STRIDE;
         const op_id = view.getUint32(offset + 0, true);
         const op_type = view.getUint16(offset + 4, true);
         const step_id = view.getUint16(offset + 6, true);
@@ -232,7 +356,7 @@
         const duration_ms = view.getFloat64(offset + 24, true);
 
         events.push({
-          i,
+          seq: s,
           op_id,
           op_type: OP_NAMES[op_type] || `OP_${op_type}`,
           step_id,
@@ -276,32 +400,36 @@
         };
       });
 
-      const userAgent = navigator.userAgent || '';
-      const isIOS = /iPad|iPhone|iPod/.test(userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      const userAgent = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : '';
+      const isIOS = /iPad|iPhone|iPod/.test(userAgent) || (typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
       const isAndroid = /Android/.test(userAgent);
       const detectedDevice = isIOS ? 'ios' : isAndroid ? 'android' : 'desktop';
 
       return {
-        format: 'nanodaw_zoom_profile_v1',
+        format: 'nanodaw_telemetry_profile_v2',
+        bufferType: 'circular_ring_buffer',
         exportedAt: new Date().toISOString(),
         device: {
           platform: detectedDevice,
           userAgent,
           isIOS,
           isAndroid,
-          devicePixelRatio: window.devicePixelRatio || 1,
+          devicePixelRatio: typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1,
           screen: {
-            width: window.screen ? window.screen.width : 0,
-            height: window.screen ? window.screen.height : 0
+            width: typeof window !== 'undefined' && window.screen ? window.screen.width : 0,
+            height: typeof window !== 'undefined' && window.screen ? window.screen.height : 0
           },
           viewport: {
-            width: window.innerWidth || 0,
-            height: window.innerHeight || 0
+            width: typeof window !== 'undefined' ? (window.innerWidth || 0) : 0,
+            height: typeof window !== 'undefined' ? (window.innerHeight || 0) : 0
           }
         },
         meta: {
+          totalRecorded: totalCount,
+          bufferCapacity: capacity,
+          bufferWrapped: totalCount > capacity,
+          eventsExported: events.length,
           totalOps: this.currentOpId,
-          totalEvents: count,
           ...extraMeta
         },
         stepDictionary: STEP_NAMES,
@@ -316,7 +444,7 @@
     downloadProfile(extraMeta = {}) {
       const data = this.exportProfile(extraMeta);
       if (!data || data.events.length === 0) {
-        return { success: false, message: 'No zoom operations recorded yet. Use Zoom +/- first!' };
+        return { success: false, message: 'No activity recorded yet.' };
       }
 
       const jsonStr = JSON.stringify(data, null, 2);
@@ -341,7 +469,7 @@
         success: true,
         filename,
         totalOps: data.meta.totalOps,
-        totalEvents: data.meta.totalEvents
+        totalEvents: data.meta.eventsExported
       };
     }
   }
@@ -350,7 +478,32 @@
 
   global.ZoomProfiler = ZoomProfiler;
   global.zoomProfiler = zoomProfiler;
+  global.nanoProfiler = zoomProfiler;
   global.ZOOM_STEP = STEP;
+  global.PROFILER_STEP = STEP;
   global.ZOOM_OP = OP;
+  global.PROFILER_OP = OP;
+  global.PROFILER_PHASE = PHASE;
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('error', (e) => {
+      try {
+        zoomProfiler.logEvent(STEP.SYSTEM_ERROR, {
+          opType: OP.SYSTEM,
+          extraData: e.lineno || 0
+        });
+      } catch (err) {}
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      try {
+        zoomProfiler.logEvent(STEP.SYSTEM_ERROR, {
+          opType: OP.SYSTEM,
+          extraData: 999
+        });
+      } catch (err) {}
+    });
+    window.dumpLog = (extraMeta) => zoomProfiler.exportProfile(extraMeta);
+    window.downloadLog = (extraMeta) => zoomProfiler.downloadProfile(extraMeta);
+  }
 
 })(typeof window !== 'undefined' ? window : global);

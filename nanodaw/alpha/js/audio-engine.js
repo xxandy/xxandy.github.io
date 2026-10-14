@@ -566,6 +566,14 @@ class AudioEngine {
     this.emit('chunk_loading', { trackIndex, chunkIndex });
 
     chunk.decodePromise = (async () => {
+      const _chunkDecodeStart = performance.now();
+      if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+        window.zoomProfiler.logEvent(window.PROFILER_STEP.CHUNK_DECODE_START, {
+          opType: window.PROFILER_OP ? window.PROFILER_OP.PROJECT : 7,
+          trackIndex,
+          extraData: chunkIndex
+        });
+      }
       try {
         const bytes = await track.loader.ensureBuffer();
         this.ensureAudioContextUnlocked();
@@ -727,6 +735,15 @@ class AudioEngine {
 
         this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
 
+        if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+          window.zoomProfiler.logEvent(window.PROFILER_STEP.CHUNK_DECODE_END, {
+            opType: window.PROFILER_OP ? window.PROFILER_OP.PROJECT : 7,
+            trackIndex,
+            duration: performance.now() - _chunkDecodeStart,
+            extraData: chunkIndex
+          });
+        }
+
         // If currently playing, seamlessly schedule this newly ready chunk only if within lookahead!
         if (this.isPlaying) {
           const relTime = Math.max(0, this.playheadPosition - track.offset);
@@ -817,6 +834,12 @@ class AudioEngine {
     if (this.masterGain) {
       this.masterGain.gain.value = clamped;
     }
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      window.zoomProfiler.logEvent(window.PROFILER_STEP.MASTER_VOLUME, {
+        opType: window.PROFILER_OP ? window.PROFILER_OP.MIXER : 6,
+        extraData: Math.round(clamped * 100)
+      });
+    }
   }
 
   /**
@@ -858,6 +881,13 @@ class AudioEngine {
     this.scheduleTrackSources();
     this.startPlayheadTracker();
     this.emit('playback_started', { time: this.playheadPosition });
+
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      window.zoomProfiler.logEvent(window.PROFILER_STEP.AUDIO_PLAY, {
+        opType: window.PROFILER_OP ? window.PROFILER_OP.TRANSPORT : 5,
+        extraData: Math.round(this.playheadPosition * 100)
+      });
+    }
   }
 
   /**
@@ -1035,6 +1065,13 @@ class AudioEngine {
     this.emit('playback_stopped', { time: this.playheadPosition });
     this.emit('time_update', { time: this.playheadPosition });
 
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      window.zoomProfiler.logEvent(window.PROFILER_STEP.AUDIO_PAUSE, {
+        opType: window.PROFILER_OP ? window.PROFILER_OP.TRANSPORT : 5,
+        extraData: Math.round(this.playheadPosition * 100)
+      });
+    }
+
     // 3. Hardware-level smooth 20ms de-click ramp to zero so DAC never clicks
     if (this.masterGain && this.audioCtx && this.audioCtx.state === 'running') {
       try {
@@ -1174,6 +1211,13 @@ class AudioEngine {
     this.playheadPosition = targetTime;
     this.state.setCurrentTime(targetTime);
 
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      window.zoomProfiler.logEvent(window.PROFILER_STEP.AUDIO_SEEK, {
+        opType: window.PROFILER_OP ? window.PROFILER_OP.TRANSPORT : 5,
+        extraData: Math.round(targetTime * 100)
+      });
+    }
+
     // Immediately trigger priority decode for the seek target!
     this.prioritizeSeek(targetTime);
 
@@ -1199,6 +1243,12 @@ class AudioEngine {
     this.isLooping = enabled;
     this.loopStart = Math.max(0, start);
     this.loopEnd = end !== null ? end : this.getTotalDuration();
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      window.zoomProfiler.logEvent(window.PROFILER_STEP.AUDIO_LOOP_TOGGLE, {
+        opType: window.PROFILER_OP ? window.PROFILER_OP.TRANSPORT : 5,
+        extraData: enabled ? 1 : 0
+      });
+    }
     this.emit('loop_changed', { isLooping: this.isLooping, start: this.loopStart, end: this.loopEnd });
   }
 

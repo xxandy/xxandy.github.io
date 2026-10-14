@@ -516,6 +516,12 @@ class TimelineUI {
       if (this.rafWindowRenderId) return;
       this.rafWindowRenderId = requestAnimationFrame(() => {
         this.rafWindowRenderId = null;
+        if (window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+          window.zoomProfiler.logEvent(window.PROFILER_STEP.WINDOW_SCROLL, {
+            opType: window.PROFILER_OP ? window.PROFILER_OP.SCROLL : 9,
+            extraData: Math.round(this.timelineScrollArea ? this.timelineScrollArea.scrollLeft : 0)
+          });
+        }
         this.updateViewportWindow();
         this.renderRuler();
         this.renderWaveforms();
@@ -602,6 +608,12 @@ class TimelineUI {
 
     if (window.zoomProfiler && window.ZOOM_OP) {
       window.zoomProfiler.startOp(window.ZOOM_OP.PINCH);
+      if (window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+        window.zoomProfiler.logEvent(window.PROFILER_STEP.PINCH_START, {
+          opType: window.PROFILER_OP ? window.PROFILER_OP.PINCH : 4,
+          extraData: Math.round(this.pixelsPerSecond)
+        });
+      }
     }
   }
 
@@ -679,6 +691,12 @@ class TimelineUI {
     }
 
     if (window.zoomProfiler) {
+      if (window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+        window.zoomProfiler.logEvent(window.PROFILER_STEP.PINCH_END, {
+          opType: window.PROFILER_OP ? window.PROFILER_OP.PINCH : 4,
+          extraData: Math.round(this.pixelsPerSecond)
+        });
+      }
       window.zoomProfiler.endOp();
     }
 
