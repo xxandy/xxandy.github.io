@@ -11,6 +11,15 @@
       "solo": false
     },
     {
+      "name": "Alex_V",
+      "url": "alex_v.mp3",
+      "offset": 0.0,
+      "color": "#ec4899",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
       "name": "Yilei_P",
       "url": "yilei_p.mp3",
       "offset": 1.5385,
