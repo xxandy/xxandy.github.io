@@ -425,9 +425,53 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  audio.on('playback_started', () => updatePlayButtonUI(true));
-  audio.on('playback_stopped', () => updatePlayButtonUI(false));
-  audio.on('playback_paused', () => updatePlayButtonUI(false));
+  // --- Screen Wake Lock Management (prevent auto-lock during playback) ---
+  let wakeLockSentinel = null;
+
+  async function requestWakeLock() {
+    if ('wakeLock' in navigator) {
+      try {
+        if (!wakeLockSentinel) {
+          wakeLockSentinel = await navigator.wakeLock.request('screen');
+          wakeLockSentinel.addEventListener('release', () => {
+            wakeLockSentinel = null;
+          });
+        }
+      } catch (err) {
+        // Can reject if battery saver is active, window not visible, or permission denied
+        console.warn('[WakeLock] Unable to acquire screen wake lock:', err);
+      }
+    }
+  }
+
+  async function releaseWakeLock() {
+    if (wakeLockSentinel) {
+      try {
+        await wakeLockSentinel.release();
+      } catch (err) {}
+      wakeLockSentinel = null;
+    }
+  }
+
+  // When tab becomes visible again while audio is playing, re-acquire the wake lock
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && audio && audio.isPlaying) {
+      await requestWakeLock();
+    }
+  });
+
+  audio.on('playback_started', () => {
+    updatePlayButtonUI(true);
+    requestWakeLock();
+  });
+  audio.on('playback_stopped', () => {
+    updatePlayButtonUI(false);
+    releaseWakeLock();
+  });
+  audio.on('playback_paused', () => {
+    updatePlayButtonUI(false);
+    releaseWakeLock();
+  });
 
   // --- Native OS Share & Clipboard Fallback ---
   const btnShare = document.getElementById('btnShare');
