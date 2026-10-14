@@ -87,6 +87,10 @@ class WaveformCache {
     const canvasCssStartX = win ? win.startX : 0;
     const height = Math.max(40, Math.round(trackHeight));
 
+    const profiler = window.zoomProfiler;
+    const STEP = window.ZOOM_STEP;
+    const trackIdx = typeof track?.index === 'number' ? track.index : 255;
+
     // Ensure physical canvas dimensions match window width & DPR
     const maxDim = 32768;
     const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
@@ -128,6 +132,8 @@ class WaveformCache {
       ctx.restore();
       return;
     }
+
+    if (profiler && STEP) profiler.startStep(STEP.TRACK_WAVEFORM_PAINT, trackIdx);
 
     // Apply viewport window horizontal translation
     if (win) {
@@ -370,5 +376,6 @@ class WaveformCache {
 
     ctx.restore(); // restores clip
     ctx.restore(); // restores scale & translate
+    if (profiler && STEP) profiler.endStep(STEP.TRACK_WAVEFORM_PAINT, trackIdx);
   }
 }

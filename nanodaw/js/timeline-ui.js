@@ -50,6 +50,19 @@ class TimelineUI {
     this.touchPinchInitialDist = null;
     this.touchPinchInitialZoom = null;
     this.touchPinchMidX = null;
+    this.isPinching = false;
+    this.pinchTargetZoom = null;
+    this.pinchFocalTime = 0;
+    this.pinchAnchorScreenX = 0;
+    this.pinchCanvasFocalX = 0;
+    this.pinchTracksOverlay = null;
+
+    // Runtime flag for Option C (hardware-stretched waveform) vs Option A (dots only, waveform suppressed)
+    let storedStretch = null;
+    try {
+      storedStretch = localStorage.getItem('nanodaw_pinch_stretch');
+    } catch (_) {}
+    this.pinchStretchWaveform = storedStretch !== null ? storedStretch === 'true' : true;
 
     // Canvas resize observer
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -135,7 +148,13 @@ class TimelineUI {
         e.preventDefault();
         // Exponential zoom scaling for smooth micro & macro control
         const zoomFactor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+        if (window.zoomProfiler && window.ZOOM_OP) {
+          window.zoomProfiler.startOp(e.deltaY < 0 ? window.ZOOM_OP.ZOOM_IN : window.ZOOM_OP.ZOOM_OUT);
+        }
         this.applyZoom(this.pixelsPerSecond * zoomFactor, e.clientX);
+        if (window.zoomProfiler) {
+          window.zoomProfiler.endOp();
+        }
       } else if (e.shiftKey) {
         e.preventDefault();
         // Adaptive horizontal scroll step scaled by zoom density
@@ -147,31 +166,26 @@ class TimelineUI {
     // Touch events for mobile pinch-to-zoom
     this.timelineScrollArea.addEventListener('touchstart', (e) => {
       if (e.touches.length === 2) {
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        this.touchPinchInitialDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-        this.touchPinchInitialZoom = this.pixelsPerSecond;
-        this.touchPinchMidX = (t1.clientX + t2.clientX) / 2;
+        this.startPinch(e);
       }
     }, { passive: true });
 
     this.timelineScrollArea.addEventListener('touchmove', (e) => {
-      if (e.touches.length === 2 && this.touchPinchInitialDist) {
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        const currentDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-        if (this.touchPinchInitialDist > 0) {
-          const ratio = currentDist / this.touchPinchInitialDist;
-          const targetZoom = this.touchPinchInitialZoom * ratio;
-          this.applyZoom(targetZoom, this.touchPinchMidX);
-        }
+      if (e.touches.length === 2) {
+        e.preventDefault(); // Prevent iOS Safari from interfering with page zoom
+        this.updatePinch(e);
       }
-    }, { passive: true });
+    }, { passive: false });
 
     this.timelineScrollArea.addEventListener('touchend', (e) => {
-      if (e.touches.length < 2) {
-        this.touchPinchInitialDist = null;
-        this.touchPinchInitialZoom = null;
+      if (e.touches.length < 2 && this.isPinching) {
+        this.endPinch();
+      }
+    });
+
+    this.timelineScrollArea.addEventListener('touchcancel', () => {
+      if (this.isPinching) {
+        this.endPinch();
       }
     });
 
@@ -502,6 +516,12 @@ class TimelineUI {
       if (this.rafWindowRenderId) return;
       this.rafWindowRenderId = requestAnimationFrame(() => {
         this.rafWindowRenderId = null;
+        if (window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+          window.zoomProfiler.logEvent(window.PROFILER_STEP.WINDOW_SCROLL, {
+            opType: window.PROFILER_OP ? window.PROFILER_OP.SCROLL : 9,
+            extraData: Math.round(this.timelineScrollArea ? this.timelineScrollArea.scrollLeft : 0)
+          });
+        }
         this.updateViewportWindow();
         this.renderRuler();
         this.renderWaveforms();
@@ -539,13 +559,270 @@ class TimelineUI {
     }
   }
 
+  setPinchStretchWaveform(enabled) {
+    this.pinchStretchWaveform = !!enabled;
+    try {
+      localStorage.setItem('nanodaw_pinch_stretch', this.pinchStretchWaveform ? 'true' : 'false');
+    } catch (_) {}
+    return this.pinchStretchWaveform;
+  }
+
+  startPinch(e) {
+    if (e.touches.length !== 2) return;
+    const t1 = e.touches[0];
+    const t2 = e.touches[1];
+    this.touchPinchInitialDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+    this.touchPinchInitialZoom = this.pixelsPerSecond;
+    this.touchPinchMidX = (t1.clientX + t2.clientX) / 2;
+    this.isPinching = true;
+
+    // In pinch mode, do not display full marker elements/labels
+    if (this.markerLayer) {
+      this.markerLayer.style.display = 'none';
+    }
+
+    const rect = this.timelineScrollArea.getBoundingClientRect();
+    const headerWidth = this.getTrackHeaderWidth();
+    const originX = this.touchPinchMidX - rect.left;
+
+    if (originX <= headerWidth) {
+      this.pinchFocalTime = 0;
+      this.pinchAnchorScreenX = headerWidth;
+    } else {
+      this.pinchFocalTime = Math.max(0, (this.scrollLeft + originX - headerWidth) / this.pixelsPerSecond);
+      this.pinchAnchorScreenX = originX;
+    }
+
+    const win = this.activeWindow || this.getViewportWindow();
+    const canvasCssStartX = win ? win.startX : 0;
+    const canvasCssWidth = win ? win.width : this.timelineWidth;
+    this.pinchCanvasFocalX = (this.pinchFocalTime * this.pixelsPerSecond) - canvasCssStartX;
+
+    // Do NOT apply GPU stretching to ruler canvas - it recomputes in realtime
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.transform = 'none';
+      this.rulerCanvas.style.transformOrigin = '';
+    }
+
+    this.ensurePinchTracksOverlay(canvasCssStartX, canvasCssWidth);
+
+    if (window.zoomProfiler && window.ZOOM_OP) {
+      window.zoomProfiler.startOp(window.ZOOM_OP.PINCH);
+      if (window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+        window.zoomProfiler.logEvent(window.PROFILER_STEP.PINCH_START, {
+          opType: window.PROFILER_OP ? window.PROFILER_OP.PINCH : 4,
+          extraData: Math.round(this.pixelsPerSecond)
+        });
+      }
+    }
+  }
+
+  updatePinch(e) {
+    if (!this.isPinching || e.touches.length !== 2 || !this.touchPinchInitialDist) return;
+    const t1 = e.touches[0];
+    const t2 = e.touches[1];
+    const currentDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+    if (currentDist <= 0) return;
+
+    const ratio = currentDist / this.touchPinchInitialDist;
+    this.maxZoom = this.computeProjectMaxZoom();
+    this.minZoom = this.computeProjectMinZoom();
+    const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, this.touchPinchInitialZoom * ratio));
+    const effectiveRatio = clampedZoom / this.touchPinchInitialZoom;
+    this.pinchTargetZoom = clampedZoom;
+
+    // 1. Hardware CSS transform on waveform tracks (Option C vs Option A)
+    const canvases = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-canvas') : [];
+    if (this.pinchStretchWaveform) {
+      canvases.forEach(c => {
+        c.style.transformOrigin = `${this.pinchCanvasFocalX}px 0`;
+        c.style.transform = `scaleX(${effectiveRatio})`;
+        c.style.opacity = '1';
+      });
+    } else {
+      // Option A: Waveforms dimmed/suppressed, cue dots on ruler are the primary visual
+      canvases.forEach(c => {
+        c.style.transform = 'none';
+        c.style.opacity = '0.12';
+      });
+    }
+
+    // 2. Timeline ruler recomputes timestamps and draws cue dots in realtime (NO GPU stretching)
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.transform = 'none';
+    }
+    this.renderRuler(clampedZoom, true);
+  }
+
+  endPinch() {
+    if (!this.isPinching) return;
+    this.isPinching = false;
+
+    // Hide uncached tracks cue overlay
+    if (this.pinchTracksOverlay) {
+      this.pinchTracksOverlay.style.display = 'none';
+      const ctx = this.pinchTracksOverlay.getContext('2d');
+      ctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+    }
+
+    // Restore marker elements layer
+    if (this.markerLayer) {
+      this.markerLayer.style.display = '';
+    }
+
+    // Reset all CSS transforms & opacities on track canvases
+    const canvases = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-canvas') : [];
+    canvases.forEach(c => {
+      c.style.transform = '';
+      c.style.transformOrigin = '';
+      c.style.opacity = '';
+    });
+    if (this.rulerCanvas) {
+      this.rulerCanvas.style.transform = '';
+      this.rulerCanvas.style.transformOrigin = '';
+    }
+
+    // Execute single clean rasterization at the final zoom (renders final waveforms & clean ruler)
+    if (this.pinchTargetZoom && Math.abs(this.pinchTargetZoom - this.touchPinchInitialZoom) > 0.05) {
+      this.applyZoom(this.pinchTargetZoom, this.touchPinchMidX);
+    } else {
+      this.renderRuler(); // Clean up cue dots if zoom did not change significantly
+      this.renderMarkerElements();
+    }
+
+    if (window.zoomProfiler) {
+      if (window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+        window.zoomProfiler.logEvent(window.PROFILER_STEP.PINCH_END, {
+          opType: window.PROFILER_OP ? window.PROFILER_OP.PINCH : 4,
+          extraData: Math.round(this.pixelsPerSecond)
+        });
+      }
+      window.zoomProfiler.endOp();
+    }
+
+    this.touchPinchInitialDist = null;
+    this.touchPinchInitialZoom = null;
+    this.touchPinchMidX = null;
+    this.pinchTargetZoom = null;
+  }
+
+  ensurePinchTracksOverlay(canvasCssStartX, canvasCssWidth) {
+    if (!this.pinchTracksOverlay) {
+      this.pinchTracksOverlay = document.createElement('canvas');
+      this.pinchTracksOverlay.id = 'pinchTracksOverlay';
+      this.pinchTracksOverlay.className = 'pinch-tracks-overlay';
+      if (this.timelineContent) {
+        this.timelineContent.appendChild(this.pinchTracksOverlay);
+      }
+    }
+    const headerWidth = this.getTrackHeaderWidth();
+    const tracksH = this.tracksContainer ? this.tracksContainer.offsetHeight : 0;
+    const tracksTop = this.tracksContainer ? this.tracksContainer.offsetTop : 0;
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.min(32768, Math.round(canvasCssWidth * dpr));
+    const targetH = Math.min(32768, Math.round(tracksH * dpr));
+
+    if (this.pinchTracksOverlay.width !== targetW || this.pinchTracksOverlay.height !== targetH) {
+      this.pinchTracksOverlay.width = targetW;
+      this.pinchTracksOverlay.height = targetH;
+    }
+    this.pinchTracksOverlay.style.position = 'absolute';
+    this.pinchTracksOverlay.style.top = `${tracksTop}px`;
+    this.pinchTracksOverlay.style.left = `${headerWidth + canvasCssStartX}px`;
+    this.pinchTracksOverlay.style.width = `${canvasCssWidth}px`;
+    this.pinchTracksOverlay.style.height = `${tracksH}px`;
+    this.pinchTracksOverlay.style.pointerEvents = 'none';
+    this.pinchTracksOverlay.style.zIndex = '20';
+    this.pinchTracksOverlay.style.display = 'block';
+
+    const ctx = this.pinchTracksOverlay.getContext('2d');
+    ctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+  }
+
+  renderPinchTracksOverlay({ zoom, timeToX, stepSec, startTick, endTick, canvasCssStartX, canvasCssWidth }) {
+    const isZoomOut = this.isPinching && this.touchPinchInitialZoom && zoom < this.touchPinchInitialZoom;
+    if (!isZoomOut) {
+      if (this.pinchTracksOverlay) {
+        this.pinchTracksOverlay.style.display = 'none';
+        const ctx = this.pinchTracksOverlay.getContext('2d');
+        ctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+      }
+      return;
+    }
+
+    this.ensurePinchTracksOverlay(canvasCssStartX, canvasCssWidth);
+
+    const rows = this.tracksContainer ? this.tracksContainer.querySelectorAll('.track-row') : [];
+    if (rows.length === 0) return;
+
+    const containerRect = this.tracksContainer.getBoundingClientRect();
+    const centerYs = [];
+    for (let i = 0; i < rows.length; i++) {
+      const rowRect = rows[i].getBoundingClientRect();
+      centerYs.push((rowRect.top - containerRect.top) + (rowRect.height / 2));
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    const tracksH = this.tracksContainer.offsetHeight;
+    const ctx = this.pinchTracksOverlay.getContext('2d');
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, canvasCssWidth, tracksH);
+    ctx.translate(-canvasCssStartX, 0);
+
+    const effectiveRatio = zoom / this.touchPinchInitialZoom;
+    const focalX = this.pinchCanvasFocalX || 0;
+    const scaledCanvasLeft = canvasCssStartX + focalX * (1 - effectiveRatio);
+    const scaledCanvasRight = canvasCssStartX + focalX + (canvasCssWidth - focalX) * effectiveRatio;
+
+    ctx.fillStyle = '#38bdf8';
+    ctx.shadowColor = 'rgba(56, 189, 248, 0.9)';
+    ctx.shadowBlur = 5;
+
+    for (let t = startTick; t <= endTick; t += stepSec) {
+      const x = timeToX(t);
+      if (x < canvasCssStartX - 10 || x > canvasCssStartX + canvasCssWidth + 10) continue;
+
+      // Draw blue circles ONLY on portions where waveforms aren't cached
+      const isUncached = !this.pinchStretchWaveform || (x < scaledCanvasLeft - 2 || x > scaledCanvasRight + 2);
+      if (!isUncached) continue;
+
+      for (let j = 0; j < centerYs.length; j++) {
+        ctx.beginPath();
+        ctx.arc(x, centerYs[j], 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
   applyZoom(newZoom, originClientX = null) {
+    const profiler = window.zoomProfiler;
+    const STEP = window.ZOOM_STEP;
+    const OP = window.ZOOM_OP;
+
+    let autoStartedOp = false;
+    if (profiler && (!profiler.activeStepStarts || profiler.activeStepStarts.size === 0)) {
+      profiler.startOp(OP ? OP.ZOOM_IN : 1);
+      autoStartedOp = true;
+    }
+
+    if (profiler && STEP) profiler.startStep(STEP.COMPUTE_BOUNDS);
     this.maxZoom = this.computeProjectMaxZoom();
     this.minZoom = this.computeProjectMinZoom();
 
     const clampedZoom = Math.max(this.minZoom, Math.min(this.maxZoom, newZoom));
-    if (clampedZoom === this.pixelsPerSecond) return;
+    if (clampedZoom === this.pixelsPerSecond) {
+      if (profiler && STEP) profiler.endStep(STEP.COMPUTE_BOUNDS);
+      if (autoStartedOp && profiler) profiler.endOp();
+      return;
+    }
+    if (profiler && STEP) profiler.endStep(STEP.COMPUTE_BOUNDS);
 
+    if (profiler && STEP) profiler.startStep(STEP.CALC_FOCAL_ANCHOR);
     const headerWidth = this.getTrackHeaderWidth();
     const clientWidth = this.timelineScrollArea.clientWidth;
     const visibleWaveW = Math.max(10, clientWidth - headerWidth);
@@ -580,20 +857,40 @@ class TimelineUI {
         focalTime = Math.max(0, (this.scrollLeft + anchorScreenX - headerWidth) / this.pixelsPerSecond);
       }
     }
+    if (profiler && STEP) profiler.endStep(STEP.CALC_FOCAL_ANCHOR);
 
+    if (profiler && STEP) profiler.startStep(STEP.UPDATE_DIMENSIONS);
     this.pixelsPerSecond = clampedZoom;
     this.state.setZoom(this.pixelsPerSecond);
     this.updateTimelineDimensions();
+    if (profiler && STEP) profiler.endStep(STEP.UPDATE_DIMENSIONS);
 
+    if (profiler && STEP) profiler.startStep(STEP.DOM_SCROLL_UPDATE);
     const targetScrollLeft = (focalTime * this.pixelsPerSecond) + headerWidth - anchorScreenX;
     this.timelineScrollArea.scrollLeft = Math.max(0, targetScrollLeft);
     this.scrollLeft = this.timelineScrollArea.scrollLeft;
+    if (profiler && STEP) profiler.endStep(STEP.DOM_SCROLL_UPDATE);
 
+    if (profiler && STEP) profiler.startStep(STEP.UPDATE_VIEWPORT_WIN);
     this.updateViewportWindow();
+    if (profiler && STEP) profiler.endStep(STEP.UPDATE_VIEWPORT_WIN);
+
+    if (profiler && STEP) profiler.startStep(STEP.RENDER_RULER_TOTAL);
     this.renderRuler();
+    if (profiler && STEP) profiler.endStep(STEP.RENDER_RULER_TOTAL);
+
+    if (profiler && STEP) profiler.startStep(STEP.RENDER_WAVEFORMS_TOTAL);
     this.renderWaveforms();
+    if (profiler && STEP) profiler.endStep(STEP.RENDER_WAVEFORMS_TOTAL);
+
+    if (profiler && STEP) profiler.startStep(STEP.UPDATE_PLAYHEAD);
     this.updatePlayheadPosition();
     this.renderMarkerElements();
+    if (profiler && STEP) profiler.endStep(STEP.UPDATE_PLAYHEAD);
+
+    if (autoStartedOp && profiler) {
+      profiler.endOp();
+    }
   }
 
   checkAutoScroll(time) {
@@ -650,8 +947,12 @@ class TimelineUI {
     this.updatePlayheadPosition();
   }
 
-  renderRuler() {
+  renderRuler(overrideZoom = null, isPinching = false) {
     if (!this.rulerCanvas) return;
+
+    const zoom = overrideZoom || this.pixelsPerSecond;
+    const profiler = window.zoomProfiler;
+    const STEP = window.ZOOM_STEP;
 
     const win = this.activeWindow || this.getViewportWindow();
     const dpr = window.devicePixelRatio || 1;
@@ -663,15 +964,21 @@ class TimelineUI {
     const targetW = Math.min(maxDim, Math.round(canvasCssWidth * dpr));
     const targetH = Math.min(maxDim, Math.round(height * dpr));
 
-    if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
-      this.rulerCanvas.width = targetW;
-      this.rulerCanvas.height = targetH;
+    // Do NOT resize canvas backing store during pinch to prevent Metal texture stalls
+    if (!isPinching) {
+      if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
+      if (this.rulerCanvas.width !== targetW || this.rulerCanvas.height !== targetH) {
+        this.rulerCanvas.width = targetW;
+        this.rulerCanvas.height = targetH;
+      }
+
+      this.rulerCanvas.style.width = `${canvasCssWidth}px`;
+      this.rulerCanvas.style.height = `${height}px`;
+      this.rulerCanvas.style.left = `${canvasCssStartX}px`;
+      if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_RESIZE, 255, targetW);
     }
 
-    this.rulerCanvas.style.width = `${canvasCssWidth}px`;
-    this.rulerCanvas.style.height = `${height}px`;
-    this.rulerCanvas.style.left = `${canvasCssStartX}px`;
-
+    if (profiler && STEP) profiler.startStep(STEP.RULER_CANVAS_PAINT);
     const ctx = this.rulerCanvas.getContext('2d');
     ctx.save();
     ctx.scale(dpr, dpr);
@@ -696,26 +1003,42 @@ class TimelineUI {
     // Adaptive Step Interval Ladder:
     // Ensures ticks always maintain between ~70px and 160px gap across all zoom levels
     const TIME_INTERVALS = [
-      0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, // seconds
-      60, 120, 300, 600, 900, 1800, 3600  // 1m, 2m, 5m, 10m, 15m, 30m, 1h
+      0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, // seconds
+      60, 120, 300, 600, 900, 1800, 3600       // 1m, 2m, 5m, 10m, 15m, 30m, 1h
     ];
     const minPixelGap = 80;
-    const minTimeGap = minPixelGap / this.pixelsPerSecond;
+    const minTimeGap = minPixelGap / zoom;
     let stepSec = TIME_INTERVALS.find(intv => intv >= minTimeGap) || 3600;
 
-    const totalSeconds = this.timelineWidth / this.pixelsPerSecond;
-    const startSec = win ? win.startSec : 0;
-    const endSec = win ? win.endSec : totalSeconds;
+    let startSec, endSec, timeToX;
+
+    if (isPinching && this.isPinching) {
+      // Anchored strictly to pinch focal point in realtime
+      const headerWidth = this.getTrackHeaderWidth();
+      const focalScreenX = this.pinchAnchorScreenX;
+      const focalTime = this.pinchFocalTime;
+      const focalTimelineX = (focalScreenX - headerWidth) + this.scrollLeft;
+
+      timeToX = (t) => focalTimelineX + ((t - focalTime) * zoom);
+      startSec = Math.max(0, focalTime - ((focalTimelineX - canvasCssStartX) / zoom));
+      endSec = focalTime + ((canvasCssWidth - (focalTimelineX - canvasCssStartX)) / zoom);
+    } else {
+      const totalSeconds = this.timelineWidth / zoom;
+      startSec = win ? win.startSec : 0;
+      endSec = win ? win.endSec : totalSeconds;
+      timeToX = (t) => t * zoom;
+    }
 
     const startTick = Math.max(0, Math.floor(startSec / stepSec) * stepSec);
-    const endTick = Math.min(totalSeconds, Math.ceil(endSec / stepSec) * stepSec);
+    const endTick = Math.ceil(endSec / stepSec) * stepSec;
 
     ctx.font = '9px "JetBrains Mono", monospace';
     ctx.fillStyle = '#94a3b8';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
 
     for (let t = startTick; t <= endTick; t += stepSec) {
-      const x = t * this.pixelsPerSecond;
+      const x = timeToX(t);
+      if (x < canvasCssStartX - 10 || x > canvasCssStartX + canvasCssWidth + 10) continue;
 
       const isMajor = Math.abs(t % (stepSec * 5)) < 0.001 || t === 0 || stepSec >= 300;
 
@@ -746,13 +1069,74 @@ class TimelineUI {
       }
 
       ctx.fillText(timeLabel, x + 3, 12);
+
+      // Visual cue dots only on the time ruler at the top during pinch
+      if (isPinching) {
+        ctx.beginPath();
+        ctx.arc(x, height - 13, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#38bdf8';
+        ctx.shadowColor = 'rgba(56, 189, 248, 0.9)';
+        ctx.shadowBlur = 5;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // Simplified marker indicators on ruler during pinch mode:
+    // A circle (slightly larger than scroll indicator) with a thin line pointing down,
+    // both colored the same color as the marker.
+    if (isPinching && this.state.markers && this.state.markers.length > 0) {
+      const markerRadius = 4.5;
+      const circleY = height - 13;
+
+      this.state.markers.forEach(marker => {
+        const mx = timeToX(marker.time);
+        if (mx < canvasCssStartX - 15 || mx > canvasCssStartX + canvasCssWidth + 15) return;
+
+        const markerColor = marker.color || '#38bdf8';
+
+        // Thin line pointing down to the bottom of the ruler bar
+        ctx.beginPath();
+        ctx.strokeStyle = markerColor;
+        ctx.lineWidth = 1;
+        ctx.moveTo(mx, circleY);
+        ctx.lineTo(mx, height);
+        ctx.stroke();
+
+        // Circle colored the same color as the marker
+        ctx.beginPath();
+        ctx.arc(mx, circleY, markerRadius, 0, Math.PI * 2);
+        ctx.fillStyle = markerColor;
+        ctx.shadowColor = markerColor;
+        ctx.shadowBlur = 4;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      });
     }
 
     ctx.restore();
+    if (profiler && STEP) profiler.endStep(STEP.RULER_CANVAS_PAINT);
+
+    // Render blue circles on uncached portions of tracks during pinch-to-zoom-out
+    if (isPinching && this.isPinching) {
+      this.renderPinchTracksOverlay({
+        zoom,
+        timeToX,
+        stepSec,
+        startTick,
+        endTick,
+        canvasCssStartX,
+        canvasCssWidth
+      });
+    } else if (this.pinchTracksOverlay) {
+      this.pinchTracksOverlay.style.display = 'none';
+      const pctx = this.pinchTracksOverlay.getContext('2d');
+      pctx.clearRect(0, 0, this.pinchTracksOverlay.width, this.pinchTracksOverlay.height);
+    }
   }
 
   renderMarkerElements() {
-    if (!this.markerLayer) return;
+    if (!this.markerLayer || this.isPinching) return;
     this.markerLayer.innerHTML = '';
 
     const markers = this.state.markers;

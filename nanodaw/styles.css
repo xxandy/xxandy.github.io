@@ -1137,6 +1137,13 @@ body {
   display: block;
 }
 
+.pinch-tracks-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 20;
+  display: none;
+}
+
 /* --- Stackable Tools Overlay (Mobile Drawer/Popover) --- */
 .tools-overlay-backdrop {
   position: fixed;
@@ -1539,3 +1546,14 @@ body.is-middle-panning * {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1.0; }
 }
+
+/* --- Mobile Pinch-to-Zoom Stretch Dots Overlay --- */
+.pinch-overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 60;
+  display: none;
+}
+

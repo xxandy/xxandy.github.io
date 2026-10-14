@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=44">
+  <link rel="stylesheet" href="styles.css?v=45">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -20,7 +20,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v44</span>
+        <span class="version-badge" id="appVersionBadge">v45</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -270,6 +270,14 @@
           </div>
         </div>
 
+        <!-- Pinch Feedback Runtime Toggle -->
+        <div class="tools-row">
+          <label class="tools-row-label">Pinch Feedback:</label>
+          <button class="btn btn-secondary" id="overlayBtnTogglePinchStretch" style="padding: 6px 12px; font-size: 11px;">
+            Waveform Stretch: ON
+          </button>
+        </div>
+
         <div class="divider-text" style="margin: 8px 0;">PROJECT</div>
 
         <!-- Open / Load Project in Overlay -->
@@ -279,6 +287,18 @@
               <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
             </svg>
             Open Another Project / File
+          </button>
+        </div>
+
+        <div class="divider-text" style="margin: 12px 0 8px 0;">DIAGNOSTICS & PROFILING</div>
+
+        <!-- Get Profile Button in Settings Overlay -->
+        <div class="tools-actions-stack">
+          <button class="btn btn-primary" id="overlayBtnGetProfile" style="width: 100%; justify-content: center; padding: 10px; background: linear-gradient(135deg, #0284c7, #4f46e5); border: none; font-weight: 600; box-shadow: 0 2px 8px rgba(2, 132, 199, 0.3);">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+            Get Profile (<span id="profileEventCount">0</span> events)
           </button>
         </div>
       </div>
@@ -348,11 +368,12 @@
   <div class="app-toast" id="appToast"></div>
 
   <!-- Script Modules -->
-  <script src="js/mp3-decoder.js?v=44"></script>
-  <script src="js/state-manager.js?v=44"></script>
-  <script src="js/waveform-cache.js?v=44"></script>
-  <script src="js/audio-engine.js?v=44"></script>
-  <script src="js/timeline-ui.js?v=44"></script>
-  <script src="js/app.js?v=44"></script>
+  <script src="js/profiler.js?v=45"></script>
+  <script src="js/mp3-decoder.js?v=45"></script>
+  <script src="js/state-manager.js?v=45"></script>
+  <script src="js/waveform-cache.js?v=45"></script>
+  <script src="js/audio-engine.js?v=45"></script>
+  <script src="js/timeline-ui.js?v=45"></script>
+  <script src="js/app.js?v=45"></script>
 </body>
 </html>

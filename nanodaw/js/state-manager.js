@@ -36,6 +36,59 @@ class StateManager {
   }
 
   notify(changeType, payload) {
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      const STEP = window.PROFILER_STEP;
+      const OP = window.PROFILER_OP;
+      switch (changeType) {
+        case 'project_loaded':
+          window.zoomProfiler.logEvent(STEP.PROJECT_LOAD, { opType: OP ? OP.PROJECT : 7 });
+          break;
+        case 'track_volume':
+          window.zoomProfiler.logEvent(STEP.TRACK_VOLUME, {
+            opType: OP ? OP.MIXER : 6,
+            trackIndex: payload?.index,
+            extraData: Math.round((payload?.volume || 0) * 100)
+          });
+          break;
+        case 'track_mute':
+          window.zoomProfiler.logEvent(STEP.TRACK_MUTE, {
+            opType: OP ? OP.MIXER : 6,
+            trackIndex: payload?.index,
+            extraData: payload?.mute ? 1 : 0
+          });
+          break;
+        case 'track_solo':
+          window.zoomProfiler.logEvent(STEP.TRACK_SOLO, {
+            opType: OP ? OP.MIXER : 6,
+            trackIndex: payload?.index,
+            extraData: payload?.solo ? 1 : 0
+          });
+          break;
+        case 'track_selected':
+          window.zoomProfiler.logEvent(STEP.TRACK_SELECT, {
+            opType: OP ? OP.MIXER : 6,
+            trackIndex: payload?.index
+          });
+          break;
+        case 'marker_added':
+          window.zoomProfiler.logEvent(STEP.MARKER_ADD, {
+            opType: OP ? OP.MARKER : 8,
+            extraData: Math.round((payload?.marker?.time || 0) * 100)
+          });
+          break;
+        case 'marker_updated':
+          window.zoomProfiler.logEvent(STEP.MARKER_UPDATE, {
+            opType: OP ? OP.MARKER : 8,
+            extraData: Math.round((payload?.marker?.time || 0) * 100)
+          });
+          break;
+        case 'marker_deleted':
+          window.zoomProfiler.logEvent(STEP.MARKER_DELETE, {
+            opType: OP ? OP.MARKER : 8
+          });
+          break;
+      }
+    }
     this.listeners.forEach(cb => cb(changeType, payload));
     this.scheduleUrlUpdate();
   }

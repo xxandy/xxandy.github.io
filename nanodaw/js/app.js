@@ -243,9 +243,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   const overlayZoomFit = document.getElementById('overlayZoomFit');
   const overlayBtnOpenProject = document.getElementById('overlayBtnOpenProject');
 
+  const overlayBtnGetProfile = document.getElementById('overlayBtnGetProfile');
+  const profileEventCountEl = document.getElementById('profileEventCount');
+
   if (btnToggleTools && toolsOverlay) {
     btnToggleTools.addEventListener('click', () => {
       toolsOverlay.classList.remove('hidden');
+      if (profileEventCountEl && window.zoomProfiler) {
+        profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
+      }
     });
   }
 
@@ -269,15 +275,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   if (overlayZoomIn) {
-    overlayZoomIn.addEventListener('click', () => timeline.applyZoom(timeline.pixelsPerSecond * 1.3));
+    overlayZoomIn.addEventListener('click', () => {
+      if (btnZoomIn) btnZoomIn.click();
+      else timeline.applyZoom(timeline.pixelsPerSecond * 1.3);
+      if (profileEventCountEl && window.zoomProfiler) {
+        profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
+      }
+    });
   }
   if (overlayZoomOut) {
-    overlayZoomOut.addEventListener('click', () => timeline.applyZoom(timeline.pixelsPerSecond / 1.3));
+    overlayZoomOut.addEventListener('click', () => {
+      if (btnZoomOut) btnZoomOut.click();
+      else timeline.applyZoom(timeline.pixelsPerSecond / 1.3);
+      if (profileEventCountEl && window.zoomProfiler) {
+        profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
+      }
+    });
   }
   if (overlayZoomFit) {
     overlayZoomFit.addEventListener('click', () => {
       if (btnZoomFit) btnZoomFit.click();
       toolsOverlay.classList.add('hidden');
+      if (profileEventCountEl && window.zoomProfiler) {
+        profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
+      }
     });
   }
   if (overlayBtnOpenProject) {
@@ -287,24 +308,97 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // Pinch Feedback Stretch Toggle in Overlay
+  const overlayBtnTogglePinchStretch = document.getElementById('overlayBtnTogglePinchStretch');
+  function updatePinchStretchBtnUI() {
+    if (!overlayBtnTogglePinchStretch) return;
+    const isStretch = timeline.pinchStretchWaveform;
+    overlayBtnTogglePinchStretch.textContent = isStretch 
+      ? 'Waveform Stretch: ON' 
+      : 'Waveform Stretch: OFF (Dots Only)';
+    overlayBtnTogglePinchStretch.style.color = isStretch ? '#38bdf8' : 'var(--text-secondary)';
+    overlayBtnTogglePinchStretch.style.borderColor = isStretch ? 'rgba(56, 189, 248, 0.4)' : 'var(--border-subtle)';
+  }
+  updatePinchStretchBtnUI();
+
+  if (overlayBtnTogglePinchStretch) {
+    overlayBtnTogglePinchStretch.addEventListener('click', () => {
+      const next = !timeline.pinchStretchWaveform;
+      timeline.setPinchStretchWaveform(next);
+      updatePinchStretchBtnUI();
+      showToast(next ? 'Pinch: Hardware Stretch ON (Option C)' : 'Pinch: Dots Only (Option A, no waveform stretch)', 'info', 2500);
+    });
+  }
+
+  // Global runtime helpers
+  window.setPinchStretch = (enabled) => {
+    const val = timeline.setPinchStretchWaveform(enabled);
+    updatePinchStretchBtnUI();
+    return val;
+  };
+  window.getPinchStretch = () => timeline.pinchStretchWaveform;
+
+  // Get Zoom Profile Download Action
+  if (overlayBtnGetProfile) {
+    overlayBtnGetProfile.addEventListener('click', () => {
+      if (!window.zoomProfiler) {
+        showToast('Profiler not initialized', 'error');
+        return;
+      }
+      const res = window.zoomProfiler.downloadProfile({
+        projectTitle: state.project ? state.project.title : 'untitled',
+        trackCount: audio.tracks ? audio.tracks.length : 0,
+        currentZoom: timeline.pixelsPerSecond
+      });
+      if (res && res.success) {
+        showToast(`Profile downloaded: ${res.totalOps} ops, ${res.totalEvents} events`, 'success', 3500);
+        if (profileEventCountEl) profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
+      } else {
+        showToast(res ? res.message : 'No zoom operations recorded yet. Use Zoom +/- first!', 'info', 3000);
+      }
+    });
+  }
+
   // Zoom Controls
   const btnZoomIn = document.getElementById('btnZoomIn');
   const btnZoomOut = document.getElementById('btnZoomOut');
   const btnZoomFit = document.getElementById('btnZoomFit');
 
   if (btnZoomIn) {
-    btnZoomIn.addEventListener('click', () => timeline.applyZoom(timeline.pixelsPerSecond * 1.3));
+    btnZoomIn.addEventListener('click', () => {
+      if (window.zoomProfiler && window.ZOOM_OP) {
+        window.zoomProfiler.startOp(window.ZOOM_OP.ZOOM_IN);
+      }
+      timeline.applyZoom(timeline.pixelsPerSecond * 1.3);
+      if (window.zoomProfiler) {
+        window.zoomProfiler.endOp();
+      }
+    });
   }
   if (btnZoomOut) {
-    btnZoomOut.addEventListener('click', () => timeline.applyZoom(timeline.pixelsPerSecond / 1.3));
+    btnZoomOut.addEventListener('click', () => {
+      if (window.zoomProfiler && window.ZOOM_OP) {
+        window.zoomProfiler.startOp(window.ZOOM_OP.ZOOM_OUT);
+      }
+      timeline.applyZoom(timeline.pixelsPerSecond / 1.3);
+      if (window.zoomProfiler) {
+        window.zoomProfiler.endOp();
+      }
+    });
   }
   if (btnZoomFit) {
     btnZoomFit.addEventListener('click', () => {
+      if (window.zoomProfiler && window.ZOOM_OP) {
+        window.zoomProfiler.startOp(window.ZOOM_OP.ZOOM_FIT);
+      }
       const fitZoom = timeline.computeProjectMinZoom();
       timeline.applyZoom(fitZoom);
       if (timeline.timelineScrollArea) {
         timeline.timelineScrollArea.scrollLeft = 0;
         timeline.scrollLeft = 0;
+      }
+      if (window.zoomProfiler) {
+        window.zoomProfiler.endOp();
       }
     });
   }
