@@ -1557,3 +1557,182 @@ body.is-middle-panning * {
   display: none;
 }
 
+/* --- Record Transport Button --- */
+.btn-record {
+  width: 32px;
+  height: 32px;
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+  position: relative;
+}
+
+.btn-record:hover {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: #ef4444;
+}
+
+.record-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+  transition: all 0.15s ease;
+}
+
+.btn-record.recording {
+  background: #ef4444 !important;
+  border-color: #dc2626 !important;
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.7);
+}
+
+.btn-record.recording .record-dot {
+  background: #fff;
+  border-radius: 2px;
+  width: 10px;
+  height: 10px;
+  box-shadow: none;
+  animation: recPulse 1s infinite alternate;
+}
+
+@keyframes recPulse {
+  0% { transform: scale(0.9); opacity: 0.8; }
+  100% { transform: scale(1.15); opacity: 1; }
+}
+
+/* --- Recording Floating HUD --- */
+.recording-hud {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(18, 22, 32, 0.96);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7), 0 0 20px rgba(239, 68, 68, 0.25);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 12px;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  z-index: 1000;
+  animation: hudSlideDown 0.25s ease-out;
+}
+
+@keyframes hudSlideDown {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.hud-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hud-rec-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #ef4444;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.hud-rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: recPulse 1s infinite alternate;
+}
+
+.hud-timer {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.hud-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.hud-instruction {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.click-beads-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.click-bead {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.click-bead.active {
+  background: #10b981;
+  border-color: #34d399;
+  color: #fff;
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.8);
+  transform: scale(1.15);
+}
+
+.click-bead.beep {
+  background: var(--accent-cyan);
+  border-color: #67e8f9;
+  color: #000;
+  box-shadow: 0 0 10px rgba(103, 232, 249, 0.8);
+  transform: scale(1.15);
+}
+
+.hud-right {
+  display: flex;
+  align-items: center;
+}
+
+.btn-stop-rec {
+  background: #ef4444;
+  border: 1px solid #dc2626;
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-stop-rec:hover {
+  background: #dc2626;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+

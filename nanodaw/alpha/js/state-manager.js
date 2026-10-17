@@ -370,4 +370,19 @@ class StateManager {
     if (hasExplicit) return Math.max(maxDur, 5);
     return 266;
   }
+
+  addTrack(trackData, trackState = { volume: 1.0, mute: false, solo: false }) {
+    if (!this.project) {
+      this.project = { title: 'Untitled Project', tracks: [], markers: [] };
+    }
+    if (!this.project.tracks) {
+      this.project.tracks = [];
+    }
+    this.project.tracks.push(trackData);
+    this.tracksState.push(trackState);
+    const index = this.project.tracks.length - 1;
+    this.selectedTrackIndex = index;
+    this.notify('track_added', { track: trackData, index });
+    return index;
+  }
 }

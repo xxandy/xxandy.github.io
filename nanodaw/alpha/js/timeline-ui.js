@@ -314,6 +314,14 @@ class TimelineUI {
       this.renderWaveforms();
     });
 
+    this.audio.on('track_added', () => {
+      this.updateTimelineDimensions();
+      this.render();
+      this.renderRuler();
+      this.renderWaveforms();
+      this.updateInspectorPane();
+    });
+
     // State changes
     this.state.subscribe((type, payload) => {
       if (type === 'project_loaded') {

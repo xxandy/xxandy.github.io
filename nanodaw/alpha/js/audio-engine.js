@@ -1392,4 +1392,348 @@ class AudioEngine {
     }
     return maxVal;
   }
+
+  /**
+   * Add a recorded audio buffer as a new track
+   */
+  addRecordedTrack(name, audioBuffer, offset = 0, color = '#ef4444') {
+    const CHUNK_DURATION = 20.0;
+    const index = this.tracks.length;
+    const duration = audioBuffer.duration;
+    const numChunks = Math.max(1, Math.ceil(duration / CHUNK_DURATION));
+    const chunks = [];
+    const sampleRate = audioBuffer.sampleRate;
+
+    for (let k = 0; k < numChunks; k++) {
+      const chunkStartSec = k * CHUNK_DURATION;
+      const chunkDurSec = Math.min(CHUNK_DURATION, duration - chunkStartSec);
+      const startSample = Math.floor(chunkStartSec * sampleRate);
+      const endSample = Math.min(audioBuffer.length, Math.floor((chunkStartSec + chunkDurSec) * sampleRate));
+      const chunkSamples = Math.max(1, endSample - startSample);
+
+      let chunkBuffer = null;
+      const ctx = this.getOrCreateAudioContext() || new (window.AudioContext || window.webkitAudioContext)();
+      if (chunkSamples > 0) {
+        chunkBuffer = ctx.createBuffer(audioBuffer.numberOfChannels, chunkSamples, sampleRate);
+        for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+          chunkBuffer.getChannelData(ch).set(audioBuffer.getChannelData(ch).subarray(startSample, endSample));
+        }
+      }
+
+      const leadChannel = audioBuffer.getChannelData(0).subarray(startSample, endSample);
+      const peaks = this.computePeaks(leadChannel, chunkDurSec);
+
+      chunks.push({
+        index: k,
+        startTime: chunkStartSec,
+        duration: chunkDurSec,
+        status: 'decoded',
+        buffer: chunkBuffer,
+        minPeaks: peaks.minPeaks,
+        maxPeaks: peaks.maxPeaks,
+        totalPoints: peaks.totalPoints
+      });
+    }
+
+    const trackData = {
+      index,
+      name: name || `Take ${index + 1}`,
+      url: '',
+      offset: Math.max(0, Number(offset) || 0),
+      duration,
+      hasExplicitDuration: true,
+      durationDetected: true,
+      chunks,
+      loader: null,
+      mp3Decoder: null,
+      fullAudioBuffer: audioBuffer,
+      fullAudioPromise: Promise.resolve(audioBuffer),
+      sourceNodes: new Map(),
+      gainNode: null,
+      analyserNode: null,
+      sourceNode: null,
+      color: color || '#ef4444'
+    };
+
+    this.tracks.push(trackData);
+    this.reconnectAllTrackNodes();
+
+    const totalDuration = this.getTotalDuration();
+    if (this.loopEnd < totalDuration) this.loopEnd = totalDuration;
+
+    if (this.state) {
+      this.state.addTrack({
+        name: trackData.name,
+        url: '',
+        offset: trackData.offset,
+        duration,
+        color: trackData.color
+      }, { volume: 1.0, mute: false, solo: false });
+    }
+
+    this.emit('track_added', { trackIndex: index, track: trackData, totalDuration });
+    return trackData;
+  }
+
+  /**
+   * Retrieve full AudioBuffer for any track (project audio or recorded take)
+   */
+  async getTrackAudioBuffer(trackIndex) {
+    const track = this.tracks[trackIndex];
+    if (!track) throw new Error(`Track ${trackIndex} not found`);
+
+    if (track.fullAudioBuffer) {
+      return track.fullAudioBuffer;
+    }
+
+    if (track.loader) {
+      try {
+        const bytes = await track.loader.ensureBuffer();
+        if (bytes && bytes.length > 0) {
+          const raw = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+          const decoded = await this.decodeAudio(raw);
+          track.fullAudioBuffer = decoded;
+          return decoded;
+        }
+      } catch (e) {
+        console.warn(`Direct decodeAudio failed for track ${trackIndex}, will stitch decoded chunks:`, e);
+      }
+    }
+
+    if (track.chunks && track.chunks.length > 0) {
+      for (let k = 0; k < track.chunks.length; k++) {
+        if (track.chunks[k].status !== 'decoded') {
+          await this.decodeTrackChunk(trackIndex, k);
+        }
+      }
+
+      const firstChunk = track.chunks.find(c => c.buffer);
+      if (!firstChunk) throw new Error(`No decoded audio data for track ${trackIndex}`);
+
+      const sampleRate = firstChunk.buffer.sampleRate;
+      const numChannels = firstChunk.buffer.numberOfChannels;
+      const totalFrames = track.chunks.reduce((acc, c) => acc + (c.buffer ? c.buffer.length : 0), 0);
+
+      const ctx = this.getOrCreateAudioContext() || new (window.AudioContext || window.webkitAudioContext)();
+      const stitched = ctx.createBuffer(numChannels, totalFrames, sampleRate);
+
+      let frameOffset = 0;
+      for (const chunk of track.chunks) {
+        if (!chunk.buffer) continue;
+        for (let ch = 0; ch < numChannels; ch++) {
+          stitched.getChannelData(ch).set(chunk.buffer.getChannelData(ch), frameOffset);
+        }
+        frameOffset += chunk.buffer.length;
+      }
+      track.fullAudioBuffer = stitched;
+      return stitched;
+    }
+
+    throw new Error(`Unable to load audio for track ${trackIndex}`);
+  }
+
+  /**
+   * Encode AudioBuffer to 16-bit PCM WAV Blob
+   */
+  audioBufferToWav(buffer) {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    const numFrames = buffer.length;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const dataSize = numFrames * blockAlign;
+    const headerSize = 44;
+    const totalSize = headerSize + dataSize;
+    const arrayBuffer = new ArrayBuffer(totalSize);
+    const view = new DataView(arrayBuffer);
+
+    function writeString(offset, string) {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    }
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // Subchunk1Size
+    view.setUint16(20, format, true); // AudioFormat PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true); // ByteRate
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    const channels = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      channels.push(buffer.getChannelData(ch));
+    }
+
+    let offset = 44;
+    for (let i = 0; i < numFrames; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        let sample = channels[ch][i];
+        sample = Math.max(-1, Math.min(1, sample));
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        view.setInt16(offset, intSample, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  /**
+   * Encode AudioBuffer to MP3 Blob using lamejs
+   */
+  audioBufferToMp3(buffer, kbps = 192) {
+    if (typeof lamejs === 'undefined') {
+      throw new Error('MP3 encoder (lamejs) is not loaded.');
+    }
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps);
+    const mp3Data = [];
+    const numFrames = buffer.length;
+    const chunkSize = 1152;
+
+    const left = buffer.getChannelData(0);
+    const right = numChannels > 1 ? buffer.getChannelData(1) : left;
+
+    for (let i = 0; i < numFrames; i += chunkSize) {
+      const end = Math.min(i + chunkSize, numFrames);
+      const len = end - i;
+      const leftChunk = new Int16Array(len);
+      const rightChunk = new Int16Array(len);
+
+      for (let j = 0; j < len; j++) {
+        let sL = Math.max(-1, Math.min(1, left[i + j]));
+        leftChunk[j] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+        if (numChannels > 1) {
+          let sR = Math.max(-1, Math.min(1, right[i + j]));
+          rightChunk[j] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+        } else {
+          rightChunk[j] = leftChunk[j];
+        }
+      }
+
+      const mp3buf = (numChannels === 1) 
+        ? mp3encoder.encodeBuffer(leftChunk)
+        : mp3encoder.encodeBuffer(leftChunk, rightChunk);
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf);
+      }
+    }
+
+    const end = mp3encoder.flush();
+    if (end.length > 0) {
+      mp3Data.push(end);
+    }
+
+    return new Blob(mp3Data, { type: 'audio/mp3' });
+  }
+
+  /**
+   * Export Full Mix applying volume, mute, and solo settings
+   */
+  async exportFullMix(format = 'wav') {
+    const projectTitle = (this.state?.project?.title || 'nanodaw_mix').replace(/[\s/\\:]/g, '_');
+    const tracks = this.tracks;
+    if (!tracks || tracks.length === 0) throw new Error('No tracks available to export');
+
+    const trackBuffers = [];
+    let maxEndSec = 0;
+    const sampleRate = 44100;
+
+    for (let i = 0; i < tracks.length; i++) {
+      const buf = await this.getTrackAudioBuffer(i);
+      trackBuffers[i] = buf;
+      const endSec = (tracks[i].offset || 0) + buf.duration;
+      if (endSec > maxEndSec) maxEndSec = endSec;
+    }
+
+    const totalSamples = Math.max(sampleRate, Math.ceil(maxEndSec * sampleRate));
+    const OfflineCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const offlineCtx = new OfflineCtxClass(2, totalSamples, sampleRate);
+
+    const states = this.state.tracksState;
+    const hasAnySolo = states.some(s => s && s.solo);
+
+    for (let i = 0; i < tracks.length; i++) {
+      const trackState = states[i] || { volume: 1.0, mute: false, solo: false };
+      if (trackState.mute) continue;
+      if (hasAnySolo && !trackState.solo) continue;
+
+      const effectiveVolume = (typeof trackState.volume === 'number' ? trackState.volume : 1.0) * this.masterVolume;
+      if (effectiveVolume <= 0.001) continue;
+
+      const buf = trackBuffers[i];
+      const source = offlineCtx.createBufferSource();
+      source.buffer = buf;
+
+      const gain = offlineCtx.createGain();
+      gain.gain.value = effectiveVolume;
+
+      source.connect(gain);
+      gain.connect(offlineCtx.destination);
+
+      const offsetSec = Math.max(0, tracks[i].offset || 0);
+      source.start(offsetSec);
+    }
+
+    const rendered = await offlineCtx.startRendering();
+    const ext = format === 'mp3' ? 'mp3' : 'wav';
+    const blob = format === 'mp3' ? this.audioBufferToMp3(rendered, 192) : this.audioBufferToWav(rendered);
+    const filename = `${projectTitle}_full_mix.${ext}`;
+    return { blob, filename };
+  }
+
+  /**
+   * Export individual track preceded with sample-accurate silence and amplitude ramp
+   */
+  async exportTrack(trackIndex, format = 'wav') {
+    const track = this.tracks[trackIndex];
+    if (!track) throw new Error(`Track ${trackIndex} not found`);
+
+    const projectTitle = (this.state?.project?.title || 'nanodaw').replace(/[\s/\\:]/g, '_');
+    const trackName = (track.name || `Track_${trackIndex + 1}`).replace(/[\s/\\:]/g, '_');
+
+    const rawBuffer = await this.getTrackAudioBuffer(trackIndex);
+    const offsetSec = Math.max(0, Number(track.offset) || 0);
+    const sampleRate = rawBuffer.sampleRate;
+    const numChannels = rawBuffer.numberOfChannels;
+    const offsetSamples = Math.round(offsetSec * sampleRate);
+    const totalSamples = offsetSamples + rawBuffer.length;
+
+    const OfflineCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const offlineCtx = new OfflineCtxClass(numChannels, totalSamples, sampleRate);
+    const outBuffer = offlineCtx.createBuffer(numChannels, totalSamples, sampleRate);
+
+    // First offsetSamples are pure zeros (silence)
+    // Audio starts at offsetSamples with a smooth 15ms cosine ramp
+    const rampSeconds = 0.015;
+    const rampSamples = Math.min(rawBuffer.length, Math.round(sampleRate * rampSeconds));
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      const srcData = rawBuffer.getChannelData(ch);
+      const dstData = outBuffer.getChannelData(ch);
+      dstData.set(srcData, offsetSamples);
+
+      // Amplitude ramp to soften the change from pre-offset silence to audio start
+      for (let i = 0; i < rampSamples; i++) {
+        const gain = 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
+        dstData[offsetSamples + i] *= gain;
+      }
+    }
+
+    const ext = format === 'mp3' ? 'mp3' : 'wav';
+    const blob = format === 'mp3' ? this.audioBufferToMp3(outBuffer, 192) : this.audioBufferToWav(outBuffer);
+    const filename = `${projectTitle}_${trackName}_offset_${offsetSec.toFixed(2)}s.${ext}`;
+    return { blob, filename };
+  }
 }

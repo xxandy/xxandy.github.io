@@ -600,6 +600,702 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // --- Recording Engine & 4-Click-Sync Controller ---
+  const btnRecord = document.getElementById('btnRecord');
+  const recordSetupModal = document.getElementById('recordSetupModal');
+  const btnCloseRecordSetupModal = document.getElementById('btnCloseRecordSetupModal');
+  const btnCancelRecordSetup = document.getElementById('btnCancelRecordSetup');
+  const recordDeviceSelect = document.getElementById('recordDeviceSelect');
+  const record4ClickSync = document.getElementById('record4ClickSync');
+  const btnStartRecordingAction = document.getElementById('btnStartRecordingAction');
+
+  const recordingHUD = document.getElementById('recordingHUD');
+  const hudRecStatusText = document.getElementById('hudRecStatusText');
+  const hudTimer = document.getElementById('hudTimer');
+  const hudInstruction = document.getElementById('hudInstruction');
+  const hudClickBeads = document.getElementById('hudClickBeads');
+  const bead1 = document.getElementById('bead1');
+  const bead2 = document.getElementById('bead2');
+  const bead3 = document.getElementById('bead3');
+  const bead4 = document.getElementById('bead4');
+  const btnStopRecordingAction = document.getElementById('btnStopRecordingAction');
+
+  let isRecording = false;
+  let recordingState = 'idle'; // 'idle', 'pass1', 'pass1_done', 'pass2_prelude', 'recording_take'
+  let recStream = null;
+  let recAudioCtx = null;
+  let recMicSource = null;
+  let recScriptProcessor = null;
+  let recSilentGain = null;
+
+  let pass1AudioChunks = [];
+  let pass2AudioChunks = [];
+  let pass1ClickEvents = [];
+  let pass1TimeoutId = null;
+  let pass1PostWaitTimeoutId = null;
+  let hudTimerIntervalId = null;
+  let takeStartTime = 0;
+  let recordedTakesCount = 0;
+  let detectedIntervalSec = 0;
+  let userClickBuffers = [];
+  let totalPass1Samples = 0;
+  let totalPass2Samples = 0;
+
+  async function refreshAudioInputDevices() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    try {
+      let devices = await navigator.mediaDevices.enumerateDevices();
+      let audioInputs = devices.filter(d => d.kind === 'audioinput');
+
+      // If device labels are blank, prompt briefly for mic permission
+      if (audioInputs.length > 0 && !audioInputs[0].label) {
+        try {
+          const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          tempStream.getTracks().forEach(t => t.stop());
+          devices = await navigator.mediaDevices.enumerateDevices();
+          audioInputs = devices.filter(d => d.kind === 'audioinput');
+        } catch (_) {}
+      }
+
+      if (recordDeviceSelect) {
+        recordDeviceSelect.innerHTML = '';
+        if (audioInputs.length === 0) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'Default Microphone';
+          recordDeviceSelect.appendChild(opt);
+        } else {
+          audioInputs.forEach((dev, idx) => {
+            const opt = document.createElement('option');
+            opt.value = dev.deviceId;
+            opt.textContent = dev.label || `Microphone ${idx + 1}`;
+            recordDeviceSelect.appendChild(opt);
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to enumerate audio devices:', err);
+    }
+  }
+
+  function resetClickBeads() {
+    [bead1, bead2, bead3, bead4].forEach(b => {
+      if (b) b.className = 'click-bead';
+    });
+  }
+
+  function playSynthBeep(time, freq = 880, dur = 0.06) {
+    if (!recAudioCtx) return;
+    try {
+      const osc = recAudioCtx.createOscillator();
+      const g = recAudioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, time);
+      g.gain.setValueAtTime(0.4, time);
+      g.gain.exponentialRampToValueAtTime(0.001, time + dur);
+      osc.connect(g);
+      g.connect(recAudioCtx.destination);
+      osc.start(time);
+      osc.stop(time + dur + 0.02);
+    } catch (e) {
+      console.warn('Synth beep error:', e);
+    }
+  }
+
+  function playClickBuffer(time, clickBuf) {
+    if (!recAudioCtx || !clickBuf) return;
+    try {
+      const src = recAudioCtx.createBufferSource();
+      src.buffer = clickBuf;
+      src.connect(recAudioCtx.destination);
+      src.start(time);
+    } catch (e) {
+      console.warn('User click playback error:', e);
+    }
+  }
+
+  function startHudTimer() {
+    if (hudTimerIntervalId) clearInterval(hudTimerIntervalId);
+    if (hudTimer) hudTimer.textContent = '00:00.0';
+    hudTimerIntervalId = setInterval(() => {
+      if (recordingState !== 'recording_take') return;
+      const elapsedSec = (performance.now() - takeStartTime) / 1000;
+      const mins = Math.floor(elapsedSec / 60);
+      const secs = Math.floor(elapsedSec % 60);
+      const tenths = Math.floor((elapsedSec * 10) % 10);
+      if (hudTimer) {
+        hudTimer.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${tenths}`;
+      }
+    }, 100);
+  }
+
+  function cleanupRecordingNodes() {
+    if (pass1TimeoutId) {
+      clearTimeout(pass1TimeoutId);
+      pass1TimeoutId = null;
+    }
+    if (pass1PostWaitTimeoutId) {
+      clearTimeout(pass1PostWaitTimeoutId);
+      pass1PostWaitTimeoutId = null;
+    }
+    if (hudTimerIntervalId) {
+      clearInterval(hudTimerIntervalId);
+      hudTimerIntervalId = null;
+    }
+
+    if (recScriptProcessor) {
+      try {
+        recScriptProcessor.onaudioprocess = null;
+        recScriptProcessor.disconnect();
+      } catch (_) {}
+      recScriptProcessor = null;
+    }
+
+    if (recSilentGain) {
+      try { recSilentGain.disconnect(); } catch (_) {}
+      recSilentGain = null;
+    }
+
+    if (recMicSource) {
+      try { recMicSource.disconnect(); } catch (_) {}
+      recMicSource = null;
+    }
+
+    if (recStream) {
+      try {
+        recStream.getTracks().forEach(t => t.stop());
+      } catch (_) {}
+      recStream = null;
+    }
+
+    if (recordingHUD) recordingHUD.classList.add('hidden');
+    if (btnRecord) btnRecord.classList.remove('recording');
+    isRecording = false;
+    recordingState = 'idle';
+  }
+
+  function cancelRecording() {
+    audio.stop();
+    cleanupRecordingNodes();
+    showToast('Recording cancelled', 'info');
+  }
+
+  async function startRecordingFlow() {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+
+    const deviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
+    const use4ClickSync = record4ClickSync ? record4ClickSync.checked : true;
+
+    try {
+      // 1. Acquire mic stream without browser audio DSP filters for pure transient response
+      recStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          echoCancellation: false,
+          autoGainControl: false,
+          noiseSuppression: false,
+          channelCount: 1
+        }
+      });
+
+      // 2. Obtain master AudioContext
+      recAudioCtx = audio.getOrCreateAudioContext();
+      if (recAudioCtx.state === 'suspended') {
+        await recAudioCtx.resume();
+      }
+
+      isRecording = true;
+      if (btnRecord) btnRecord.classList.add('recording');
+      if (recordingHUD) recordingHUD.classList.remove('hidden');
+
+      if (use4ClickSync) {
+        startPass1Calibration();
+      } else {
+        startStandardPrelude();
+      }
+    } catch (err) {
+      console.error('Failed to start recording:', err);
+      cleanupRecordingNodes();
+      showToast(`Microphone error: ${err.message}`, 'error', 4500);
+    }
+  }
+
+  // --- Pass 1: 4-Click Transient Detection ---
+  function startPass1Calibration() {
+    recordingState = 'pass1';
+    pass1AudioChunks = [];
+    pass1ClickEvents = [];
+    totalPass1Samples = 0;
+    resetClickBeads();
+
+    if (hudRecStatusText) hudRecStatusText.textContent = 'CALIBRATING (4 CLICKS)';
+    if (hudInstruction) hudInstruction.textContent = 'Tap 4 sharp clicks / snaps in rhythm...';
+    if (hudClickBeads) hudClickBeads.classList.remove('hidden');
+    if (hudTimer) hudTimer.textContent = '15s limit';
+
+    // Hook up mic audio processing
+    recMicSource = recAudioCtx.createMediaStreamSource(recStream);
+    recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
+    recSilentGain = recAudioCtx.createGain();
+    recSilentGain.gain.value = 0;
+
+    let lastTransientTime = 0;
+    const minRefractorySec = 0.16; // Refractory debounce window between clicks
+    let ambientFloor = 0.008;
+
+    recScriptProcessor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      pass1AudioChunks.push(copy);
+      const currentSampleOffset = totalPass1Samples;
+      totalPass1Samples += input.length;
+
+      if (recordingState !== 'pass1') return;
+
+      // Real-time transient analysis
+      let peak = 0;
+      let diffSum = 0;
+      let sumSq = 0;
+      for (let i = 0; i < input.length; i++) {
+        const absVal = Math.abs(input[i]);
+        if (absVal > peak) peak = absVal;
+        sumSq += input[i] * input[i];
+        if (i > 0) diffSum += Math.abs(input[i] - input[i - 1]);
+      }
+      const rms = Math.sqrt(sumSq / input.length);
+      const hfMetric = diffSum / input.length;
+      ambientFloor = 0.95 * ambientFloor + 0.05 * rms;
+
+      const now = recAudioCtx.currentTime;
+      if (peak > 0.05 && hfMetric > 0.012 && peak > ambientFloor * 2.2 && (now - lastTransientTime > minRefractorySec)) {
+        lastTransientTime = now;
+        pass1ClickEvents.push({ ctxTime: now, samplePos: currentSampleOffset });
+
+        const count = pass1ClickEvents.length;
+        if (count >= 1 && bead1) bead1.classList.add('active');
+        if (count >= 2 && bead2) bead2.classList.add('active');
+        if (count >= 3 && bead3) bead3.classList.add('active');
+        if (count >= 4 && bead4) bead4.classList.add('active');
+
+        if (count === 4) {
+          recordingState = 'pass1_done';
+          if (pass1TimeoutId) {
+            clearTimeout(pass1TimeoutId);
+            pass1TimeoutId = null;
+          }
+          if (hudInstruction) hudInstruction.textContent = '4 clicks detected! Preparing count-in...';
+
+          // Wait ~0.5s after 4th click, then stop music and initiate Pass 2
+          pass1PostWaitTimeoutId = setTimeout(() => {
+            audio.stop();
+            startPass2Flow();
+          }, 500);
+        }
+      }
+    };
+
+    recMicSource.connect(recScriptProcessor);
+    recScriptProcessor.connect(recSilentGain);
+    recSilentGain.connect(recAudioCtx.destination);
+
+    // Start music playback from t0
+    audio.seek(0);
+    audio.play();
+
+    // 15-second safety timeout
+    pass1TimeoutId = setTimeout(() => {
+      if (recordingState === 'pass1' && pass1ClickEvents.length < 4) {
+        cancelRecording();
+        showToast('4 clicks were not detected within 15 seconds. Please tap louder or closer to the mic.', 'error', 4500);
+      }
+    }, 15000);
+  }
+
+  // --- Pass 2: 8-Click Prelude & Live Recording ---
+  function startPass2Flow() {
+    if (!isRecording) return;
+    const sampleRate = recAudioCtx.sampleRate;
+
+    // 1. Calculate detected tempo interval
+    const t1 = pass1ClickEvents[0]?.ctxTime || 0;
+    const t4 = pass1ClickEvents[3]?.ctxTime || (t1 + 2.0);
+    let dt = (t4 - t1) / 3;
+    if (isNaN(dt) || dt < 0.25 || dt > 1.5) {
+      dt = 60 / (state.project?.tempo || 78);
+    }
+    detectedIntervalSec = dt;
+
+    // 2. Extract user's 4-click audio from Pass 1 recording
+    const totalP1 = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
+    const p1Full = new Float32Array(totalP1);
+    let p1Offset = 0;
+    for (const chunk of pass1AudioChunks) {
+      p1Full.set(chunk, p1Offset);
+      p1Offset += chunk.length;
+    }
+
+    userClickBuffers = [];
+    const clickWindowSamples = Math.min(Math.round(sampleRate * 0.25), Math.round(dt * 0.75 * sampleRate));
+    for (let k = 0; k < 4; k++) {
+      const startIdx = Math.max(0, (pass1ClickEvents[k]?.samplePos || 0) - Math.round(0.005 * sampleRate));
+      const endIdx = Math.min(totalP1, startIdx + clickWindowSamples);
+      const clickPCM = p1Full.subarray(startIdx, endIdx);
+
+      // Soft 3ms ramp in / 10ms ramp out
+      const rampIn = Math.min(clickPCM.length, Math.round(sampleRate * 0.003));
+      const rampOut = Math.min(clickPCM.length, Math.round(sampleRate * 0.010));
+      for (let i = 0; i < rampIn; i++) {
+        clickPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampIn)));
+      }
+      for (let i = 0; i < rampOut; i++) {
+        const idx = clickPCM.length - 1 - i;
+        clickPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampOut)));
+      }
+
+      const buf = recAudioCtx.createBuffer(1, clickPCM.length, sampleRate);
+      buf.getChannelData(0).set(clickPCM);
+      userClickBuffers.push(buf);
+    }
+
+    // 3. Prepare Pass 2 recording pipeline
+    pass2AudioChunks = [];
+    totalPass2Samples = 0;
+    recordingState = 'pass2_prelude';
+    resetClickBeads();
+
+    if (hudRecStatusText) hudRecStatusText.textContent = 'COUNT-IN (8 BEATS)';
+    if (hudInstruction) hudInstruction.textContent = 'Count-in: 4 beeps + 4 of your clicks...';
+    if (hudClickBeads) hudClickBeads.classList.remove('hidden');
+
+    // Switch ScriptProcessor handler to capture Pass 2 continuous PCM
+    recScriptProcessor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      pass2AudioChunks.push(copy);
+      totalPass2Samples += input.length;
+    };
+
+    // 4. Schedule the 8-beat prelude
+    const startPreludeTime = recAudioCtx.currentTime + 0.12;
+
+    // Beats 1 to 4: Synthesized beeps
+    for (let i = 0; i < 4; i++) {
+      const beatTime = startPreludeTime + i * dt;
+      playSynthBeep(beatTime, i === 3 ? 1760 : 880, 0.06);
+
+      const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
+      setTimeout(() => {
+        if (recordingState !== 'pass2_prelude') return;
+        if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4 (tempo ${Math.round(60 / dt)} BPM)`;
+        const bead = [bead1, bead2, bead3, bead4][i];
+        if (bead) {
+          bead.className = 'click-bead beep';
+          setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
+        }
+      }, delayMs);
+    }
+
+    // Beats 5 to 8: User's recorded clicks from Pass 1
+    for (let i = 0; i < 4; i++) {
+      const beatTime = startPreludeTime + (4 + i) * dt;
+      playClickBuffer(beatTime, userClickBuffers[i] || userClickBuffers[0]);
+
+      const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
+      setTimeout(() => {
+        if (recordingState !== 'pass2_prelude') return;
+        if (hudInstruction) hudInstruction.textContent = `Your Click ${i + 1} of 4 (zero-drift sync)`;
+        const bead = [bead1, bead2, bead3, bead4][i];
+        if (bead) {
+          bead.className = 'click-bead active';
+          setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
+        }
+      }, delayMs);
+    }
+
+    // Beat 9: Downbeat! Backing music drops in, user records performance take
+    const downbeatTime = startPreludeTime + 8 * dt;
+    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
+
+    setTimeout(() => {
+      if (recordingState !== 'pass2_prelude') return;
+      recordingState = 'recording_take';
+      if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
+      if (hudInstruction) hudInstruction.textContent = 'Recording live to new track... Sing or play!';
+      if (hudClickBeads) hudClickBeads.classList.add('hidden');
+      takeStartTime = performance.now();
+      startHudTimer();
+
+      // Backing tracks start playback from time 0!
+      audio.seek(0);
+      audio.play();
+    }, downbeatDelay);
+  }
+
+  // --- Standard Recording Mode (Count-in with 4 synth beeps) ---
+  function startStandardPrelude() {
+    const sampleRate = recAudioCtx.sampleRate;
+    const tempo = state.project?.tempo || 78;
+    const dt = 60 / tempo;
+    detectedIntervalSec = dt;
+
+    pass2AudioChunks = [];
+    totalPass2Samples = 0;
+    recordingState = 'pass2_prelude';
+    resetClickBeads();
+
+    if (hudRecStatusText) hudRecStatusText.textContent = 'COUNT-IN (4 BEATS)';
+    if (hudInstruction) hudInstruction.textContent = `Count-in at ${tempo} BPM...`;
+    if (hudClickBeads) hudClickBeads.classList.remove('hidden');
+
+    recMicSource = recAudioCtx.createMediaStreamSource(recStream);
+    recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
+    recSilentGain = recAudioCtx.createGain();
+    recSilentGain.gain.value = 0;
+
+    recScriptProcessor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      pass2AudioChunks.push(copy);
+      totalPass2Samples += input.length;
+    };
+
+    recMicSource.connect(recScriptProcessor);
+    recScriptProcessor.connect(recSilentGain);
+    recSilentGain.connect(recAudioCtx.destination);
+
+    const startPreludeTime = recAudioCtx.currentTime + 0.12;
+    for (let i = 0; i < 4; i++) {
+      const beatTime = startPreludeTime + i * dt;
+      playSynthBeep(beatTime, i === 3 ? 1760 : 880, 0.06);
+
+      const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
+      setTimeout(() => {
+        if (recordingState !== 'pass2_prelude') return;
+        if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4`;
+        const bead = [bead1, bead2, bead3, bead4][i];
+        if (bead) {
+          bead.className = 'click-bead beep';
+          setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
+        }
+      }, delayMs);
+    }
+
+    const downbeatTime = startPreludeTime + 4 * dt;
+    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
+
+    setTimeout(() => {
+      if (recordingState !== 'pass2_prelude') return;
+      recordingState = 'recording_take';
+      if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
+      if (hudInstruction) hudInstruction.textContent = 'Recording live to new track...';
+      if (hudClickBeads) hudClickBeads.classList.add('hidden');
+      takeStartTime = performance.now();
+      startHudTimer();
+
+      audio.seek(0);
+      audio.play();
+    }, downbeatDelay);
+  }
+
+  // --- Stop Recording & Add New Track ---
+  function stopRecording() {
+    if (!isRecording) return;
+    const currentState = recordingState;
+    audio.stop();
+
+    if (currentState === 'recording_take' && pass2AudioChunks.length > 0) {
+      const sampleRate = recAudioCtx.sampleRate;
+      const is4Click = record4ClickSync ? record4ClickSync.checked : true;
+      const preludeSec = is4Click ? (8 * detectedIntervalSec) : (4 * detectedIntervalSec);
+      const hardwareLatencySec = (recAudioCtx.outputLatency || 0) + (recAudioCtx.baseLatency || 0) || 0.030;
+      const trimSamples = Math.round((preludeSec + hardwareLatencySec) * sampleRate);
+
+      const totalSamples = pass2AudioChunks.reduce((acc, c) => acc + c.length, 0);
+      const fullPass2 = new Float32Array(totalSamples);
+      let offset = 0;
+      for (const chunk of pass2AudioChunks) {
+        fullPass2.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      if (totalSamples > trimSamples + sampleRate * 0.2) {
+        // Discard prelude and apply soft 5ms cosine ramp to audio start
+        const takePCM = fullPass2.subarray(trimSamples);
+        const rampSamples = Math.min(takePCM.length, Math.round(sampleRate * 0.005));
+        for (let i = 0; i < rampSamples; i++) {
+          takePCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
+        }
+
+        const takeBuffer = recAudioCtx.createBuffer(1, takePCM.length, sampleRate);
+        takeBuffer.getChannelData(0).set(takePCM);
+
+        recordedTakesCount++;
+        const takeName = `Recorded Take ${recordedTakesCount}`;
+        audio.addRecordedTrack(takeName, takeBuffer, 0, '#ef4444');
+
+        showToast(`Added "${takeName}" (${(takePCM.length / sampleRate).toFixed(1)}s) to project!`, 'success', 4000);
+        audio.seek(0);
+        timeline.render();
+        if (timeline.scrollToStart) timeline.scrollToStart();
+      } else {
+        showToast('Take stopped before enough audio was recorded.', 'warning', 3000);
+      }
+    } else {
+      showToast('Recording stopped before take began.', 'info', 2500);
+    }
+
+    cleanupRecordingNodes();
+  }
+
+  if (btnRecord) {
+    btnRecord.addEventListener('click', () => {
+      if (isRecording) {
+        stopRecording();
+      } else {
+        if (recordSetupModal) {
+          recordSetupModal.classList.remove('hidden');
+          refreshAudioInputDevices();
+        }
+      }
+    });
+  }
+
+  if (btnCloseRecordSetupModal && recordSetupModal) {
+    btnCloseRecordSetupModal.addEventListener('click', () => recordSetupModal.classList.add('hidden'));
+  }
+  if (btnCancelRecordSetup && recordSetupModal) {
+    btnCancelRecordSetup.addEventListener('click', () => recordSetupModal.classList.add('hidden'));
+  }
+  if (btnStartRecordingAction) {
+    btnStartRecordingAction.addEventListener('click', () => {
+      if (recordSetupModal) recordSetupModal.classList.add('hidden');
+      startRecordingFlow();
+    });
+  }
+  if (btnStopRecordingAction) {
+    btnStopRecordingAction.addEventListener('click', stopRecording);
+  }
+
+  // Auto-finish take when backing audio reaches the end
+  audio.on('playback_stopped', () => {
+    if (isRecording && recordingState === 'recording_take') {
+      stopRecording();
+    }
+  });
+
+  // --- Audio Export Controller ---
+  const btnAudioExport = document.getElementById('btnAudioExport');
+  const audioExportModal = document.getElementById('audioExportModal');
+  const btnCloseAudioExportModal = document.getElementById('btnCloseAudioExportModal');
+  const btnCancelAudioExport = document.getElementById('btnCancelAudioExport');
+  const btnStartAudioExport = document.getElementById('btnStartAudioExport');
+  const audioExportTarget = document.getElementById('audioExportTarget');
+  const exportFormatWav = document.getElementById('exportFormatWav');
+  const exportFormatMp3 = document.getElementById('exportFormatMp3');
+  const exportInfoBox = document.getElementById('exportInfoBox');
+  const audioExportProgress = document.getElementById('audioExportProgress');
+  const audioExportProgressText = document.getElementById('audioExportProgressText');
+
+  function populateAudioExportTargets() {
+    if (!audioExportTarget) return;
+    audioExportTarget.innerHTML = '';
+
+    const mixOpt = document.createElement('option');
+    mixOpt.value = 'mix';
+    mixOpt.textContent = 'Full mix (applies volume / mute / solo)';
+    audioExportTarget.appendChild(mixOpt);
+
+    audio.tracks.forEach((track, idx) => {
+      const opt = document.createElement('option');
+      opt.value = String(idx);
+      const offsetSec = (track.offset || 0).toFixed(2);
+      opt.textContent = `Track ${idx + 1}: ${track.name} (offset: ${offsetSec}s)`;
+      audioExportTarget.appendChild(opt);
+    });
+
+    updateAudioExportInfo();
+  }
+
+  function updateAudioExportInfo() {
+    if (!exportInfoBox || !audioExportTarget) return;
+    const val = audioExportTarget.value;
+    if (val === 'mix') {
+      exportInfoBox.textContent = 'Full mix renders all active project tracks mixed together with active volume, mute, and solo settings.';
+    } else {
+      const idx = parseInt(val, 10);
+      const track = audio.tracks[idx];
+      const offsetSec = (track?.offset || 0).toFixed(2);
+      exportInfoBox.textContent = `Exports raw track "${track?.name || 'Track'}" preceded with sample-accurate silence (${offsetSec}s) and a soft amplitude ramp. Volume, mute, and solo settings are bypassed.`;
+    }
+  }
+
+  if (btnAudioExport && audioExportModal) {
+    btnAudioExport.addEventListener('click', () => {
+      populateAudioExportTargets();
+      audioExportModal.classList.remove('hidden');
+    });
+  }
+
+  if (btnCloseAudioExportModal && audioExportModal) {
+    btnCloseAudioExportModal.addEventListener('click', () => audioExportModal.classList.add('hidden'));
+  }
+  if (btnCancelAudioExport && audioExportModal) {
+    btnCancelAudioExport.addEventListener('click', () => audioExportModal.classList.add('hidden'));
+  }
+  if (audioExportTarget) {
+    audioExportTarget.addEventListener('change', updateAudioExportInfo);
+  }
+
+  if (btnStartAudioExport) {
+    btnStartAudioExport.addEventListener('click', async () => {
+      const targetVal = audioExportTarget ? audioExportTarget.value : 'mix';
+      const format = (exportFormatMp3 && exportFormatMp3.checked) ? 'mp3' : 'wav';
+
+      btnStartAudioExport.disabled = true;
+      if (audioExportProgress) {
+        audioExportProgress.classList.remove('hidden');
+        if (audioExportProgressText) {
+          audioExportProgressText.textContent = `Rendering ${format.toUpperCase()} audio...`;
+        }
+      }
+
+      try {
+        let result;
+        if (targetVal === 'mix') {
+          result = await audio.exportFullMix(format);
+        } else {
+          const trackIdx = parseInt(targetVal, 10);
+          result = await audio.exportTrack(trackIdx, format);
+        }
+
+        const { blob, filename } = result;
+        const dlUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = dlUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(dlUrl), 30000);
+
+        showToast(`Exported "${filename}" successfully!`, 'success', 3500);
+        if (audioExportModal) audioExportModal.classList.add('hidden');
+      } catch (err) {
+        console.error('Audio Export failed:', err);
+        showToast(`Export failed: ${err.message}`, 'error', 5000);
+      } finally {
+        btnStartAudioExport.disabled = false;
+        if (audioExportProgress) audioExportProgress.classList.add('hidden');
+      }
+    });
+  }
+
   // --- Keyboard Shortcuts ---
   window.addEventListener('keydown', (e) => {
     // Ignore when typing inside an input
@@ -608,10 +1304,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     switch (e.code) {
       case 'Space':
         e.preventDefault();
-        audio.togglePlay();
+        if (isRecording) {
+          stopRecording();
+        } else {
+          audio.togglePlay();
+        }
+        break;
+      case 'KeyR':
+        e.preventDefault();
+        if (isRecording) {
+          stopRecording();
+        } else {
+          if (btnRecord) btnRecord.click();
+        }
         break;
       case 'Escape':
         e.preventDefault();
+        if (isRecording) {
+          cancelRecording();
+          break;
+        }
         if (!audio.isPlaying) {
           audio.hardReset();
           showToast('Audio Engine Reset', 'info', 1500);
