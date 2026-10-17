@@ -125,6 +125,7 @@ class AudioEngine {
     this.tracks = []; // Array of { index, name, url, offset, duration, buffer, gainNode, analyserNode, sourceNode, color }
 
     this.isPlaying = false;
+    this.isRecording = false;
     this.playheadPosition = 0; // In seconds
     this.playbackStartTime = 0; // audioCtx.currentTime when playback started
     this.playbackStartOffset = 0; // Playhead position when playback started
@@ -1107,7 +1108,7 @@ class AudioEngine {
         }
       });
 
-      if (this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+      if (!this.isRecording && this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
         try {
           this.audioCtx.suspend().catch(() => {});
         } catch (e) {}

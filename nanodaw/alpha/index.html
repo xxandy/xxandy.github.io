@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=47">
+  <link rel="stylesheet" href="styles.css?v=49">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -20,7 +20,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v47</span>
+        <span class="version-badge" id="appVersionBadge">v49</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -369,7 +369,7 @@
   </div>
 
   <!-- Audio Export Modal -->
-  <div class="modal-backdrop hidden" id="audioExportModal">
+  <div class="modal-backdrop hidden" id="audioExportModal" style="display: none;">
     <div class="modal-card" style="max-width: 480px;">
       <div class="modal-header">
         <h3 style="display:flex; align-items:center; gap:8px;">
@@ -422,7 +422,7 @@
   </div>
 
   <!-- Record Setup Modal -->
-  <div class="modal-backdrop hidden" id="recordSetupModal">
+  <div class="modal-backdrop hidden" id="recordSetupModal" style="display: none;">
     <div class="modal-card" style="max-width: 480px;">
       <div class="modal-header">
         <h3 style="display:flex; align-items:center; gap:8px;">
@@ -446,7 +446,7 @@
           </label>
           <p style="margin:8px 0 0 26px; font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
             Zero-latency calibration:
-            <br>1. Tap 4 sharp clicks (finger snap, pen tap) along with the music to set tempo.
+            <br>1. Tap 4 sharp clicks (finger snap, pen tap, or tap on screen) along with the music to set tempo.
             <br>2. System plays 4 synthesized beeps flowing seamlessly into your 4 clicks.
             <br>3. Music drops in on the downbeat — the prelude is discarded and your take is synced with sample accuracy!
           </p>
@@ -463,7 +463,7 @@
   </div>
 
   <!-- Active Recording Floating HUD -->
-  <div class="recording-hud hidden" id="recordingHUD">
+  <div class="recording-hud hidden" id="recordingHUD" style="display: none;">
     <div class="hud-left">
       <span class="hud-rec-badge" id="hudRecBadge">
         <span class="hud-rec-dot"></span>
@@ -506,12 +506,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=48"></script>
-  <script src="js/mp3-decoder.js?v=48"></script>
-  <script src="js/state-manager.js?v=48"></script>
-  <script src="js/waveform-cache.js?v=48"></script>
-  <script src="js/audio-engine.js?v=48"></script>
-  <script src="js/timeline-ui.js?v=48"></script>
-  <script src="js/app.js?v=48"></script>
+  <script src="js/profiler.js?v=49"></script>
+  <script src="js/mp3-decoder.js?v=49"></script>
+  <script src="js/state-manager.js?v=49"></script>
+  <script src="js/waveform-cache.js?v=49"></script>
+  <script src="js/audio-engine.js?v=49"></script>
+  <script src="js/timeline-ui.js?v=49"></script>
+  <script src="js/app.js?v=49"></script>
 </body>
 </html>

@@ -461,6 +461,10 @@ body {
   transition: all 0.2s ease;
 }
 
+.hidden {
+  display: none !important;
+}
+
 .marker-nav-bar.hidden {
   display: none !important;
 }
@@ -1621,6 +1625,10 @@ body.is-middle-panning * {
   animation: hudSlideDown 0.25s ease-out;
 }
 
+.recording-hud.hidden {
+  display: none !important;
+}
+
 @keyframes hudSlideDown {
   from { opacity: 0; transform: translate(-50%, -10px); }
   to { opacity: 1; transform: translate(-50%, 0); }
@@ -1734,5 +1742,36 @@ body.is-middle-panning * {
 .btn-stop-rec:hover {
   background: #dc2626;
   box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+
+@media (max-width: 600px) {
+  .recording-hud {
+    top: 6px;
+    width: calc(100vw - 16px);
+    max-width: 440px;
+    padding: 6px 10px;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  .hud-instruction {
+    font-size: 11px;
+    text-align: center;
+    max-width: 170px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hud-timer {
+    font-size: 12px;
+  }
+  .click-bead {
+    width: 18px;
+    height: 18px;
+    font-size: 9px;
+  }
+  .btn-stop-rec {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
 }
 

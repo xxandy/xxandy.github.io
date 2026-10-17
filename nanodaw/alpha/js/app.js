@@ -684,14 +684,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  function playSynthBeep(time, freq = 880, dur = 0.06) {
+  function playSynthBeep(time, freq = 900, dur = 0.08) {
     if (!recAudioCtx) return;
     try {
       const osc = recAudioCtx.createOscillator();
       const g = recAudioCtx.createGain();
-      osc.type = 'sine';
+      osc.type = 'triangle'; // Richer harmonics than sine, clearly audible on mobile phone speakers
       osc.frequency.setValueAtTime(freq, time);
-      g.gain.setValueAtTime(0.4, time);
+      g.gain.setValueAtTime(0.8, time);
       g.gain.exponentialRampToValueAtTime(0.001, time + dur);
       osc.connect(g);
       g.connect(recAudioCtx.destination);
@@ -707,7 +707,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const src = recAudioCtx.createBufferSource();
       src.buffer = clickBuf;
-      src.connect(recAudioCtx.destination);
+      const g = recAudioCtx.createGain();
+      g.gain.setValueAtTime(3.0, time); // Boost user click playback for mobile audibility
+      src.connect(g);
+      g.connect(recAudioCtx.destination);
       src.start(time);
     } catch (e) {
       console.warn('User click playback error:', e);
@@ -768,13 +771,25 @@ document.addEventListener('DOMContentLoaded', async () => {
       recStream = null;
     }
 
-    if (recordingHUD) recordingHUD.classList.add('hidden');
+    window.__nanodaw_processor = null;
+    window.__nanodaw_stream = null;
+    window.__nanodaw_mic = null;
+
+    if (recordingHUD) {
+      recordingHUD.classList.add('hidden');
+      recordingHUD.style.display = 'none';
+    }
+    if (recordSetupModal) {
+      recordSetupModal.classList.add('hidden');
+      recordSetupModal.style.display = 'none';
+    }
     if (btnRecord) btnRecord.classList.remove('recording');
     isRecording = false;
     recordingState = 'idle';
   }
 
   function cancelRecording() {
+    audio.isRecording = false;
     audio.stop();
     cleanupRecordingNodes();
     showToast('Recording cancelled', 'info');
@@ -791,33 +806,44 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     try {
       // 1. Acquire mic stream without browser audio DSP filters for pure transient response
-      recStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: deviceId ? { exact: deviceId } : undefined,
-          echoCancellation: false,
-          autoGainControl: false,
-          noiseSuppression: false,
-          channelCount: 1
-        }
-      });
+      const audioConstraints = {
+        echoCancellation: false,
+        autoGainControl: false,
+        noiseSuppression: false
+      };
+      if (deviceId) {
+        audioConstraints.deviceId = { ideal: deviceId };
+      }
 
-      // 2. Obtain master AudioContext
+      try {
+        recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      } catch (e1) {
+        // Fallback to basic audio constraint if specific constraints rejected on Android
+        recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+
+      // 2. Obtain master AudioContext and ensure it is active
       recAudioCtx = audio.getOrCreateAudioContext();
-      if (recAudioCtx.state === 'suspended') {
+      if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
         await recAudioCtx.resume();
       }
 
+      audio.isRecording = true;
       isRecording = true;
       if (btnRecord) btnRecord.classList.add('recording');
-      if (recordingHUD) recordingHUD.classList.remove('hidden');
+      if (recordingHUD) {
+        recordingHUD.classList.remove('hidden');
+        recordingHUD.style.display = 'flex';
+      }
 
       if (use4ClickSync) {
         startPass1Calibration();
       } else {
-        startStandardPrelude();
+        await startStandardPrelude();
       }
     } catch (err) {
       console.error('Failed to start recording:', err);
+      audio.isRecording = false;
       cleanupRecordingNodes();
       showToast(`Microphone error: ${err.message}`, 'error', 4500);
     }
@@ -832,19 +858,54 @@ document.addEventListener('DOMContentLoaded', async () => {
     resetClickBeads();
 
     if (hudRecStatusText) hudRecStatusText.textContent = 'CALIBRATING (4 CLICKS)';
-    if (hudInstruction) hudInstruction.textContent = 'Tap 4 sharp clicks / snaps in rhythm...';
-    if (hudClickBeads) hudClickBeads.classList.remove('hidden');
+    if (hudInstruction) hudInstruction.textContent = 'Tap 4 sharp clicks / snaps (or tap screen)...';
+    if (hudClickBeads) {
+      hudClickBeads.classList.remove('hidden');
+      hudClickBeads.style.display = 'flex';
+    }
     if (hudTimer) hudTimer.textContent = '15s limit';
 
     // Hook up mic audio processing
     recMicSource = recAudioCtx.createMediaStreamSource(recStream);
     recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
     recSilentGain = recAudioCtx.createGain();
-    recSilentGain.gain.value = 0;
+    recSilentGain.gain.value = 0.00001; // Avoid Chromium silent node pruning
+
+    // Prevent GC in V8 mobile
+    window.__nanodaw_processor = recScriptProcessor;
+    window.__nanodaw_stream = recStream;
+    window.__nanodaw_mic = recMicSource;
 
     let lastTransientTime = 0;
-    const minRefractorySec = 0.16; // Refractory debounce window between clicks
-    let ambientFloor = 0.008;
+    const minRefractorySec = 0.14; // Refractory debounce window between clicks
+    let ambientFloor = 0.005;
+
+    function registerClick(now, samplePos) {
+      if (recordingState !== 'pass1') return;
+      lastTransientTime = now;
+      pass1ClickEvents.push({ ctxTime: now, samplePos: samplePos });
+
+      const count = pass1ClickEvents.length;
+      if (count >= 1 && bead1) bead1.classList.add('active');
+      if (count >= 2 && bead2) bead2.classList.add('active');
+      if (count >= 3 && bead3) bead3.classList.add('active');
+      if (count >= 4 && bead4) bead4.classList.add('active');
+
+      if (count === 4) {
+        recordingState = 'pass1_done';
+        if (pass1TimeoutId) {
+          clearTimeout(pass1TimeoutId);
+          pass1TimeoutId = null;
+        }
+        if (hudInstruction) hudInstruction.textContent = '4 clicks calibrated! Starting count-in...';
+
+        // Wait ~0.5s after 4th click, stop backing music and initiate Pass 2
+        pass1PostWaitTimeoutId = setTimeout(async () => {
+          audio.stop();
+          await startPass2Flow();
+        }, 500);
+      }
+    }
 
     recScriptProcessor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
@@ -870,33 +931,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       const hfMetric = diffSum / input.length;
       ambientFloor = 0.95 * ambientFloor + 0.05 * rms;
 
-      const now = recAudioCtx.currentTime;
-      if (peak > 0.05 && hfMetric > 0.012 && peak > ambientFloor * 2.2 && (now - lastTransientTime > minRefractorySec)) {
-        lastTransientTime = now;
-        pass1ClickEvents.push({ ctxTime: now, samplePos: currentSampleOffset });
-
-        const count = pass1ClickEvents.length;
-        if (count >= 1 && bead1) bead1.classList.add('active');
-        if (count >= 2 && bead2) bead2.classList.add('active');
-        if (count >= 3 && bead3) bead3.classList.add('active');
-        if (count >= 4 && bead4) bead4.classList.add('active');
-
-        if (count === 4) {
-          recordingState = 'pass1_done';
-          if (pass1TimeoutId) {
-            clearTimeout(pass1TimeoutId);
-            pass1TimeoutId = null;
-          }
-          if (hudInstruction) hudInstruction.textContent = '4 clicks detected! Preparing count-in...';
-
-          // Wait ~0.5s after 4th click, then stop music and initiate Pass 2
-          pass1PostWaitTimeoutId = setTimeout(() => {
-            audio.stop();
-            startPass2Flow();
-          }, 500);
-        }
+      const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
+      if (peak > 0.025 && (peak > ambientFloor * 1.6 || hfMetric > 0.007) && (now - lastTransientTime > minRefractorySec)) {
+        registerClick(now, currentSampleOffset);
       }
     };
+
+    // Tap support: User can tap on HUD / beads on screen as an explicit click
+    const onHudTap = (evt) => {
+      if (recordingState !== 'pass1') return;
+      if (evt.target.closest('#btnStopRecordingAction')) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
+      if (now - lastTransientTime > minRefractorySec) {
+        registerClick(now, totalPass1Samples);
+      }
+    };
+    if (hudInstructionBox) {
+      hudInstructionBox.addEventListener('pointerdown', onHudTap);
+    }
 
     recMicSource.connect(recScriptProcessor);
     recScriptProcessor.connect(recSilentGain);
@@ -910,14 +964,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     pass1TimeoutId = setTimeout(() => {
       if (recordingState === 'pass1' && pass1ClickEvents.length < 4) {
         cancelRecording();
-        showToast('4 clicks were not detected within 15 seconds. Please tap louder or closer to the mic.', 'error', 4500);
+        showToast('4 clicks were not detected within 15 seconds. You can tap screen or tap louder.', 'error', 4500);
       }
     }, 15000);
   }
 
   // --- Pass 2: 8-Click Prelude & Live Recording ---
-  function startPass2Flow() {
+  async function startPass2Flow() {
     if (!isRecording) return;
+
+    // CRITICAL: Ensure audio context is running and NOT suspended!
+    if (!recAudioCtx || recAudioCtx.state === 'closed') {
+      recAudioCtx = audio.getOrCreateAudioContext();
+    }
+    if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
+      await recAudioCtx.resume();
+    }
+
     const sampleRate = recAudioCtx.sampleRate;
 
     // 1. Calculate detected tempo interval
@@ -941,12 +1004,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     userClickBuffers = [];
     const clickWindowSamples = Math.min(Math.round(sampleRate * 0.25), Math.round(dt * 0.75 * sampleRate));
     for (let k = 0; k < 4; k++) {
-      const startIdx = Math.max(0, (pass1ClickEvents[k]?.samplePos || 0) - Math.round(0.005 * sampleRate));
+      const clickSamplePos = pass1ClickEvents[k]?.samplePos || Math.round(k * dt * sampleRate);
+      const startIdx = Math.max(0, clickSamplePos - Math.round(0.005 * sampleRate));
       const endIdx = Math.min(totalP1, startIdx + clickWindowSamples);
-      const clickPCM = p1Full.subarray(startIdx, endIdx);
+      const clickPCM = p1Full.slice(startIdx, endIdx);
 
-      // Soft 3ms ramp in / 10ms ramp out
-      const rampIn = Math.min(clickPCM.length, Math.round(sampleRate * 0.003));
+      // Normalize click snippet so it's clearly audible on mobile
+      let peakVal = 0;
+      for (let i = 0; i < clickPCM.length; i++) {
+        const av = Math.abs(clickPCM[i]);
+        if (av > peakVal) peakVal = av;
+      }
+      const normGain = peakVal > 0.01 ? (0.85 / peakVal) : 2.5;
+
+      // Soft 2ms ramp in / 10ms ramp out
+      const rampIn = Math.min(clickPCM.length, Math.round(sampleRate * 0.002));
       const rampOut = Math.min(clickPCM.length, Math.round(sampleRate * 0.010));
       for (let i = 0; i < rampIn; i++) {
         clickPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampIn)));
@@ -954,6 +1026,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       for (let i = 0; i < rampOut; i++) {
         const idx = clickPCM.length - 1 - i;
         clickPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampOut)));
+      }
+      for (let i = 0; i < clickPCM.length; i++) {
+        clickPCM[i] *= normGain;
       }
 
       const buf = recAudioCtx.createBuffer(1, clickPCM.length, sampleRate);
@@ -969,9 +1044,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (hudRecStatusText) hudRecStatusText.textContent = 'COUNT-IN (8 BEATS)';
     if (hudInstruction) hudInstruction.textContent = 'Count-in: 4 beeps + 4 of your clicks...';
-    if (hudClickBeads) hudClickBeads.classList.remove('hidden');
+    if (hudClickBeads) {
+      hudClickBeads.classList.remove('hidden');
+      hudClickBeads.style.display = 'flex';
+    }
 
-    // Switch ScriptProcessor handler to capture Pass 2 continuous PCM
+    // Capture Pass 2 continuous PCM (including the 8 prelude beats for synchronization)
     recScriptProcessor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
       const copy = new Float32Array(input.length);
@@ -981,17 +1059,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
 
     // 4. Schedule the 8-beat prelude
-    const startPreludeTime = recAudioCtx.currentTime + 0.12;
+    const startPreludeTime = recAudioCtx.currentTime + 0.15;
 
-    // Beats 1 to 4: Synthesized beeps
+    // Beats 1 to 4: Synthesized beeps (and NOTHING else!)
     for (let i = 0; i < 4; i++) {
       const beatTime = startPreludeTime + i * dt;
-      playSynthBeep(beatTime, i === 3 ? 1760 : 880, 0.06);
+      playSynthBeep(beatTime, i === 3 ? 1800 : 900, 0.08);
 
       const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
       setTimeout(() => {
         if (recordingState !== 'pass2_prelude') return;
-        if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4 (tempo ${Math.round(60 / dt)} BPM)`;
+        if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4 (${Math.round(60 / dt)} BPM)`;
         const bead = [bead1, bead2, bead3, bead4][i];
         if (bead) {
           bead.className = 'click-bead beep';
@@ -1008,7 +1086,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
       setTimeout(() => {
         if (recordingState !== 'pass2_prelude') return;
-        if (hudInstruction) hudInstruction.textContent = `Your Click ${i + 1} of 4 (zero-drift sync)`;
+        if (hudInstruction) hudInstruction.textContent = `Your Click ${i + 1} of 4 (calibrating...)`;
         const bead = [bead1, bead2, bead3, bead4][i];
         if (bead) {
           bead.className = 'click-bead active';
@@ -1025,8 +1103,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
       if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
-      if (hudInstruction) hudInstruction.textContent = 'Recording live to new track... Sing or play!';
-      if (hudClickBeads) hudClickBeads.classList.add('hidden');
+      if (hudInstruction) hudInstruction.textContent = 'Recording live... Sing or play along!';
+      if (hudClickBeads) {
+        hudClickBeads.classList.add('hidden');
+        hudClickBeads.style.display = 'none';
+      }
       takeStartTime = performance.now();
       startHudTimer();
 
@@ -1037,7 +1118,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // --- Standard Recording Mode (Count-in with 4 synth beeps) ---
-  function startStandardPrelude() {
+  async function startStandardPrelude() {
+    if (!recAudioCtx || recAudioCtx.state === 'closed') {
+      recAudioCtx = audio.getOrCreateAudioContext();
+    }
+    if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
+      await recAudioCtx.resume();
+    }
+
     const sampleRate = recAudioCtx.sampleRate;
     const tempo = state.project?.tempo || 78;
     const dt = 60 / tempo;
@@ -1050,12 +1138,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (hudRecStatusText) hudRecStatusText.textContent = 'COUNT-IN (4 BEATS)';
     if (hudInstruction) hudInstruction.textContent = `Count-in at ${tempo} BPM...`;
-    if (hudClickBeads) hudClickBeads.classList.remove('hidden');
+    if (hudClickBeads) {
+      hudClickBeads.classList.remove('hidden');
+      hudClickBeads.style.display = 'flex';
+    }
 
     recMicSource = recAudioCtx.createMediaStreamSource(recStream);
     recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
     recSilentGain = recAudioCtx.createGain();
-    recSilentGain.gain.value = 0;
+    recSilentGain.gain.value = 0.00001;
 
     recScriptProcessor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
@@ -1069,10 +1160,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     recScriptProcessor.connect(recSilentGain);
     recSilentGain.connect(recAudioCtx.destination);
 
-    const startPreludeTime = recAudioCtx.currentTime + 0.12;
+    window.__nanodaw_processor = recScriptProcessor;
+    window.__nanodaw_stream = recStream;
+    window.__nanodaw_mic = recMicSource;
+
+    const startPreludeTime = recAudioCtx.currentTime + 0.15;
     for (let i = 0; i < 4; i++) {
       const beatTime = startPreludeTime + i * dt;
-      playSynthBeep(beatTime, i === 3 ? 1760 : 880, 0.06);
+      playSynthBeep(beatTime, i === 3 ? 1800 : 900, 0.08);
 
       const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
       setTimeout(() => {
@@ -1094,7 +1189,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       recordingState = 'recording_take';
       if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
       if (hudInstruction) hudInstruction.textContent = 'Recording live to new track...';
-      if (hudClickBeads) hudClickBeads.classList.add('hidden');
+      if (hudClickBeads) {
+        hudClickBeads.classList.add('hidden');
+        hudClickBeads.style.display = 'none';
+      }
       takeStartTime = performance.now();
       startHudTimer();
 
@@ -1106,16 +1204,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   // --- Stop Recording & Add New Track ---
   function stopRecording() {
     if (!isRecording) return;
-    const currentState = recordingState;
+    isRecording = false; // Immediately disable to prevent re-entrant calls
+    audio.isRecording = false;
+
+    // 1. Immediately hide all recording overlays
+    cleanupRecordingNodes();
+
+    // 2. Stop audio playback
     audio.stop();
 
-    if (currentState === 'recording_take' && pass2AudioChunks.length > 0) {
-      const sampleRate = recAudioCtx.sampleRate;
-      const is4Click = record4ClickSync ? record4ClickSync.checked : true;
-      const preludeSec = is4Click ? (8 * detectedIntervalSec) : (4 * detectedIntervalSec);
-      const hardwareLatencySec = (recAudioCtx.outputLatency || 0) + (recAudioCtx.baseLatency || 0) || 0.030;
-      const trimSamples = Math.round((preludeSec + hardwareLatencySec) * sampleRate);
+    // 3. Process audio and create the new track
+    const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+    const is4Click = record4ClickSync ? record4ClickSync.checked : true;
+    const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 78));
+    const preludeSec = is4Click ? (8 * dt) : (4 * dt);
+    const hardwareLatencySec = recAudioCtx ? ((recAudioCtx.outputLatency || 0) + (recAudioCtx.baseLatency || 0) || 0.035) : 0.035;
+    const trimSamples = Math.round((preludeSec + hardwareLatencySec) * sampleRate);
 
+    let takePCM = null;
+
+    if (pass2AudioChunks.length > 0) {
       const totalSamples = pass2AudioChunks.reduce((acc, c) => acc + c.length, 0);
       const fullPass2 = new Float32Array(totalSamples);
       let offset = 0;
@@ -1124,33 +1232,49 @@ document.addEventListener('DOMContentLoaded', async () => {
         offset += chunk.length;
       }
 
-      if (totalSamples > trimSamples + sampleRate * 0.2) {
-        // Discard prelude and apply soft 5ms cosine ramp to audio start
-        const takePCM = fullPass2.subarray(trimSamples);
-        const rampSamples = Math.min(takePCM.length, Math.round(sampleRate * 0.005));
-        for (let i = 0; i < rampSamples; i++) {
-          takePCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
-        }
-
-        const takeBuffer = recAudioCtx.createBuffer(1, takePCM.length, sampleRate);
-        takeBuffer.getChannelData(0).set(takePCM);
-
-        recordedTakesCount++;
-        const takeName = `Recorded Take ${recordedTakesCount}`;
-        audio.addRecordedTrack(takeName, takeBuffer, 0, '#ef4444');
-
-        showToast(`Added "${takeName}" (${(takePCM.length / sampleRate).toFixed(1)}s) to project!`, 'success', 4000);
-        audio.seek(0);
-        timeline.render();
-        if (timeline.scrollToStart) timeline.scrollToStart();
+      if (totalSamples > trimSamples + Math.round(sampleRate * 0.1)) {
+        // Discard the prelude up to the downbeat!
+        takePCM = fullPass2.subarray(trimSamples);
       } else {
-        showToast('Take stopped before enough audio was recorded.', 'warning', 3000);
+        // Stopped before or right at downbeat: keep all audio captured in Pass 2!
+        takePCM = fullPass2;
       }
-    } else {
-      showToast('Recording stopped before take began.', 'info', 2500);
+    } else if (pass1AudioChunks.length > 0) {
+      // Stopped during Pass 1: keep all audio captured in Pass 1!
+      const totalSamples = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
+      takePCM = new Float32Array(totalSamples);
+      let offset = 0;
+      for (const chunk of pass1AudioChunks) {
+        takePCM.set(chunk, offset);
+        offset += chunk.length;
+      }
     }
 
-    cleanupRecordingNodes();
+    // Fallback if no audio samples were captured
+    if (!takePCM || takePCM.length < Math.round(sampleRate * 0.1)) {
+      takePCM = new Float32Array(Math.round(sampleRate * 1.0));
+    }
+
+    // Apply a soft 5ms cosine ramp to audio start to avoid any edge click
+    const rampSamples = Math.min(takePCM.length, Math.round(sampleRate * 0.005));
+    for (let i = 0; i < rampSamples; i++) {
+      takePCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
+    }
+
+    const ctx = audio.getOrCreateAudioContext() || recAudioCtx;
+    const takeBuffer = ctx.createBuffer(1, takePCM.length, sampleRate);
+    takeBuffer.getChannelData(0).set(takePCM);
+
+    recordedTakesCount++;
+    const takeName = `Recorded Take ${recordedTakesCount}`;
+    audio.addRecordedTrack(takeName, takeBuffer, 0, '#ef4444');
+
+    showToast(`Added "${takeName}" (${(takePCM.length / sampleRate).toFixed(1)}s) to project!`, 'success', 4000);
+    audio.seek(0);
+    timeline.render();
+    timeline.renderWaveforms();
+    timeline.updateInspectorPane();
+    if (timeline.scrollToStart) timeline.scrollToStart();
   }
 
   if (btnRecord) {
@@ -1160,6 +1284,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         if (recordSetupModal) {
           recordSetupModal.classList.remove('hidden');
+          recordSetupModal.style.display = 'flex';
           refreshAudioInputDevices();
         }
       }
@@ -1167,19 +1292,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   if (btnCloseRecordSetupModal && recordSetupModal) {
-    btnCloseRecordSetupModal.addEventListener('click', () => recordSetupModal.classList.add('hidden'));
+    btnCloseRecordSetupModal.addEventListener('click', () => {
+      recordSetupModal.classList.add('hidden');
+      recordSetupModal.style.display = 'none';
+    });
   }
   if (btnCancelRecordSetup && recordSetupModal) {
-    btnCancelRecordSetup.addEventListener('click', () => recordSetupModal.classList.add('hidden'));
+    btnCancelRecordSetup.addEventListener('click', () => {
+      recordSetupModal.classList.add('hidden');
+      recordSetupModal.style.display = 'none';
+    });
   }
   if (btnStartRecordingAction) {
     btnStartRecordingAction.addEventListener('click', () => {
-      if (recordSetupModal) recordSetupModal.classList.add('hidden');
+      if (recordSetupModal) {
+        recordSetupModal.classList.add('hidden');
+        recordSetupModal.style.display = 'none';
+      }
       startRecordingFlow();
     });
   }
   if (btnStopRecordingAction) {
-    btnStopRecordingAction.addEventListener('click', stopRecording);
+    btnStopRecordingAction.addEventListener('click', () => {
+      stopRecording();
+    });
   }
 
   // Auto-finish take when backing audio reaches the end
@@ -1239,14 +1375,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     btnAudioExport.addEventListener('click', () => {
       populateAudioExportTargets();
       audioExportModal.classList.remove('hidden');
+      audioExportModal.style.display = 'flex';
     });
   }
 
   if (btnCloseAudioExportModal && audioExportModal) {
-    btnCloseAudioExportModal.addEventListener('click', () => audioExportModal.classList.add('hidden'));
+    btnCloseAudioExportModal.addEventListener('click', () => {
+      audioExportModal.classList.add('hidden');
+      audioExportModal.style.display = 'none';
+    });
   }
   if (btnCancelAudioExport && audioExportModal) {
-    btnCancelAudioExport.addEventListener('click', () => audioExportModal.classList.add('hidden'));
+    btnCancelAudioExport.addEventListener('click', () => {
+      audioExportModal.classList.add('hidden');
+      audioExportModal.style.display = 'none';
+    });
   }
   if (audioExportTarget) {
     audioExportTarget.addEventListener('change', updateAudioExportInfo);
@@ -1260,6 +1403,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       btnStartAudioExport.disabled = true;
       if (audioExportProgress) {
         audioExportProgress.classList.remove('hidden');
+        audioExportProgress.style.display = 'flex';
         if (audioExportProgressText) {
           audioExportProgressText.textContent = `Rendering ${format.toUpperCase()} audio...`;
         }
@@ -1285,13 +1429,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         setTimeout(() => URL.revokeObjectURL(dlUrl), 30000);
 
         showToast(`Exported "${filename}" successfully!`, 'success', 3500);
-        if (audioExportModal) audioExportModal.classList.add('hidden');
+        if (audioExportModal) {
+          audioExportModal.classList.add('hidden');
+          audioExportModal.style.display = 'none';
+        }
       } catch (err) {
         console.error('Audio Export failed:', err);
         showToast(`Export failed: ${err.message}`, 'error', 5000);
       } finally {
         btnStartAudioExport.disabled = false;
-        if (audioExportProgress) audioExportProgress.classList.add('hidden');
+        if (audioExportProgress) {
+          audioExportProgress.classList.add('hidden');
+          audioExportProgress.style.display = 'none';
+        }
       }
     });
   }
