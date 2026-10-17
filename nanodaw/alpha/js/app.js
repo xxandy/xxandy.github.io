@@ -640,6 +640,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   let userClickBuffers = [];
   let totalPass1Samples = 0;
   let totalPass2Samples = 0;
+  let pass2StreamStartTime = null;
+  let pass2DownbeatScheduledTime = null;
 
   async function refreshAudioInputDevices() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
@@ -840,6 +842,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (btnRecord) btnRecord.classList.remove('recording');
     isRecording = false;
     recordingState = 'idle';
+    pass2StreamStartTime = null;
+    pass2DownbeatScheduledTime = null;
 
     audio.isRecording = false;
     audio.isRecordingMode = false;
@@ -1063,16 +1067,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const sampleRate = recAudioCtx.sampleRate;
 
-    // 1. Calculate detected tempo interval
-    const t1 = pass1ClickEvents[0]?.ctxTime || 0;
-    const t4 = pass1ClickEvents[3]?.ctxTime || (t1 + 2.0);
-    let dt = (t4 - t1) / 3;
-    if (isNaN(dt) || dt < 0.25 || dt > 1.5) {
-      dt = 60 / (state.project?.tempo || 78);
-    }
-    detectedIntervalSec = dt;
-
-    // 2. Extract user's 4-click audio from Pass 1 recording
+    // 1. Gather all recorded PCM from Pass 1
     const totalP1 = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
     const p1Full = new Float32Array(totalP1);
     let p1Offset = 0;
@@ -1081,44 +1076,94 @@ document.addEventListener('DOMContentLoaded', async () => {
       p1Offset += chunk.length;
     }
 
-    userClickBuffers = [];
-    const clickWindowSamples = Math.min(Math.round(sampleRate * 0.25), Math.round(dt * 0.75 * sampleRate));
+    // 2. High-precision transient peak detection for all 4 taps in p1Full
+    const exactPeaks = [];
+    const searchWindowSamples = Math.round(0.12 * sampleRate); // +/- 120ms window around rough tap
+
     for (let k = 0; k < 4; k++) {
-      const clickSamplePos = pass1ClickEvents[k]?.samplePos || Math.round(k * dt * sampleRate);
-      const startIdx = Math.max(0, clickSamplePos - Math.round(0.005 * sampleRate));
-      const endIdx = Math.min(totalP1, startIdx + clickWindowSamples);
-      const clickPCM = p1Full.slice(startIdx, endIdx);
+      const roughPos = pass1ClickEvents[k]?.samplePos ?? Math.round(k * (totalP1 / 4));
+      const startS = Math.max(0, roughPos - searchWindowSamples);
+      const endS = Math.min(totalP1, roughPos + searchWindowSamples);
 
-      // Normalize click snippet so it's clearly audible on mobile
-      let peakVal = 0;
-      for (let i = 0; i < clickPCM.length; i++) {
-        const av = Math.abs(clickPCM[i]);
-        if (av > peakVal) peakVal = av;
+      let peakIdx = roughPos;
+      let maxMetric = -1;
+      for (let s = startS; s < endS; s++) {
+        const amp = Math.abs(p1Full[s]);
+        const diff = s > 0 ? Math.abs(p1Full[s] - p1Full[s - 1]) : 0;
+        const metric = amp * 0.65 + diff * 0.35;
+        if (metric > maxMetric) {
+          maxMetric = metric;
+          peakIdx = s;
+        }
       }
-      const normGain = peakVal > 0.01 ? (0.85 / peakVal) : 2.5;
-
-      // Soft 2ms ramp in / 10ms ramp out
-      const rampIn = Math.min(clickPCM.length, Math.round(sampleRate * 0.002));
-      const rampOut = Math.min(clickPCM.length, Math.round(sampleRate * 0.010));
-      for (let i = 0; i < rampIn; i++) {
-        clickPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampIn)));
-      }
-      for (let i = 0; i < rampOut; i++) {
-        const idx = clickPCM.length - 1 - i;
-        clickPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampOut)));
-      }
-      for (let i = 0; i < clickPCM.length; i++) {
-        clickPCM[i] *= normGain;
-      }
-
-      const buf = recAudioCtx.createBuffer(1, clickPCM.length, sampleRate);
-      buf.getChannelData(0).set(clickPCM);
-      userClickBuffers.push(buf);
+      exactPeaks.push(peakIdx);
     }
 
-    // 3. Prepare Pass 2 recording pipeline
+    // 3. Compute tempo using all 4 taps via linear regression & robust outlier-rejected median
+    const intervals = [
+      (exactPeaks[1] - exactPeaks[0]) / sampleRate,
+      (exactPeaks[2] - exactPeaks[1]) / sampleRate,
+      (exactPeaks[3] - exactPeaks[2]) / sampleRate
+    ];
+
+    // Linear regression slope across all 4 taps (least squares slope: (3*(P3-P0) + (P2-P1)) / 10)
+    const slopeSamples = (3 * (exactPeaks[3] - exactPeaks[0]) + (exactPeaks[2] - exactPeaks[1])) / 10;
+    const dtReg = slopeSamples / sampleRate;
+
+    // Median interval to detect any single outlier tap
+    const sortedInts = [...intervals].sort((a, b) => a - b);
+    const medianInt = sortedInts[1];
+    const consistentInts = intervals.filter(v => Math.abs(v - medianInt) / medianInt < 0.30);
+    const avgConsistent = consistentInts.length > 0
+      ? (consistentInts.reduce((a, b) => a + b, 0) / consistentInts.length)
+      : dtReg;
+
+    // Blend consistent tap average and linear regression for sample-accurate tempo
+    let dt = 0.60 * avgConsistent + 0.40 * dtReg;
+    if (isNaN(dt) || dt < 0.25 || dt > 1.8) {
+      dt = 60 / (state.project?.tempo || 78);
+    }
+    detectedIntervalSec = dt;
+    console.log(`[4-Click-Sync] Detected tempo: ${dt.toFixed(4)}s (${(60 / dt).toFixed(1)} BPM), Tap intervals: ${intervals.map(v => v.toFixed(3)).join(', ')}s`);
+
+    // 4. Extract continuous user calibration audio slice
+    // From start of first beat (with 40ms attack approach) to end of last beat
+    const preLeadSamples = Math.min(exactPeaks[0], Math.round(0.040 * sampleRate));
+    const startSlice = exactPeaks[0] - preLeadSamples;
+    const postRingoutSamples = Math.min(totalP1 - exactPeaks[3], Math.round(0.85 * dt * sampleRate));
+    const endSlice = Math.min(totalP1, exactPeaks[3] + postRingoutSamples);
+
+    const calibPCM = p1Full.slice(startSlice, endSlice);
+
+    // Apply gentle 3ms cosine fade-in and 15ms fade-out
+    const fadeInSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.003));
+    for (let i = 0; i < fadeInSamples; i++) {
+      calibPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeInSamples)));
+    }
+    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.015));
+    for (let i = 0; i < fadeOutSamples; i++) {
+      const idx = calibPCM.length - 1 - i;
+      calibPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeOutSamples)));
+    }
+
+    // Normalize calibration audio for audibility
+    let maxCalibAmp = 0;
+    for (let i = 0; i < calibPCM.length; i++) {
+      const a = Math.abs(calibPCM[i]);
+      if (a > maxCalibAmp) maxCalibAmp = a;
+    }
+    const calibGainVal = maxCalibAmp > 0.01 ? Math.min(3.0, 0.90 / maxCalibAmp) : 2.0;
+    for (let i = 0; i < calibPCM.length; i++) {
+      calibPCM[i] *= calibGainVal;
+    }
+
+    const calibBuffer = recAudioCtx.createBuffer(1, calibPCM.length, sampleRate);
+    calibBuffer.getChannelData(0).set(calibPCM);
+
+    // 5. Prepare Pass 2 recording pipeline
     pass2AudioChunks = [];
     totalPass2Samples = 0;
+    pass2StreamStartTime = null;
     recordingState = 'pass2_prelude';
     resetClickBeads();
 
@@ -1129,8 +1174,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudClickBeads.style.display = 'flex';
     }
 
-    // Capture Pass 2 continuous PCM (including the 8 prelude beats for synchronization)
     recScriptProcessor.onaudioprocess = (e) => {
+      if (pass2StreamStartTime === null && recAudioCtx) {
+        pass2StreamStartTime = recAudioCtx.currentTime;
+      }
       const input = e.inputBuffer.getChannelData(0);
       const copy = new Float32Array(input.length);
       copy.set(input);
@@ -1138,7 +1185,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       totalPass2Samples += input.length;
     };
 
-    // 4. Schedule the 8-beat prelude
+    // 6. Schedule the 8-beat prelude in Web Audio
     const startPreludeTime = recAudioCtx.currentTime + 0.15;
 
     // Beats 1 to 4: Synthesized beeps (and NOTHING else!)
@@ -1158,11 +1205,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       }, delayMs);
     }
 
-    // Beats 5 to 8: User's recorded clicks from Pass 1
+    // Beats 5 to 8: Continuous user calibration audio
+    // Starts so the peak of User Click 1 lands precisely at (startPreludeTime + 4 * dt)!
+    const preLeadSec = preLeadSamples / sampleRate;
+    const userAudioStartTime = (startPreludeTime + 4 * dt) - preLeadSec;
+
+    try {
+      const calibSrc = recAudioCtx.createBufferSource();
+      calibSrc.buffer = calibBuffer;
+      const calibGainNode = recAudioCtx.createGain();
+      calibGainNode.gain.setValueAtTime(2.0, userAudioStartTime);
+      calibSrc.connect(calibGainNode);
+      calibGainNode.connect(recAudioCtx.destination);
+      calibSrc.start(userAudioStartTime);
+    } catch (e) {
+      console.warn('Error playing calibration buffer:', e);
+    }
+
+    // UI bead feedback for Beats 5 to 8
     for (let i = 0; i < 4; i++) {
       const beatTime = startPreludeTime + (4 + i) * dt;
-      playClickBuffer(beatTime, userClickBuffers[i] || userClickBuffers[0]);
-
       const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
       setTimeout(() => {
         if (recordingState !== 'pass2_prelude') return;
@@ -1175,10 +1237,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       }, delayMs);
     }
 
-    // Beat 9: Downbeat! Backing music drops in, user records performance take
+    // Beat 9: DOWNBEAT!
+    // Backing music starts playback from time 0 at the exact downbeat timestamp
     const downbeatTime = startPreludeTime + 8 * dt;
-    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
+    pass2DownbeatScheduledTime = downbeatTime;
 
+    // Hardware sample-accurate audio engine start at downbeatTime
+    audio.seek(0);
+    audio.play(downbeatTime);
+
+    // UI update when downbeat arrives
+    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
     setTimeout(() => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
@@ -1190,10 +1259,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       takeStartTime = performance.now();
       startHudTimer();
-
-      // Backing tracks start playback from time 0!
-      audio.seek(0);
-      audio.play();
     }, downbeatDelay);
   }
 
@@ -1213,6 +1278,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     pass2AudioChunks = [];
     totalPass2Samples = 0;
+    pass2StreamStartTime = null;
     recordingState = 'pass2_prelude';
     resetClickBeads();
 
@@ -1229,6 +1295,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     recSilentGain.gain.value = 0.00001;
 
     recScriptProcessor.onaudioprocess = (e) => {
+      if (pass2StreamStartTime === null && recAudioCtx) {
+        pass2StreamStartTime = recAudioCtx.currentTime;
+      }
       const input = e.inputBuffer.getChannelData(0);
       const copy = new Float32Array(input.length);
       copy.set(input);
@@ -1262,8 +1331,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     const downbeatTime = startPreludeTime + 4 * dt;
-    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
+    pass2DownbeatScheduledTime = downbeatTime;
 
+    audio.seek(0);
+    audio.play(downbeatTime);
+
+    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
     setTimeout(() => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
@@ -1275,9 +1348,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       takeStartTime = performance.now();
       startHudTimer();
-
-      audio.seek(0);
-      audio.play();
     }, downbeatDelay);
   }
 
@@ -1286,6 +1356,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isRecording) return;
     isRecording = false; // Immediately disable to prevent re-entrant calls
     audio.isRecording = false;
+    audio.isRecordingMode = false;
+    audio.setPlaybackAudioSession();
 
     // 1. Immediately hide all recording overlays
     cleanupRecordingNodes();
@@ -1295,11 +1367,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 3. Process audio and create the new track
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-    const is4Click = record4ClickSync ? record4ClickSync.checked : true;
-    const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 78));
-    const preludeSec = is4Click ? (8 * dt) : (4 * dt);
-    const hardwareLatencySec = recAudioCtx ? ((recAudioCtx.outputLatency || 0) + (recAudioCtx.baseLatency || 0) || 0.035) : 0.035;
-    const trimSamples = Math.round((preludeSec + hardwareLatencySec) * sampleRate);
 
     let takePCM = null;
 
@@ -1311,6 +1378,27 @@ document.addEventListener('DOMContentLoaded', async () => {
         fullPass2.set(chunk, offset);
         offset += chunk.length;
       }
+
+      // Calculate sample-accurate downbeat trim index
+      let downbeatSample = 0;
+      if (pass2DownbeatScheduledTime && pass2StreamStartTime && pass2DownbeatScheduledTime > pass2StreamStartTime) {
+        downbeatSample = Math.round((pass2DownbeatScheduledTime - pass2StreamStartTime) * sampleRate);
+      } else {
+        const is4Click = record4ClickSync ? record4ClickSync.checked : true;
+        const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 78));
+        const preludeSec = is4Click ? (8 * dt) : (4 * dt);
+        downbeatSample = Math.round(preludeSec * sampleRate);
+      }
+
+      // Latency compensation:
+      // When user listens on Bluetooth (PowerBeats), A2DP output buffer delay is ~160ms
+      // With phone built-in speaker / wired: ~40ms
+      const isBt = /bluetooth|headset|hands-free|sco|powerbeat|airpod/i.test(recordDeviceSelect?.selectedOptions?.[0]?.textContent || '');
+      const hardwareLatencySec = isBt ? 0.160 : 0.040;
+      const latencySamples = Math.round(hardwareLatencySec * sampleRate);
+
+      const trimSamples = downbeatSample + latencySamples;
+      console.log(`[Recording Trim] total: ${totalSamples}, downbeatSample: ${downbeatSample}, latencySamples: ${latencySamples}, trimSamples: ${trimSamples}`);
 
       if (totalSamples > trimSamples + Math.round(sampleRate * 0.1)) {
         // Discard the prelude up to the downbeat!

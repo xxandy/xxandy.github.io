@@ -877,7 +877,7 @@ class AudioEngine {
   /**
    * Start multitrack playback from current playhead position
    */
-  play() {
+  play(when = null) {
     this.setPlaybackAudioSession();
     this.ensureAudioContextUnlocked();
 
@@ -904,7 +904,10 @@ class AudioEngine {
 
     this.playbackEpoch++;
     this.isPlaying = true;
-    this.playbackStartTime = this.audioCtx.currentTime;
+    const startAudioTime = (typeof when === 'number' && when >= this.audioCtx.currentTime)
+      ? when
+      : this.audioCtx.currentTime;
+    this.playbackStartTime = startAudioTime;
     this.playbackStartOffset = this.playheadPosition;
 
     // Ensure chunks at playhead are prioritized
@@ -1021,11 +1024,11 @@ class AudioEngine {
             }
           };
 
-          const audioNow = this.audioCtx.currentTime;
+          const audioRefTime = this.playbackStartTime;
           if (this.playheadPosition < offset) {
-            source.start(audioNow + (offset - this.playheadPosition), 0);
+            source.start(audioRefTime + (offset - this.playheadPosition), 0);
           } else {
-            source.start(audioNow, this.playheadPosition - offset);
+            source.start(audioRefTime, this.playheadPosition - offset);
           }
         }
       }
@@ -1355,7 +1358,7 @@ class AudioEngine {
     const tick = () => {
       if (!this.isPlaying || !this.audioCtx) return;
 
-      const elapsed = this.audioCtx.currentTime - this.playbackStartTime;
+      const elapsed = Math.max(0, this.audioCtx.currentTime - this.playbackStartTime);
       const currentPos = this.playbackStartOffset + elapsed;
       this.playheadPosition = currentPos;
 
