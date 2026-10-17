@@ -1,0 +1,108 @@
+{
+  "title": "CQG Multitrack Session",
+  "tracks": [
+    {
+      "name": "Alex_P",
+      "url": "voice3.mp3",
+      "offset": 1.5385,
+      "color": "#ec4899",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Alex_V",
+      "url": "alex_v3.mp3",
+      "offset": 0.0,
+      "color": "#ec4899",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Yilei_P",
+      "url": "yilei_p3.mp3",
+      "offset": 1.5385,
+      "color": "#8b5cf6",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Yilei_V",
+      "url": "yilei_v4.mp3",
+      "offset": 0.0,
+      "color": "#Bb5cf6",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Uekawa_P",
+      "url": "uekawa_p.mp3",
+      "offset": 1.5385,
+      "color": "#c471ed",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Uekawa_V",
+      "url": "uekawa_v.mp3",
+      "offset": 0.0,
+      "color": "#c471ed",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Piano",
+      "url": "piano3.mp3",
+      "offset": 1.5385,
+      "color": "#f7797d",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Bagpipe",
+      "url": "bagpipe3.mp3",
+      "offset": 1.5385,
+      "color": "#00f2fe",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Bass",
+      "url": "bass3.mp3",
+      "offset": 1.5385,
+      "color": "#38ef7d",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    }
+  ],
+  "markers": [
+    {
+      "name": "Start",
+      "time": 0.0
+    },
+    {
+      "name": "2nd V",
+      "time": 118.22
+    },
+    {
+      "name": "sync1",
+      "time": 177.53
+    },
+    {
+      "name": "push",
+      "time": 214.33
+    },
+    {
+      "name": "sync2",
+      "time": 215.23
+    }
+  ]
+}
