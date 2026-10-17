@@ -126,6 +126,7 @@ class AudioEngine {
 
     this.isPlaying = false;
     this.isRecording = false;
+    this.isRecordingMode = false;
     this.playheadPosition = 0; // In seconds
     this.playbackStartTime = 0; // audioCtx.currentTime when playback started
     this.playbackStartOffset = 0; // Playhead position when playback started
@@ -150,6 +151,10 @@ class AudioEngine {
   }
 
   setPlaybackAudioSession() {
+    if (this.isRecording || this.isRecordingMode) {
+      this.setPlayAndRecordAudioSession();
+      return;
+    }
     if (typeof navigator !== 'undefined' && navigator.audioSession) {
       try {
         navigator.audioSession.type = 'playback';
@@ -159,9 +164,23 @@ class AudioEngine {
     }
   }
 
+  setPlayAndRecordAudioSession() {
+    if (typeof navigator !== 'undefined' && navigator.audioSession) {
+      try {
+        navigator.audioSession.type = 'play-and-record';
+      } catch (e) {
+        console.warn('Setting navigator.audioSession play-and-record failed:', e);
+      }
+    }
+  }
+
   initTouchUnlockListeners() {
     const unlockHandler = () => {
-      this.setPlaybackAudioSession();
+      if (this.isRecording || this.isRecordingMode) {
+        this.setPlayAndRecordAudioSession();
+      } else {
+        this.setPlaybackAudioSession();
+      }
       this.ensureAudioContextUnlocked();
     };
 
@@ -171,7 +190,11 @@ class AudioEngine {
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        this.setPlaybackAudioSession();
+        if (this.isRecording || this.isRecordingMode) {
+          this.setPlayAndRecordAudioSession();
+        } else {
+          this.setPlaybackAudioSession();
+        }
         if (this.audioCtx && this.isPlaying) {
           if (this.audioCtx.state === 'suspended' || this.audioCtx.state === 'interrupted') {
             this.audioCtx.resume().catch(() => {});
@@ -191,7 +214,15 @@ class AudioEngine {
         console.error('Web Audio API is not supported in this browser.');
         return null;
       }
-      this.audioCtx = new AudioCtxClass();
+      try {
+        this.audioCtx = new AudioCtxClass({ sampleRate: 44100, latencyHint: 'interactive' });
+      } catch (_) {
+        try {
+          this.audioCtx = new AudioCtxClass({ latencyHint: 'interactive' });
+        } catch (__) {
+          this.audioCtx = new AudioCtxClass();
+        }
+      }
 
       this.masterGain = this.audioCtx.createGain();
       this.masterGain.gain.value = this.masterVolume;

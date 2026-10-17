@@ -644,17 +644,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function refreshAudioInputDevices() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
     try {
+      // Ensure iOS audioSession is in play-and-record mode BEFORE enumerating/probing
+      audio.isRecordingMode = true;
+      audio.setPlayAndRecordAudioSession();
+
       let devices = await navigator.mediaDevices.enumerateDevices();
       let audioInputs = devices.filter(d => d.kind === 'audioinput');
 
       // If device labels are blank, prompt briefly for mic permission
       if (audioInputs.length > 0 && !audioInputs[0].label) {
         try {
-          const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          if (typeof navigator !== 'undefined' && navigator.audioSession) {
+            try { navigator.audioSession.type = 'play-and-record'; } catch (_) {}
+          }
+          const tempStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              sampleRate: { ideal: 44100 },
+              echoCancellation: false,
+              autoGainControl: false,
+              noiseSuppression: false
+            }
+          });
           tempStream.getTracks().forEach(t => t.stop());
           devices = await navigator.mediaDevices.enumerateDevices();
           audioInputs = devices.filter(d => d.kind === 'audioinput');
-        } catch (_) {}
+        } catch (_) {
+          try {
+            const fallbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            fallbackStream.getTracks().forEach(t => t.stop());
+            devices = await navigator.mediaDevices.enumerateDevices();
+            audioInputs = devices.filter(d => d.kind === 'audioinput');
+          } catch (e2) {
+            console.warn('Mic permission probe failed:', e2);
+          }
+        }
       }
 
       if (recordDeviceSelect) {
@@ -662,15 +685,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (audioInputs.length === 0) {
           const opt = document.createElement('option');
           opt.value = '';
-          opt.textContent = 'Default Microphone';
+          opt.textContent = '📱 Built-in Phone Mic (44.1kHz CD Quality)';
           recordDeviceSelect.appendChild(opt);
         } else {
-          audioInputs.forEach((dev, idx) => {
+          // Identify devices:
+          // Distinguish Bluetooth headset vs Built-in phone mic
+          let preferredDeviceId = null;
+
+          const classified = audioInputs.map((dev, idx) => {
+            const label = dev.label || `Microphone ${idx + 1}`;
+            const isBt = /bluetooth|headset|hands-free|sco|powerbeat|airpod|galaxy\s*buds|pixel\s*buds|wh-|wf-|bose|wireless/i.test(label);
+            const isInternal = /built-in|internal|phone|default|iphone|front|back|microphone$/i.test(label) && !isBt;
+            return { dev, label, isBt, isInternal };
+          });
+
+          // Preferred mic is internal phone mic, or first non-bluetooth mic
+          const builtIn = classified.find(c => c.isInternal) || classified.find(c => !c.isBt) || classified[0];
+          if (builtIn) {
+            preferredDeviceId = builtIn.dev.deviceId;
+          }
+
+          classified.forEach((item) => {
             const opt = document.createElement('option');
-            opt.value = dev.deviceId;
-            opt.textContent = dev.label || `Microphone ${idx + 1}`;
+            opt.value = item.dev.deviceId;
+
+            if (item.isInternal || (builtIn && item.dev.deviceId === builtIn.dev.deviceId)) {
+              opt.textContent = `📱 ${item.label || 'Built-in Phone Mic'} (44.1kHz CD Quality — Recommended)`;
+            } else if (item.isBt) {
+              opt.textContent = `🎧 ${item.label} (16kHz Bluetooth Voice Mode)`;
+            } else {
+              opt.textContent = `🎤 ${item.label}`;
+            }
+
             recordDeviceSelect.appendChild(opt);
           });
+
+          // Default to the Built-in Phone Mic:
+          // Keeps Bluetooth headphones in A2DP stereo (44.1kHz CD quality music playback) without dropping to SCO!
+          if (preferredDeviceId) {
+            recordDeviceSelect.value = preferredDeviceId;
+          }
         }
       }
     } catch (err) {
@@ -786,10 +840,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (btnRecord) btnRecord.classList.remove('recording');
     isRecording = false;
     recordingState = 'idle';
+
+    audio.isRecording = false;
+    audio.isRecordingMode = false;
+    audio.setPlaybackAudioSession();
   }
 
   function cancelRecording() {
     audio.isRecording = false;
+    audio.isRecordingMode = false;
+    audio.setPlaybackAudioSession();
     audio.stop();
     cleanupRecordingNodes();
     showToast('Recording cancelled', 'info');
@@ -805,8 +865,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const use4ClickSync = record4ClickSync ? record4ClickSync.checked : true;
 
     try {
-      // 1. Acquire mic stream without browser audio DSP filters for pure transient response
+      // 1. Enter recording mode and switch iOS AudioSession to play-and-record
+      audio.isRecordingMode = true;
+      audio.isRecording = true;
+      audio.setPlayAndRecordAudioSession();
+
+      // 2. Acquire mic stream without browser audio DSP filters for pure transient response & 44.1kHz CD quality
       const audioConstraints = {
+        sampleRate: { ideal: 44100 },
+        channelCount: { ideal: 1 },
         echoCancellation: false,
         autoGainControl: false,
         noiseSuppression: false
@@ -818,17 +885,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       try {
         recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       } catch (e1) {
-        // Fallback to basic audio constraint if specific constraints rejected on Android
-        recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.warn('Initial constraints with deviceId failed, retrying ideal 44100:', e1);
+        try {
+          recStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              sampleRate: { ideal: 44100 },
+              echoCancellation: false,
+              autoGainControl: false,
+              noiseSuppression: false
+            }
+          });
+        } catch (e2) {
+          console.warn('Retrying basic audio getUserMedia:', e2);
+          recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
       }
 
-      // 2. Obtain master AudioContext and ensure it is active
+      // 3. Obtain master AudioContext and ensure it is active
       recAudioCtx = audio.getOrCreateAudioContext();
       if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
         await recAudioCtx.resume();
       }
 
-      audio.isRecording = true;
       isRecording = true;
       if (btnRecord) btnRecord.classList.add('recording');
       if (recordingHUD) {
@@ -844,6 +922,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (err) {
       console.error('Failed to start recording:', err);
       audio.isRecording = false;
+      audio.isRecordingMode = false;
+      audio.setPlaybackAudioSession();
       cleanupRecordingNodes();
       showToast(`Microphone error: ${err.message}`, 'error', 4500);
     }
@@ -1282,6 +1362,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (isRecording) {
         stopRecording();
       } else {
+        audio.isRecordingMode = true;
+        audio.setPlayAndRecordAudioSession();
         if (recordSetupModal) {
           recordSetupModal.classList.remove('hidden');
           recordSetupModal.style.display = 'flex';
@@ -1295,12 +1377,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     btnCloseRecordSetupModal.addEventListener('click', () => {
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
+      audio.isRecordingMode = false;
+      audio.setPlaybackAudioSession();
     });
   }
   if (btnCancelRecordSetup && recordSetupModal) {
     btnCancelRecordSetup.addEventListener('click', () => {
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
+      audio.isRecordingMode = false;
+      audio.setPlaybackAudioSession();
     });
   }
   if (btnStartRecordingAction) {
