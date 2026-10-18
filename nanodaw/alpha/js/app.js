@@ -703,6 +703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let recAudioCtx = null;
   let recMicSource = null;
   let recScriptProcessor = null;
+  let recWorkletNode = null;
   let recSilentGain = null;
 
   let pass1AudioChunks = [];
@@ -723,6 +724,388 @@ document.addEventListener('DOMContentLoaded', async () => {
   let pass2StreamStartTime = null;
   let pass2DownbeatScheduledTime = null;
   let recordingStartPlayhead = 0;
+
+  // --- High-Performance Batched Zero-Allocation Recording Store ---
+  class BatchedAudioStore {
+    constructor(segmentSize = 524288, initialSegments = 4) {
+      this.segmentSize = segmentSize; // ~11.88 sec per segment at 44.1kHz (2 MB)
+      this.activeSegments = [];
+      this.standbySegments = [];
+      this.totalSamples = 0;
+      this.currentSegWriteIndex = 0;
+
+      for (let i = 0; i < initialSegments; i++) {
+        this.standbySegments.push(new Float32Array(this.segmentSize));
+      }
+    }
+
+    prepareAheadOfTime(minStandby = 4) {
+      while (this.standbySegments.length < minStandby) {
+        this.standbySegments.push(new Float32Array(this.segmentSize));
+      }
+    }
+
+    ensureStandbyCapacity() {
+      // Proactively ensure at least 2 standby segments (~24s headroom) are ready in advance
+      while (this.standbySegments.length < 2) {
+        this.standbySegments.push(new Float32Array(this.segmentSize));
+      }
+    }
+
+    reset() {
+      while (this.activeSegments.length > 0) {
+        this.standbySegments.push(this.activeSegments.pop());
+      }
+      this.totalSamples = 0;
+      this.currentSegWriteIndex = 0;
+      this.prepareAheadOfTime(4);
+    }
+
+    append(chunk, validLength) {
+      const len = validLength !== undefined ? validLength : chunk.length;
+      let srcOffset = 0;
+
+      while (srcOffset < len) {
+        if (this.activeSegments.length === 0 || this.currentSegWriteIndex >= this.segmentSize) {
+          if (this.standbySegments.length === 0) {
+            this.standbySegments.push(new Float32Array(this.segmentSize));
+          }
+          const nextSeg = this.standbySegments.shift();
+          this.activeSegments.push(nextSeg);
+          this.currentSegWriteIndex = 0;
+          this.ensureStandbyCapacity();
+        }
+
+        const currentSeg = this.activeSegments[this.activeSegments.length - 1];
+        const spaceLeft = this.segmentSize - this.currentSegWriteIndex;
+        const copyLen = Math.min(len - srcOffset, spaceLeft);
+
+        currentSeg.set(chunk.subarray(srcOffset, srcOffset + copyLen), this.currentSegWriteIndex);
+        this.currentSegWriteIndex += copyLen;
+        srcOffset += copyLen;
+        this.totalSamples += copyLen;
+
+        // Proactively allocate next buffer early when passing half segment
+        if (this.currentSegWriteIndex > this.segmentSize / 2) {
+          this.ensureStandbyCapacity();
+        }
+      }
+    }
+
+    toFlatArray(startSample = 0, endSample = null) {
+      const end = (endSample !== null && endSample <= this.totalSamples) ? endSample : this.totalSamples;
+      const start = Math.max(0, startSample);
+      const count = Math.max(0, end - start);
+      if (count === 0) return new Float32Array(0);
+
+      const out = new Float32Array(count);
+      let outOffset = 0;
+      let segStartGlobal = 0;
+
+      for (let s = 0; s < this.activeSegments.length; s++) {
+        const seg = this.activeSegments[s];
+        const segLen = (s === this.activeSegments.length - 1) ? this.currentSegWriteIndex : this.segmentSize;
+        const segEndGlobal = segStartGlobal + segLen;
+
+        if (segEndGlobal > start && segStartGlobal < end) {
+          const segLocalStart = Math.max(0, start - segStartGlobal);
+          const segLocalEnd = Math.min(segLen, end - segStartGlobal);
+          const copyCount = segLocalEnd - segLocalStart;
+
+          out.set(seg.subarray(segLocalStart, segLocalEnd), outOffset);
+          outOffset += copyCount;
+        }
+        segStartGlobal = segEndGlobal;
+        if (segStartGlobal >= end) break;
+      }
+      return out;
+    }
+  }
+
+  const pass1AudioStore = new BatchedAudioStore();
+  const pass2AudioStore = new BatchedAudioStore();
+
+  let workletInitPromise = null;
+
+  async function ensureRecorderWorklet(ctx) {
+    if (!ctx || !ctx.audioWorklet || typeof ctx.audioWorklet.addModule !== 'function') {
+      return false;
+    }
+    if (workletInitPromise) return await workletInitPromise;
+
+    workletInitPromise = (async () => {
+      try {
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js');
+        return true;
+      } catch (err1) {
+        console.warn('[Recorder] External worklet file load failed, attempting Blob URL:', err1);
+        try {
+          const inlineWorkletCode = `
+            class NanodawRecorderProcessor extends AudioWorkletProcessor {
+              constructor() {
+                super();
+                this.chunkSize = 4096;
+                this.bufferPool = [];
+                for (let i = 0; i < 8; i++) this.bufferPool.push(new Float32Array(this.chunkSize));
+                this.activeBuffer = this.bufferPool.pop();
+                this.writeIndex = 0;
+                this.isRecording = true;
+                this.totalSamplesProcessed = 0;
+                this.detectTransients = false;
+                this.lastTransientSample = -999999;
+                this.minRefractorySamples = 6000;
+                this.ambientFloor = 0.005;
+
+                this.port.onmessage = (e) => {
+                  const data = e.data;
+                  if (!data) return;
+                  if (data.type === 'recycle_buffer' && data.buffer) {
+                    if (data.buffer.byteLength === this.chunkSize * 4) {
+                      this.bufferPool.push(new Float32Array(data.buffer));
+                    }
+                  } else if (data.type === 'set_config') {
+                    if (typeof data.detectTransients === 'boolean') this.detectTransients = data.detectTransients;
+                    if (typeof data.isRecording === 'boolean') this.isRecording = data.isRecording;
+                    if (typeof data.resetSampleCounter === 'boolean' && data.resetSampleCounter) {
+                      this.totalSamplesProcessed = 0;
+                      this.lastTransientSample = -999999;
+                      this.writeIndex = 0;
+                    }
+                  } else if (data.type === 'flush') {
+                    this.flushPartial();
+                  }
+                };
+              }
+
+              flushPartial() {
+                if (this.writeIndex > 0 && this.activeBuffer) {
+                  const validSamples = this.writeIndex;
+                  const toSend = this.activeBuffer;
+                  this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+                  this.writeIndex = 0;
+                  this.port.postMessage({
+                    type: 'audio_chunk',
+                    buffer: toSend,
+                    length: validSamples,
+                    sampleOffset: this.totalSamplesProcessed - validSamples
+                  }, [toSend.buffer]);
+                }
+              }
+
+              process(inputs) {
+                if (!this.isRecording) return true;
+                const inputChannel = inputs[0] ? inputs[0][0] : null;
+                if (!inputChannel || inputChannel.length === 0) return true;
+
+                const len = inputChannel.length;
+                let readIdx = 0;
+
+                if (this.detectTransients) {
+                  let peak = 0;
+                  let diffSum = 0;
+                  let sumSq = 0;
+                  for (let i = 0; i < len; i++) {
+                    const val = inputChannel[i];
+                    const absVal = Math.abs(val);
+                    if (absVal > peak) peak = absVal;
+                    sumSq += val * val;
+                    if (i > 0) diffSum += Math.abs(val - inputChannel[i - 1]);
+                  }
+                  const rms = Math.sqrt(sumSq / len);
+                  const hf = diffSum / len;
+                  this.ambientFloor = 0.95 * this.ambientFloor + 0.05 * rms;
+
+                  const currentSamplePos = this.totalSamplesProcessed;
+                  if (peak > 0.025 && (peak > this.ambientFloor * 1.6 || hf > 0.007)) {
+                    if (currentSamplePos - this.lastTransientSample > this.minRefractorySamples) {
+                      this.lastTransientSample = currentSamplePos;
+                      this.port.postMessage({
+                        type: 'transient',
+                        samplePos: currentSamplePos,
+                        peak: peak
+                      });
+                    }
+                  }
+                }
+
+                while (readIdx < len) {
+                  if (!this.activeBuffer) {
+                    this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+                    this.writeIndex = 0;
+                  }
+                  const available = this.chunkSize - this.writeIndex;
+                  const toCopy = Math.min(len - readIdx, available);
+                  for (let i = 0; i < toCopy; i++) {
+                    this.activeBuffer[this.writeIndex + i] = inputChannel[readIdx + i];
+                  }
+                  this.writeIndex += toCopy;
+                  readIdx += toCopy;
+                  this.totalSamplesProcessed += toCopy;
+
+                  if (this.writeIndex >= this.chunkSize) {
+                    const fullBuf = this.activeBuffer;
+                    this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+                    this.writeIndex = 0;
+                    this.port.postMessage({
+                      type: 'audio_chunk',
+                      buffer: fullBuf,
+                      length: this.chunkSize,
+                      sampleOffset: this.totalSamplesProcessed - this.chunkSize
+                    }, [fullBuf.buffer]);
+                  }
+                }
+                return true;
+              }
+            }
+            registerProcessor('nanodaw-recorder-processor', NanodawRecorderProcessor);
+          `;
+          const blob = new Blob([inlineWorkletCode], { type: 'application/javascript' });
+          const blobUrl = URL.createObjectURL(blob);
+          await ctx.audioWorklet.addModule(blobUrl);
+          URL.revokeObjectURL(blobUrl);
+          console.log('[Recorder] AudioWorklet registered from inline Blob URL');
+          return true;
+        } catch (err2) {
+          console.warn('[Recorder] AudioWorklet unavailable, falling back to ScriptProcessor:', err2);
+          return false;
+        }
+      }
+    })();
+
+    return await workletInitPromise;
+  }
+
+  let activeTargetStore = pass2AudioStore;
+  let activeTransientCallback = null;
+
+  async function attachRecordingPipeline({ detectTransients = false, targetStore = pass2AudioStore, onTransient = null }) {
+    activeTargetStore = targetStore;
+    activeTransientCallback = onTransient;
+
+    if (!recMicSource && recStream && recAudioCtx) {
+      recMicSource = recAudioCtx.createMediaStreamSource(recStream);
+    }
+    if (!recSilentGain && recAudioCtx) {
+      recSilentGain = recAudioCtx.createGain();
+      recSilentGain.gain.value = 0.00001; // Avoid Chromium silent node pruning
+    }
+
+    const workletOk = await ensureRecorderWorklet(recAudioCtx);
+    if (workletOk) {
+      if (!recWorkletNode) {
+        recWorkletNode = new AudioWorkletNode(recAudioCtx, 'nanodaw-recorder-processor');
+        recMicSource.connect(recWorkletNode);
+        recWorkletNode.connect(recSilentGain);
+        recSilentGain.connect(recAudioCtx.destination);
+        window.__nanodaw_worklet = recWorkletNode;
+
+        recWorkletNode.port.onmessage = (e) => {
+          const data = e.data;
+          if (!data) return;
+
+          if (data.type === 'transient') {
+            if (activeTransientCallback) {
+              const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
+              activeTransientCallback(now, data.samplePos);
+            }
+          } else if (data.type === 'audio_chunk') {
+            const chunk = data.buffer;
+            const len = data.length || chunk.length;
+
+            if (recordingState === 'pass1') {
+              if (pass1StreamStartTime === null && recAudioCtx) {
+                pass1StreamStartTime = recAudioCtx.currentTime;
+              }
+              totalPass1Samples += len;
+            } else {
+              if (pass2StreamStartTime === null && recAudioCtx) {
+                pass2StreamStartTime = recAudioCtx.currentTime;
+              }
+              totalPass2Samples += len;
+            }
+
+            if (activeTargetStore) {
+              activeTargetStore.append(chunk, len);
+            }
+
+            // Zero-allocation: recycle the transferred buffer back to worklet's standby pool
+            try {
+              recWorkletNode.port.postMessage({ type: 'recycle_buffer', buffer: chunk }, [chunk.buffer]);
+            } catch (_) {}
+          }
+        };
+      }
+
+      recWorkletNode.port.postMessage({
+        type: 'set_config',
+        isRecording: true,
+        detectTransients: !!detectTransients,
+        resetSampleCounter: true
+      });
+
+    } else {
+      // Robust fallback to 4096-sample ScriptProcessorNode
+      if (!recScriptProcessor) {
+        recScriptProcessor = recAudioCtx.createScriptProcessor(4096, 1, 1);
+        recMicSource.connect(recScriptProcessor);
+        recScriptProcessor.connect(recSilentGain);
+        recSilentGain.connect(recAudioCtx.destination);
+        window.__nanodaw_processor = recScriptProcessor;
+      }
+
+      recScriptProcessor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        const len = input.length;
+
+        if (recordingState === 'pass1') {
+          if (pass1StreamStartTime === null && recAudioCtx) {
+            pass1StreamStartTime = recAudioCtx.currentTime;
+          }
+          totalPass1Samples += len;
+        } else {
+          if (pass2StreamStartTime === null && recAudioCtx) {
+            pass2StreamStartTime = recAudioCtx.currentTime;
+          }
+          totalPass2Samples += len;
+        }
+
+        if (activeTargetStore) {
+          activeTargetStore.append(input, len);
+        }
+
+        if (detectTransients && activeTransientCallback) {
+          let peak = 0;
+          for (let i = 0; i < len; i++) {
+            const a = Math.abs(input[i]);
+            if (a > peak) peak = a;
+          }
+          if (peak > 0.025) {
+            const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
+            activeTransientCallback(now, (recordingState === 'pass1' ? totalPass1Samples : totalPass2Samples));
+          }
+        }
+      };
+    }
+  }
+
+  // Tap support: User can tap on HUD / beads on screen as an explicit click
+  const onHudTap = (evt) => {
+    if (recordingState !== 'pass1' && recordingState !== 'pass2_prelude') return;
+    if (evt.target.closest('#btnStopRecordingAction')) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
+    if (recordingState === 'pass1') {
+      if (typeof registerClickGlobal === 'function') registerClickGlobal(now, pass1AudioStore.totalSamples);
+    } else if (recordingState === 'pass2_prelude') {
+      pass2ClickEvents.push({ ctxTime: now, samplePos: pass2AudioStore.totalSamples });
+    }
+  };
+  let registerClickGlobal = null;
+  if (hudInstructionBox) {
+    hudInstructionBox.addEventListener('pointerdown', onHudTap);
+  }
 
   // Realtime Live Metronome
   let liveMetronomeIntervalId = null;
@@ -1216,6 +1599,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudTimerIntervalId = null;
     }
 
+    if (recWorkletNode) {
+      try {
+        recWorkletNode.port.postMessage({ type: 'set_config', isRecording: false, detectTransients: false });
+        recWorkletNode.disconnect();
+      } catch (_) {}
+      recWorkletNode = null;
+    }
+
     if (recScriptProcessor) {
       try {
         recScriptProcessor.onaudioprocess = null;
@@ -1280,7 +1671,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     isTrackSyncTake = true;
     trackSyncGuideIndex = guideTrackIdx;
     recordingState = 'recording_take';
-    pass2AudioChunks = [];
+    pass2AudioStore.reset();
+    pass2AudioStore.prepareAheadOfTime(4);
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
@@ -1298,27 +1690,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudClickBeads.style.display = 'none';
     }
 
-    recMicSource = recAudioCtx.createMediaStreamSource(recStream);
-    recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
-    recSilentGain = recAudioCtx.createGain();
-    recSilentGain.gain.value = 0.00001;
+    await attachRecordingPipeline({
+      detectTransients: false,
+      targetStore: pass2AudioStore
+    });
 
-    recScriptProcessor.onaudioprocess = (e) => {
-      if (pass2StreamStartTime === null && recAudioCtx) {
-        pass2StreamStartTime = recAudioCtx.currentTime;
-      }
-      const input = e.inputBuffer.getChannelData(0);
-      const copy = new Float32Array(input.length);
-      copy.set(input);
-      pass2AudioChunks.push(copy);
-      totalPass2Samples += input.length;
-    };
-
-    recMicSource.connect(recScriptProcessor);
-    recScriptProcessor.connect(recSilentGain);
-    recSilentGain.connect(recAudioCtx.destination);
-
-    window.__nanodaw_processor = recScriptProcessor;
     window.__nanodaw_stream = recStream;
     window.__nanodaw_mic = recMicSource;
 
@@ -1401,7 +1777,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (use2PassSync && isTrackGuide && selectedGuideTrackIdx !== '') {
         await startTrackSyncRecording(parseInt(selectedGuideTrackIdx, 10));
       } else if (use2PassSync) {
-        startPass1Calibration();
+        await startPass1Calibration();
       } else {
         await startStandardPrelude();
       }
@@ -1416,9 +1792,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // --- Pass 1: Guide Beat & Calibration (Synth Beeps or Backing Track) ---
-  function startPass1Calibration() {
+  async function startPass1Calibration() {
     recordingState = 'pass1';
-    pass1AudioChunks = [];
+    pass1AudioStore.reset();
+    pass1AudioStore.prepareAheadOfTime(4);
     pass1ClickEvents = [];
     totalPass1Samples = 0;
     pass1StreamStartTime = null;
@@ -1431,20 +1808,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const isSynthGuide = guideModeSynth ? guideModeSynth.checked : true;
 
-    // Hook up mic audio processing
-    recMicSource = recAudioCtx.createMediaStreamSource(recStream);
-    recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
-    recSilentGain = recAudioCtx.createGain();
-    recSilentGain.gain.value = 0.00001; // Avoid Chromium silent node pruning
-
-    // Prevent GC in V8 mobile
-    window.__nanodaw_processor = recScriptProcessor;
-    window.__nanodaw_stream = recStream;
-    window.__nanodaw_mic = recMicSource;
-
     let lastTransientTime = 0;
     const minRefractorySec = 0.14; // Refractory debounce window between clicks
-    let ambientFloor = 0.005;
 
     function registerClick(now, samplePos) {
       if (recordingState !== 'pass1') return;
@@ -1475,62 +1840,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         }, waitTailMs);
       }
     }
+    registerClickGlobal = registerClick;
 
-    recScriptProcessor.onaudioprocess = (e) => {
-      if (pass1StreamStartTime === null && recAudioCtx) {
-        pass1StreamStartTime = recAudioCtx.currentTime;
-      }
-      const input = e.inputBuffer.getChannelData(0);
-      const copy = new Float32Array(input.length);
-      copy.set(input);
-      pass1AudioChunks.push(copy);
-      const currentSampleOffset = totalPass1Samples;
-      totalPass1Samples += input.length;
+    await attachRecordingPipeline({
+      detectTransients: true,
+      targetStore: pass1AudioStore,
+      onTransient: registerClick
+    });
 
-      if (recordingState !== 'pass1') return;
-
-      // Real-time transient analysis
-      let peak = 0;
-      let diffSum = 0;
-      let sumSq = 0;
-      for (let i = 0; i < input.length; i++) {
-        const absVal = Math.abs(input[i]);
-        if (absVal > peak) peak = absVal;
-        sumSq += input[i] * input[i];
-        if (i > 0) diffSum += Math.abs(input[i] - input[i - 1]);
-      }
-      const rms = Math.sqrt(sumSq / input.length);
-      const hfMetric = diffSum / input.length;
-      ambientFloor = 0.95 * ambientFloor + 0.05 * rms;
-
-      const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
-      if (peak > 0.025 && (peak > ambientFloor * 1.6 || hfMetric > 0.007) && (now - lastTransientTime > minRefractorySec)) {
-        registerClick(now, currentSampleOffset);
-      }
-    };
-
-    // Tap support: User can tap on HUD / beads on screen as an explicit click
-    const onHudTap = (evt) => {
-      if (recordingState !== 'pass1' && recordingState !== 'pass2_prelude') return;
-      if (evt.target.closest('#btnStopRecordingAction')) return;
-      evt.preventDefault();
-      evt.stopPropagation();
-      const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
-      if (now - lastTransientTime > minRefractorySec) {
-        if (recordingState === 'pass1') {
-          registerClick(now, totalPass1Samples);
-        } else if (recordingState === 'pass2_prelude') {
-          pass2ClickEvents.push({ ctxTime: now, samplePos: totalPass2Samples });
-        }
-      }
-    };
-    if (hudInstructionBox) {
-      hudInstructionBox.addEventListener('pointerdown', onHudTap);
-    }
-
-    recMicSource.connect(recScriptProcessor);
-    recScriptProcessor.connect(recSilentGain);
-    recSilentGain.connect(recAudioCtx.destination);
+    window.__nanodaw_stream = recStream;
+    window.__nanodaw_mic = recMicSource;
 
     if (pass1StreamStartTime === null) {
       pass1StreamStartTime = recAudioCtx.currentTime;
@@ -1625,14 +1944,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
     const dtSamples = Math.round(dt * sampleRate);
 
-    // Concatenate all Pass 1 recorded PCM
-    const totalP1 = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
-    const p1Full = new Float32Array(totalP1);
-    let p1Offset = 0;
-    for (const chunk of pass1AudioChunks) {
-      p1Full.set(chunk, p1Offset);
-      p1Offset += chunk.length;
-    }
+    // Concatenate all Pass 1 recorded PCM in one batched operation
+    const p1Full = pass1AudioStore.toFlatArray();
+    const totalP1 = p1Full.length;
 
     const searchWin = Math.round(0.20 * dtSamples);
     const detectedTapPeaks = [];
@@ -1724,14 +2038,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isRecording) return;
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
-    // 1. Gather all recorded PCM from Pass 1
-    const totalP1 = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
-    const p1Full = new Float32Array(totalP1);
-    let p1Offset = 0;
-    for (const chunk of pass1AudioChunks) {
-      p1Full.set(chunk, p1Offset);
-      p1Offset += chunk.length;
-    }
+    // 1. Gather all recorded PCM from Pass 1 in one batched operation
+    const p1Full = pass1AudioStore.toFlatArray();
+    const totalP1 = p1Full.length;
 
     // 2. High-precision transient peak detection for all 4 taps in p1Full
     const exactPeaks = [];
@@ -1853,7 +2162,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx.sampleRate;
 
     // Prepare Pass 2 recording pipeline
-    pass2AudioChunks = [];
+    pass2AudioStore.reset();
+    pass2AudioStore.prepareAheadOfTime(4);
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
@@ -1867,42 +2177,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudClickBeads.style.display = 'flex';
     }
 
-    let p2LastTransientTime = 0;
-    let p2AmbientFloor = 0.005;
-
-    recScriptProcessor.onaudioprocess = (e) => {
-      if (pass2StreamStartTime === null && recAudioCtx) {
-        pass2StreamStartTime = recAudioCtx.currentTime;
-      }
-      const input = e.inputBuffer.getChannelData(0);
-      const copy = new Float32Array(input.length);
-      copy.set(input);
-      pass2AudioChunks.push(copy);
-      const currentOffset = totalPass2Samples;
-      totalPass2Samples += input.length;
-
-      // Real-time transient tracking during Pass 2 prelude
-      if (recordingState === 'pass2_prelude') {
-        let peak = 0;
-        let diffSum = 0;
-        let sumSq = 0;
-        for (let i = 0; i < input.length; i++) {
-          const absVal = Math.abs(input[i]);
-          if (absVal > peak) peak = absVal;
-          sumSq += input[i] * input[i];
-          if (i > 0) diffSum += Math.abs(input[i] - input[i - 1]);
-        }
-        const rms = Math.sqrt(sumSq / input.length);
-        const hfMetric = diffSum / input.length;
-        p2AmbientFloor = 0.95 * p2AmbientFloor + 0.05 * rms;
-
-        const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
-        if (peak > 0.020 && (peak > p2AmbientFloor * 1.5 || hfMetric > 0.006) && (now - p2LastTransientTime > 0.14)) {
-          p2LastTransientTime = now;
-          pass2ClickEvents.push({ ctxTime: now, samplePos: currentOffset });
+    await attachRecordingPipeline({
+      detectTransients: true,
+      targetStore: pass2AudioStore,
+      onTransient: (now, samplePos) => {
+        if (recordingState === 'pass2_prelude') {
+          pass2ClickEvents.push({ ctxTime: now, samplePos });
         }
       }
-    };
+    });
 
     // Schedule the 8-beat prelude in Web Audio
     const startPreludeTime = recAudioCtx.currentTime + 0.15;
@@ -1989,6 +2272,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
+      if (recWorkletNode) {
+        recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false });
+      }
       if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
       if (hudInstruction) hudInstruction.textContent = 'Recording live... Sing or play along!';
       if (hudClickBeads) {
@@ -2021,7 +2307,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dt = 60 / tempo;
     detectedIntervalSec = dt;
 
-    pass2AudioChunks = [];
+    pass2AudioStore.reset();
+    pass2AudioStore.prepareAheadOfTime(4);
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
@@ -2035,27 +2322,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudClickBeads.style.display = 'flex';
     }
 
-    recMicSource = recAudioCtx.createMediaStreamSource(recStream);
-    recScriptProcessor = recAudioCtx.createScriptProcessor(512, 1, 1);
-    recSilentGain = recAudioCtx.createGain();
-    recSilentGain.gain.value = 0.00001;
+    await attachRecordingPipeline({
+      detectTransients: false,
+      targetStore: pass2AudioStore
+    });
 
-    recScriptProcessor.onaudioprocess = (e) => {
-      if (pass2StreamStartTime === null && recAudioCtx) {
-        pass2StreamStartTime = recAudioCtx.currentTime;
-      }
-      const input = e.inputBuffer.getChannelData(0);
-      const copy = new Float32Array(input.length);
-      copy.set(input);
-      pass2AudioChunks.push(copy);
-      totalPass2Samples += input.length;
-    };
-
-    recMicSource.connect(recScriptProcessor);
-    recScriptProcessor.connect(recSilentGain);
-    recSilentGain.connect(recAudioCtx.destination);
-
-    window.__nanodaw_processor = recScriptProcessor;
     window.__nanodaw_stream = recStream;
     window.__nanodaw_mic = recMicSource;
 
@@ -2136,6 +2407,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     const wasTrackSync = isTrackSyncTake;
     const syncGuideIdx = trackSyncGuideIndex;
 
+    // Flush any pending trailing audio from worklet
+    if (recWorkletNode) {
+      try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
+    }
+    await new Promise(r => setTimeout(r, 20));
+
     // 3. Stop mic stream and processing nodes cleanly
     cleanupRecordingNodes();
 
@@ -2147,14 +2424,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let takePCM = null;
 
-    if (pass2AudioChunks.length > 0) {
-      const totalSamples = pass2AudioChunks.reduce((acc, c) => acc + c.length, 0);
-      const fullPass2 = new Float32Array(totalSamples);
-      let offset = 0;
-      for (const chunk of pass2AudioChunks) {
-        fullPass2.set(chunk, offset);
-        offset += chunk.length;
-      }
+    if (pass2AudioStore.totalSamples > 0) {
+      const fullPass2 = pass2AudioStore.toFlatArray();
+      const totalSamples = fullPass2.length;
 
       // If this was a Track Sync take, process it using peak alignment
       if (wasTrackSync && syncGuideIdx !== null) {
@@ -2258,15 +2530,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         takePCM = fullPass2;
       }
-    } else if (pass1AudioChunks.length > 0) {
+    } else if (pass1AudioStore.totalSamples > 0) {
       // Stopped during Pass 1: keep all audio captured in Pass 1!
-      const totalSamples = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
-      takePCM = new Float32Array(totalSamples);
-      let offset = 0;
-      for (const chunk of pass1AudioChunks) {
-        takePCM.set(chunk, offset);
-        offset += chunk.length;
-      }
+      takePCM = pass1AudioStore.toFlatArray();
     }
 
     // Fallback if no audio samples were captured
@@ -2504,6 +2770,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         switchRecordModalTab('record');
         populateSyncGuideTracks();
         updateRecordModalToggles();
+
+        // Proactively pre-allocate standby buffers and pre-warm AudioWorklet ahead of time!
+        pass1AudioStore.prepareAheadOfTime(4);
+        pass2AudioStore.prepareAheadOfTime(4);
+        const preCtx = audio.getOrCreateAudioContext();
+        if (preCtx) ensureRecorderWorklet(preCtx);
+
         if (recordSetupModal) {
           recordSetupModal.classList.remove('hidden');
           recordSetupModal.style.display = 'flex';
