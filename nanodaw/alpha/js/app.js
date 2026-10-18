@@ -734,21 +734,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let nextBeatTime = startTime;
     const scheduleAheadSec = 0.30;
+    let beatIndex = 0;
 
     function scheduleBeats() {
-      if (!isRecording || recordingState !== 'recording_take') {
+      // Keep metronome running through both Pass 2 count-in and live recording
+      if (!isRecording || (recordingState !== 'pass2_prelude' && recordingState !== 'recording_take')) {
         stopLiveMetronome();
         return;
       }
       const now = recAudioCtx ? recAudioCtx.currentTime : 0;
-      while (nextBeatTime < now + scheduleAheadSec) {
-        playSynthBeep(nextBeatTime, 1200, 0.05, liveMetronomeGainNode);
+      while (nextBeatTime < now - 0.1) {
         nextBeatTime += dt;
+        beatIndex++;
+      }
+      while (nextBeatTime < now + scheduleAheadSec) {
+        // High crisp click with measure accent on beat 1
+        const freq = (beatIndex % 4 === 0) ? 1600 : 1100;
+        playSynthBeep(nextBeatTime, freq, 0.045, liveMetronomeGainNode);
+        nextBeatTime += dt;
+        beatIndex++;
       }
     }
 
+    console.log(`[Live Metronome] Started for take at ${startTime.toFixed(3)}s, tempo: ${tempo} BPM (${dt.toFixed(3)}s), vol: ${linearVolume.toFixed(2)}`);
     scheduleBeats();
-    liveMetronomeIntervalId = setInterval(scheduleBeats, 40);
+    liveMetronomeIntervalId = setInterval(scheduleBeats, 35);
   }
 
   function stopLiveMetronome() {
@@ -932,13 +942,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       const osc = recAudioCtx.createOscillator();
       const g = recAudioCtx.createGain();
       osc.type = 'triangle'; // Richer harmonics than sine, clearly audible on mobile phone speakers
-      osc.frequency.setValueAtTime(freq, time);
-      g.gain.setValueAtTime(0.8, time);
-      g.gain.exponentialRampToValueAtTime(0.001, time + dur);
+      const playTime = Math.max(recAudioCtx.currentTime, time);
+      osc.frequency.setValueAtTime(freq, playTime);
+      g.gain.setValueAtTime(0.8, playTime);
+      g.gain.exponentialRampToValueAtTime(0.001, playTime + dur);
       osc.connect(g);
       g.connect(destNode || recAudioCtx.destination);
-      osc.start(time);
-      osc.stop(time + dur + 0.02);
+      osc.start(playTime);
+      osc.stop(playTime + dur + 0.02);
     } catch (e) {
       console.warn('Synth beep error:', e);
     }
@@ -1174,11 +1185,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         if (hudInstruction) hudInstruction.textContent = '4 clicks calibrated! Starting count-in...';
 
-        // Wait ~0.5s after 4th click, stop backing music and finish Pass 1
+        // Wait ~1.5 beats after 4th click to ensure full ringout is recorded, then stop backing music and finish Pass 1
+        const waitTailMs = Math.max(900, Math.round(1.5 * (detectedIntervalSec || 0.67) * 1000));
         pass1PostWaitTimeoutId = setTimeout(async () => {
           audio.stop();
           await finishPass1TrackGuide();
-        }, 500);
+        }, waitTailMs);
       }
     }
 
@@ -1286,8 +1298,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }, delayMs);
       }
 
-      // Schedule completion of Pass 1 after Beep 8 finishes
-      const pass1EndTime = pass1GuideStartTime + (8 * dt) + 0.250;
+      // Schedule completion of Pass 1 after Beep 8 finishes + extra recording buffer so 4th tap decay is never cut off
+      const pass1EndTime = pass1GuideStartTime + (9.2 * dt) + 0.350;
       const finishDelayMs = Math.max(0, (pass1EndTime - recAudioCtx.currentTime) * 1000);
 
       pass1PostWaitTimeoutId = setTimeout(async () => {
@@ -1366,19 +1378,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.log(`[Pass 1 Synth Guide] Authoritative tempo: ${dt.toFixed(4)}s (${Math.round(60 / dt)} BPM), Est. Latency: ${avgLatency}ms`);
 
     // Extract continuous user calibration audio slice
+    // From start of first beat (with 40ms attack approach) to 1.5 beats after the 4th beat
     const preLeadSamples = Math.min(detectedTapPeaks[0], Math.round(0.040 * sampleRate));
     const startSlice = Math.max(0, detectedTapPeaks[0] - preLeadSamples);
-    const postRingoutSamples = Math.min(totalP1 - detectedTapPeaks[3], Math.round(0.85 * dt * sampleRate));
+    const postRingoutSamples = Math.min(totalP1 - detectedTapPeaks[3], Math.round(1.50 * dt * sampleRate));
     const endSlice = Math.min(totalP1, detectedTapPeaks[3] + postRingoutSamples);
 
     const calibPCM = p1Full.slice(startSlice, endSlice);
 
-    // Apply gentle 3ms cosine fade-in and 15ms fade-out
+    // Apply gentle 3ms cosine fade-in and 25ms fade-out
     const fadeInSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.003));
     for (let i = 0; i < fadeInSamples; i++) {
       calibPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeInSamples)));
     }
-    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.015));
+    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.025));
     for (let i = 0; i < fadeOutSamples; i++) {
       const idx = calibPCM.length - 1 - i;
       calibPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeOutSamples)));
@@ -1489,7 +1502,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 4. Extract continuous user calibration audio slice
     const preLeadSamples = Math.min(exactPeaks[0], Math.round(0.040 * sampleRate));
     const startSlice = exactPeaks[0] - preLeadSamples;
-    const postRingoutSamples = Math.min(totalP1 - exactPeaks[3], Math.round(0.85 * dt * sampleRate));
+    const postRingoutSamples = Math.min(totalP1 - exactPeaks[3], Math.round(1.50 * dt * sampleRate));
     const endSlice = Math.min(totalP1, exactPeaks[3] + postRingoutSamples);
 
     const calibPCM = p1Full.slice(startSlice, endSlice);
@@ -1498,7 +1511,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     for (let i = 0; i < fadeInSamples; i++) {
       calibPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeInSamples)));
     }
-    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.015));
+    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.025));
     for (let i = 0; i < fadeOutSamples; i++) {
       const idx = calibPCM.length - 1 - i;
       calibPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeOutSamples)));
@@ -1645,8 +1658,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.seek(recordingStartPlayhead);
     audio.play(downbeatTime);
 
-    // Live metronome during take if requested in synth mode
-    if (guideModeSynth && guideModeSynth.checked && syncMetronomeOn && syncMetronomeOn.checked) {
+    // Live metronome during take if requested
+    const shouldMetronome = (syncMetronomeOn && syncMetronomeOn.checked);
+    if (shouldMetronome) {
       const metroVol = parseDbToLinear(syncMetronomeVolume ? syncMetronomeVolume.value : '0dB');
       const metroTempo = Math.round(60 / dt);
       startLiveMetronome(downbeatTime, metroTempo, metroVol);
@@ -1665,6 +1679,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       takeStartTime = performance.now();
       startHudTimer();
+
+      // Ensure live metronome is actively running if enabled
+      if (shouldMetronome && !liveMetronomeIntervalId) {
+        const metroVol = parseDbToLinear(syncMetronomeVolume ? syncMetronomeVolume.value : '0dB');
+        const metroTempo = Math.round(60 / dt);
+        startLiveMetronome(recAudioCtx.currentTime, metroTempo, metroVol);
+      }
     }, downbeatDelay);
   }
 
@@ -1744,7 +1765,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.play(downbeatTime);
 
     // Live metronome during take if requested in single-pass mode
-    if (singleMetronomeOn && singleMetronomeOn.checked) {
+    const shouldSingleMetro = (singleMetronomeOn && singleMetronomeOn.checked);
+    if (shouldSingleMetro) {
       const metroVol = parseDbToLinear(singleMetronomeVolume ? singleMetronomeVolume.value : '0dB');
       startLiveMetronome(downbeatTime, tempo, metroVol);
     }
@@ -1761,6 +1783,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       takeStartTime = performance.now();
       startHudTimer();
+
+      if (shouldSingleMetro && !liveMetronomeIntervalId) {
+        const metroVol = parseDbToLinear(singleMetronomeVolume ? singleMetronomeVolume.value : '0dB');
+        startLiveMetronome(recAudioCtx.currentTime, tempo, metroVol);
+      }
     }, downbeatDelay);
   }
 
