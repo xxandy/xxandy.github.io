@@ -96,9 +96,10 @@ class StateManager {
   /**
    * Load project data and merge with URL parameters
    */
-  initProject(projectData, projectUrl) {
+  initProject(projectData, projectUrl, isNew = false) {
     this.project = projectData;
     this.projectUrl = projectUrl;
+    this.isNewProject = Boolean(isNew);
 
     const tracks = projectData.tracks || [];
     this.tracksState = tracks.map((track, index) => ({
@@ -219,9 +220,11 @@ class StateManager {
   buildShareableUrl(includeCurrentTime = true) {
     const url = new URL(window.location.href);
 
-    // Keep project param if set
-    if (this.projectUrl) {
-      // If default demo.json, we can keep or omit, but keeping makes it unambiguous
+    if (this.isNewProject) {
+      url.searchParams.delete('project');
+      url.search = 'new' + (this.project?.tempo ? '&bpm=' + this.project.tempo : '');
+    } else if (this.projectUrl) {
+      url.searchParams.delete('new');
       url.searchParams.set('project', this.projectUrl);
     }
 

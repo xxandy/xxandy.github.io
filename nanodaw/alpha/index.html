@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=52">
+  <link rel="stylesheet" href="styles.css?v=53">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -20,7 +20,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v52</span>
+        <span class="version-badge" id="appVersionBadge">v53</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -447,17 +447,78 @@
           </div>
         </div>
 
+        <!-- nanodaw 2-pass sync Container -->
         <div style="background:rgba(239, 68, 68, 0.08); border:1px solid rgba(239, 68, 68, 0.25); border-radius:8px; padding:12px;">
           <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:600; font-size:13px; color:#fff;">
-            <input type="checkbox" id="record4ClickSync" checked style="width:16px; height:16px; accent-color:#ef4444; cursor:pointer;">
-            <span>Enable 4-Click-Sync <span style="font-size:10px; background:#ef4444; color:#fff; padding:2px 6px; border-radius:4px; margin-left:4px; font-weight:700;">EXCLUSIVE</span></span>
+            <input type="checkbox" id="record2PassSync" checked style="width:16px; height:16px; accent-color:#ef4444; cursor:pointer;">
+            <span>nanodaw 2-pass sync <span style="font-size:10px; background:#ef4444; color:#fff; padding:2px 6px; border-radius:4px; margin-left:4px; font-weight:700;">DEFAULT</span></span>
           </label>
-          <p style="margin:8px 0 0 26px; font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
-            Zero-latency calibration:
-            <br>1. Tap 4 sharp clicks (finger snap, pen tap, or tap on screen) along with the music to set tempo.
-            <br>2. System plays 4 synthesized beeps flowing seamlessly into your 4 clicks.
-            <br>3. Music drops in on the downbeat — the prelude is discarded and your take is synced with sample accuracy!
-          </p>
+
+          <!-- 2-Pass Options (visible when record2PassSync is checked) -->
+          <div id="container2PassSync" style="margin-top:12px; margin-left:26px; display:flex; flex-direction:column; gap:12px;">
+            <div style="font-size:11.5px; font-weight:600; color:var(--text-secondary);">Pass 1 Guide Beat:</div>
+
+            <!-- Option 1: Metronome Synth Beeps (Default) -->
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
+                <input type="radio" name="pass1GuideMode" id="guideModeSynth" value="synth" checked style="accent-color:#ef4444; cursor:pointer;">
+                <span>Metronome Synth Beeps</span>
+              </label>
+              <div id="guideSynthSubOptions" style="margin-left:22px; display:flex; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span>Tempo:</span>
+                  <input type="number" id="syncSynthTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
+                  <span>BPM (8 beeps: 4 count + 4 tap-along)</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#fff;">
+                    <input type="checkbox" id="syncMetronomeOn" checked style="accent-color:#ef4444; cursor:pointer;">
+                    <span>Metronome ON during take</span>
+                  </label>
+                  <div style="display:flex; align-items:center; gap:4px;">
+                    <span>Volume:</span>
+                    <input type="text" id="syncMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Option 2: Backing Track -->
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
+                <input type="radio" name="pass1GuideMode" id="guideModeTrack" value="track" style="accent-color:#ef4444; cursor:pointer;">
+                <span>Backing Track</span>
+              </label>
+              <div id="guideTrackSubOptions" style="margin-left:22px; display:none; align-items:center; gap:8px; font-size:11.5px; color:var(--text-secondary);">
+                <span>Guide Track:</span>
+                <select id="syncGuideTrackSelect" class="input-styled" style="padding:3px 8px; font-size:12px; max-width:200px;">
+                  <option value="">None</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Single-Pass Fallback (visible when record2PassSync is unchecked) -->
+          <div id="containerSinglePass" style="margin-top:12px; margin-left:26px; display:none; flex-direction:column; gap:10px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
+              <input type="checkbox" id="singleMetronomeOn" style="accent-color:#ef4444; cursor:pointer;">
+              <span>Metronome ON (realtime click during recording)</span>
+            </label>
+            <div id="singleMetronomeSubOptions" style="margin-left:22px; display:none; align-items:center; gap:12px; font-size:11.5px; color:var(--text-secondary);">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span>Tempo:</span>
+                <input type="number" id="singleMetronomeTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
+                <span>BPM</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:4px;">
+                <span>Volume:</span>
+                <input type="text" id="singleMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
+              </div>
+            </div>
+            <p style="margin:4px 0 0 0; font-size:11px; color:rgba(255,255,255,0.45); line-height:1.4;">
+              Single-pass mode relies on system-reported audio latency for track placement.
+            </p>
+          </div>
         </div>
 
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
@@ -481,7 +542,10 @@
     </div>
 
     <div class="hud-center" id="hudInstructionBox">
-      <span class="hud-instruction" id="hudInstruction">Tap 4 clicks with the rhythm...</span>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:2px;">
+        <span class="hud-instruction" id="hudInstruction">Tap 4 clicks with the rhythm...</span>
+        <span class="hud-latency-text" id="hudLatencyText" style="display:none; font-size:10px; color:rgba(255,255,255,0.65); font-family:monospace; line-height:1;"></span>
+      </div>
       <div class="click-beads-wrap" id="hudClickBeads">
         <span class="click-bead" id="bead1">1</span>
         <span class="click-bead" id="bead2">2</span>
@@ -514,12 +578,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=52"></script>
-  <script src="js/mp3-decoder.js?v=52"></script>
-  <script src="js/state-manager.js?v=52"></script>
-  <script src="js/waveform-cache.js?v=52"></script>
-  <script src="js/audio-engine.js?v=52"></script>
-  <script src="js/timeline-ui.js?v=52"></script>
-  <script src="js/app.js?v=52"></script>
+  <script src="js/profiler.js?v=53"></script>
+  <script src="js/mp3-decoder.js?v=53"></script>
+  <script src="js/state-manager.js?v=53"></script>
+  <script src="js/waveform-cache.js?v=53"></script>
+  <script src="js/audio-engine.js?v=53"></script>
+  <script src="js/timeline-ui.js?v=53"></script>
+  <script src="js/app.js?v=53"></script>
 </body>
 </html>
