@@ -673,6 +673,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   const recordModalHeaderTitle = document.getElementById('recordModalHeaderTitle');
   const syncTrackFirstBeat = document.getElementById('syncTrackFirstBeat');
   const syncTrackNumBeats = document.getElementById('syncTrackNumBeats');
+  const guideTrackSyncHint = document.getElementById('guideTrackSyncHint');
+
+  function updateGuideTrackSyncHint() {
+    if (!guideTrackSyncHint) return;
+    const x = syncTrackNumBeats ? (syncTrackNumBeats.value || '4') : '4';
+    const y = syncTrackFirstBeat ? (syncTrackFirstBeat.value || '5') : '5';
+    guideTrackSyncHint.textContent = `No countdown. Tap along ${x} beats from beat ${y}`;
+  }
+
+  if (syncTrackNumBeats) {
+    syncTrackNumBeats.addEventListener('input', updateGuideTrackSyncHint);
+    syncTrackNumBeats.addEventListener('change', updateGuideTrackSyncHint);
+  }
+  if (syncTrackFirstBeat) {
+    syncTrackFirstBeat.addEventListener('input', updateGuideTrackSyncHint);
+    syncTrackFirstBeat.addEventListener('change', updateGuideTrackSyncHint);
+  }
+
   const metroTrackName = document.getElementById('metroTrackName');
   const metroTempo = document.getElementById('metroTempo');
   const metroBeatsPerMeasure = document.getElementById('metroBeatsPerMeasure');
@@ -707,6 +725,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       autoGainUserOverridden = true;
       if (recordAutoGainBadge) {
         recordAutoGainBadge.textContent = recordAutoGain.checked ? 'MANUAL (ON)' : 'MANUAL (OFF)';
+      }
+      if (activeRecordModalTab === 'record') {
+        startVUMonitor();
       }
     });
   }
@@ -1333,11 +1354,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isSingleMetro = singleMetronomeOn ? singleMetronomeOn.checked : false;
       if (singleMetronomeSubOptions) singleMetronomeSubOptions.style.display = isSingleMetro ? 'flex' : 'none';
     }
+    updateGuideTrackSyncHint();
   }
 
   function switchRecordModalTab(tab) {
     activeRecordModalTab = tab;
     if (tab === 'metronome') {
+      stopVUMonitor();
       if (tabBtnRecord) {
         tabBtnRecord.style.background = 'transparent';
         tabBtnRecord.style.color = 'var(--text-secondary)';
@@ -1367,6 +1390,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (recordModalHeaderTitle) {
         recordModalHeaderTitle.innerHTML = '<span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 8px #ef4444;"></span> Record / Metronome Setup';
       }
+      updateRecordModalToggles();
+      updateGuideTrackSyncHint();
+      startVUMonitor();
     }
   }
 
@@ -1528,6 +1554,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnCancelMetronome && recordSetupModal) {
     btnCancelMetronome.addEventListener('click', () => {
+      stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
       audio.isRecordingMode = false;
@@ -1537,6 +1564,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnGoMetronome) {
     btnGoMetronome.addEventListener('click', () => {
+      stopVUMonitor();
       const trackName = (metroTrackName?.value || '').trim() || getNextAvailableMetronomeName();
       const tempo = parseInt(metroTempo?.value, 10) || state.project?.tempo || state.project?.bpm || 90;
       const beatsPerMeasure = parseInt(metroBeatsPerMeasure?.value, 10) || 4;
@@ -1674,6 +1702,189 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (err) {
       console.warn('Failed to enumerate audio devices:', err);
     }
+  }
+
+  // --- Real-Time VU Meter Live Microphone Monitor ---
+  let vuStream = null;
+  let vuSource = null;
+  let vuAnalyser = null;
+  let vuAnimId = null;
+  let vuPeakHold = 0;
+  let vuPeakHoldTime = 0;
+  let vuClipTime = 0;
+
+  async function startVUMonitor() {
+    stopVUMonitor();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    const modal = document.getElementById('recordSetupModal');
+    if (!modal || modal.classList.contains('hidden') || modal.style.display === 'none') return;
+    if (activeRecordModalTab !== 'record') return;
+
+    try {
+      const selectedDeviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
+      const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+      const constraints = {
+        audio: {
+          sampleRate: { ideal: 44100 },
+          echoCancellation: false,
+          autoGainControl: useAutoGain,
+          noiseSuppression: false
+        }
+      };
+      if (selectedDeviceId) {
+        constraints.audio.deviceId = { exact: selectedDeviceId };
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const currentModal = document.getElementById('recordSetupModal');
+      if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none' || activeRecordModalTab !== 'record') {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
+      vuStream = stream;
+      const ctx = audio.getOrCreateAudioContext();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch (_) {}
+      }
+
+      vuSource = ctx.createMediaStreamSource(vuStream);
+      vuAnalyser = ctx.createAnalyser();
+      vuAnalyser.fftSize = 512;
+      vuAnalyser.smoothingTimeConstant = 0.2;
+      vuSource.connect(vuAnalyser);
+      // Analyser is purely for level visualization; never connects to destination to prevent feedback
+
+      const dataArray = new Float32Array(vuAnalyser.fftSize);
+
+      function renderVU() {
+        if (!vuAnalyser || !recordSetupModal || recordSetupModal.classList.contains('hidden') || recordSetupModal.style.display === 'none' || activeRecordModalTab !== 'record') {
+          stopVUMonitor();
+          return;
+        }
+
+        vuAnalyser.getFloatTimeDomainData(dataArray);
+
+        let peak = 0;
+        let sumSq = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const val = dataArray[i];
+          const abs = Math.abs(val);
+          if (abs > peak) peak = abs;
+          sumSq += val * val;
+        }
+
+        const rms = Math.sqrt(sumSq / dataArray.length);
+        const now = performance.now();
+
+        if (peak > vuPeakHold || now - vuPeakHoldTime > 800) {
+          vuPeakHold = peak;
+          vuPeakHoldTime = now;
+        } else {
+          vuPeakHold = Math.max(0, vuPeakHold - 0.015);
+        }
+
+        const minDb = -54;
+        const rmsDb = rms > 0.0001 ? 20 * Math.log10(rms) : -100;
+        let vuPct = 0;
+        if (rmsDb > minDb) {
+          vuPct = Math.min(100, Math.max(0, ((rmsDb - minDb) / -minDb) * 100));
+        }
+
+        let peakPct = 0;
+        if (vuPeakHold > 0.0001) {
+          const holdDb = 20 * Math.log10(vuPeakHold);
+          if (holdDb > minDb) {
+            peakPct = Math.min(100, Math.max(0, ((holdDb - minDb) / -minDb) * 100));
+          }
+        }
+
+        const barEl = document.getElementById('recordVUMeterBar');
+        const peakEl = document.getElementById('recordVUMeterPeak');
+        const clipEl = document.getElementById('recordVUClipIndicator');
+        const dbEl = document.getElementById('recordVUMeterDb');
+
+        if (barEl) {
+          barEl.style.height = `${vuPct.toFixed(1)}%`;
+        }
+        if (peakEl) {
+          if (peakPct > 2) {
+            peakEl.style.display = 'block';
+            peakEl.style.bottom = `${peakPct.toFixed(1)}%`;
+          } else {
+            peakEl.style.display = 'none';
+          }
+        }
+
+        if (peak >= 0.98) {
+          vuClipTime = now;
+        }
+        if (clipEl) {
+          if (now - vuClipTime < 600) {
+            clipEl.style.background = '#ef4444';
+            clipEl.style.boxShadow = '0 0 6px #ef4444';
+          } else {
+            clipEl.style.background = 'rgba(239, 68, 68, 0.25)';
+            clipEl.style.boxShadow = 'none';
+          }
+        }
+
+        if (dbEl) {
+          if (rmsDb <= -50) {
+            dbEl.textContent = '-∞';
+          } else {
+            dbEl.textContent = `${Math.round(rmsDb)}`;
+          }
+        }
+
+        vuAnimId = requestAnimationFrame(renderVU);
+      }
+
+      vuAnimId = requestAnimationFrame(renderVU);
+    } catch (err) {
+      console.warn('VU meter monitoring stream not available:', err);
+    }
+  }
+
+  function stopVUMonitor() {
+    if (vuAnimId) {
+      cancelAnimationFrame(vuAnimId);
+      vuAnimId = null;
+    }
+    if (vuSource) {
+      try { vuSource.disconnect(); } catch (_) {}
+      vuSource = null;
+    }
+    if (vuAnalyser) {
+      try { vuAnalyser.disconnect(); } catch (_) {}
+      vuAnalyser = null;
+    }
+    if (vuStream) {
+      try {
+        vuStream.getTracks().forEach(t => t.stop());
+      } catch (_) {}
+      vuStream = null;
+    }
+    const barEl = document.getElementById('recordVUMeterBar');
+    const peakEl = document.getElementById('recordVUMeterPeak');
+    const clipEl = document.getElementById('recordVUClipIndicator');
+    const dbEl = document.getElementById('recordVUMeterDb');
+    if (barEl) barEl.style.height = '0%';
+    if (peakEl) peakEl.style.display = 'none';
+    if (clipEl) {
+      clipEl.style.background = 'rgba(239, 68, 68, 0.25)';
+      clipEl.style.boxShadow = 'none';
+    }
+    if (dbEl) dbEl.textContent = '-∞';
+  }
+
+  if (recordDeviceSelect) {
+    recordDeviceSelect.addEventListener('change', () => {
+      if (activeRecordModalTab === 'record') {
+        startVUMonitor();
+      }
+    });
   }
 
   function resetClickBeads() {
@@ -3018,7 +3229,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (recordSetupModal) {
           recordSetupModal.classList.remove('hidden');
           recordSetupModal.style.display = 'flex';
-          refreshAudioInputDevices();
+          updateGuideTrackSyncHint();
+          refreshAudioInputDevices().then(() => {
+            if (activeRecordModalTab === 'record') {
+              startVUMonitor();
+            }
+          });
         }
       }
     });
@@ -3026,6 +3242,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnCloseRecordSetupModal && recordSetupModal) {
     btnCloseRecordSetupModal.addEventListener('click', () => {
+      stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
       audio.isRecordingMode = false;
@@ -3034,6 +3251,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnCancelRecordSetup && recordSetupModal) {
     btnCancelRecordSetup.addEventListener('click', () => {
+      stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
       audio.isRecordingMode = false;
@@ -3042,11 +3260,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnStartRecordingAction) {
     btnStartRecordingAction.addEventListener('click', () => {
+      stopVUMonitor();
       if (recordSetupModal) {
         recordSetupModal.classList.add('hidden');
         recordSetupModal.style.display = 'none';
       }
       startRecordingFlow();
+    });
+  }
+  if (recordSetupModal) {
+    recordSetupModal.addEventListener('click', (e) => {
+      if (e.target === recordSetupModal) {
+        stopVUMonitor();
+        recordSetupModal.classList.add('hidden');
+        recordSetupModal.style.display = 'none';
+        audio.isRecordingMode = false;
+        audio.setPlaybackAudioSession();
+      }
     });
   }
   if (btnStopRecordingAction) {
