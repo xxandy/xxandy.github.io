@@ -1360,7 +1360,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   function switchRecordModalTab(tab) {
     activeRecordModalTab = tab;
     if (tab === 'metronome') {
-      stopVUMonitor();
       if (tabBtnRecord) {
         tabBtnRecord.style.background = 'transparent';
         tabBtnRecord.style.color = 'var(--text-secondary)';
@@ -1392,7 +1391,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       updateRecordModalToggles();
       updateGuideTrackSyncHint();
-      startVUMonitor();
     }
   }
 
@@ -1712,13 +1710,46 @@ document.addEventListener('DOMContentLoaded', async () => {
   let vuPeakHold = 0;
   let vuPeakHoldTime = 0;
   let vuClipTime = 0;
+  let vuIsStarting = false;
+  const vuDataArray = new Float32Array(512);
+
+  function setVUMeterGrayedOut(isGray) {
+    const vuContainer = document.getElementById('recordVUMeterContainer');
+    const dbEl = document.getElementById('recordVUMeterDb');
+    if (vuContainer) {
+      if (isGray) {
+        vuContainer.style.opacity = '0.35';
+        vuContainer.style.filter = 'grayscale(1)';
+        vuContainer.style.pointerEvents = 'none';
+        if (dbEl) dbEl.textContent = 'INIT';
+      } else {
+        vuContainer.style.opacity = '1';
+        vuContainer.style.filter = 'none';
+        vuContainer.style.pointerEvents = 'auto';
+        if (dbEl && dbEl.textContent === 'INIT') {
+          dbEl.textContent = '-∞';
+        }
+      }
+    }
+  }
 
   async function startVUMonitor() {
-    stopVUMonitor();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
     const modal = document.getElementById('recordSetupModal');
     if (!modal || modal.classList.contains('hidden') || modal.style.display === 'none') return;
-    if (activeRecordModalTab !== 'record') return;
+
+    // If stream is already healthy and analyser is running, keep it alive seamlessly
+    if (vuStream && vuStream.active && vuAnalyser && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
+      setVUMeterGrayedOut(false);
+      if (!vuAnimId) {
+        vuAnimId = requestAnimationFrame(renderVU);
+      }
+      return;
+    }
+
+    if (vuIsStarting) return;
+    vuIsStarting = true;
+    setVUMeterGrayedOut(true);
 
     try {
       const selectedDeviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
@@ -1726,6 +1757,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const constraints = {
         audio: {
           sampleRate: { ideal: 44100 },
+          channelCount: { ideal: 1 },
           echoCancellation: false,
           autoGainControl: useAutoGain,
           noiseSuppression: false
@@ -1737,16 +1769,39 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       const currentModal = document.getElementById('recordSetupModal');
-      if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none' || activeRecordModalTab !== 'record') {
+      if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none') {
         stream.getTracks().forEach(t => t.stop());
+        vuIsStarting = false;
         return;
+      }
+
+      if (vuSource) {
+        try { vuSource.disconnect(); } catch (_) {}
+        vuSource = null;
+      }
+      if (vuAnalyser) {
+        try { vuAnalyser.disconnect(); } catch (_) {}
+        vuAnalyser = null;
+      }
+      if (vuStream && vuStream !== stream) {
+        try { vuStream.getTracks().forEach(t => t.stop()); } catch (_) {}
       }
 
       vuStream = stream;
       const ctx = audio.getOrCreateAudioContext();
-      if (!ctx) return;
-      if (ctx.state === 'suspended') {
+      if (!ctx) {
+        vuIsStarting = false;
+        return;
+      }
+      if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
         try { await ctx.resume(); } catch (_) {}
+      }
+
+      if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none') {
+        stream.getTracks().forEach(t => t.stop());
+        vuStream = null;
+        vuIsStarting = false;
+        return;
       }
 
       vuSource = ctx.createMediaStreamSource(vuStream);
@@ -1754,100 +1809,110 @@ document.addEventListener('DOMContentLoaded', async () => {
       vuAnalyser.fftSize = 512;
       vuAnalyser.smoothingTimeConstant = 0.2;
       vuSource.connect(vuAnalyser);
-      // Analyser is purely for level visualization; never connects to destination to prevent feedback
 
-      const dataArray = new Float32Array(vuAnalyser.fftSize);
+      // Audio stack connected: ungray the VU meter
+      setVUMeterGrayedOut(false);
 
-      function renderVU() {
-        if (!vuAnalyser || !recordSetupModal || recordSetupModal.classList.contains('hidden') || recordSetupModal.style.display === 'none' || activeRecordModalTab !== 'record') {
-          stopVUMonitor();
-          return;
-        }
-
-        vuAnalyser.getFloatTimeDomainData(dataArray);
-
-        let peak = 0;
-        let sumSq = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          const val = dataArray[i];
-          const abs = Math.abs(val);
-          if (abs > peak) peak = abs;
-          sumSq += val * val;
-        }
-
-        const rms = Math.sqrt(sumSq / dataArray.length);
-        const now = performance.now();
-
-        if (peak > vuPeakHold || now - vuPeakHoldTime > 800) {
-          vuPeakHold = peak;
-          vuPeakHoldTime = now;
-        } else {
-          vuPeakHold = Math.max(0, vuPeakHold - 0.015);
-        }
-
-        const minDb = -54;
-        const rmsDb = rms > 0.0001 ? 20 * Math.log10(rms) : -100;
-        let vuPct = 0;
-        if (rmsDb > minDb) {
-          vuPct = Math.min(100, Math.max(0, ((rmsDb - minDb) / -minDb) * 100));
-        }
-
-        let peakPct = 0;
-        if (vuPeakHold > 0.0001) {
-          const holdDb = 20 * Math.log10(vuPeakHold);
-          if (holdDb > minDb) {
-            peakPct = Math.min(100, Math.max(0, ((holdDb - minDb) / -minDb) * 100));
-          }
-        }
-
-        const barEl = document.getElementById('recordVUMeterBar');
-        const peakEl = document.getElementById('recordVUMeterPeak');
-        const clipEl = document.getElementById('recordVUClipIndicator');
-        const dbEl = document.getElementById('recordVUMeterDb');
-
-        if (barEl) {
-          barEl.style.height = `${vuPct.toFixed(1)}%`;
-        }
-        if (peakEl) {
-          if (peakPct > 2) {
-            peakEl.style.display = 'block';
-            peakEl.style.bottom = `${peakPct.toFixed(1)}%`;
-          } else {
-            peakEl.style.display = 'none';
-          }
-        }
-
-        if (peak >= 0.98) {
-          vuClipTime = now;
-        }
-        if (clipEl) {
-          if (now - vuClipTime < 600) {
-            clipEl.style.background = '#ef4444';
-            clipEl.style.boxShadow = '0 0 6px #ef4444';
-          } else {
-            clipEl.style.background = 'rgba(239, 68, 68, 0.25)';
-            clipEl.style.boxShadow = 'none';
-          }
-        }
-
-        if (dbEl) {
-          if (rmsDb <= -50) {
-            dbEl.textContent = '-∞';
-          } else {
-            dbEl.textContent = `${Math.round(rmsDb)}`;
-          }
-        }
-
-        vuAnimId = requestAnimationFrame(renderVU);
+      if (vuAnimId) {
+        cancelAnimationFrame(vuAnimId);
+        vuAnimId = null;
       }
-
       vuAnimId = requestAnimationFrame(renderVU);
     } catch (err) {
       console.warn('VU meter monitoring stream not available:', err);
+      setVUMeterGrayedOut(true);
+    } finally {
+      vuIsStarting = false;
     }
   }
 
-  function stopVUMonitor() {
+  function renderVU() {
+    const modal = document.getElementById('recordSetupModal');
+    if (!vuAnalyser || !modal || modal.classList.contains('hidden') || modal.style.display === 'none') {
+      stopVUMonitor();
+      return;
+    }
+
+    if (activeRecordModalTab === 'record') {
+      vuAnalyser.getFloatTimeDomainData(vuDataArray);
+
+      let peak = 0;
+      let sumSq = 0;
+      for (let i = 0; i < vuDataArray.length; i++) {
+        const val = vuDataArray[i];
+        const abs = Math.abs(val);
+        if (abs > peak) peak = abs;
+        sumSq += val * val;
+      }
+
+      const rms = Math.sqrt(sumSq / vuDataArray.length);
+      const now = performance.now();
+
+      if (peak > vuPeakHold || now - vuPeakHoldTime > 800) {
+        vuPeakHold = peak;
+        vuPeakHoldTime = now;
+      } else {
+        vuPeakHold = Math.max(0, vuPeakHold - 0.015);
+      }
+
+      const minDb = -54;
+      const rmsDb = rms > 0.0001 ? 20 * Math.log10(rms) : -100;
+      let vuPct = 0;
+      if (rmsDb > minDb) {
+        vuPct = Math.min(100, Math.max(0, ((rmsDb - minDb) / -minDb) * 100));
+      }
+
+      let peakPct = 0;
+      if (vuPeakHold > 0.0001) {
+        const holdDb = 20 * Math.log10(vuPeakHold);
+        if (holdDb > minDb) {
+          peakPct = Math.min(100, Math.max(0, ((holdDb - minDb) / -minDb) * 100));
+        }
+      }
+
+      const barEl = document.getElementById('recordVUMeterBar');
+      const peakEl = document.getElementById('recordVUMeterPeak');
+      const clipEl = document.getElementById('recordVUClipIndicator');
+      const dbEl = document.getElementById('recordVUMeterDb');
+
+      if (barEl) {
+        barEl.style.height = `${vuPct.toFixed(1)}%`;
+      }
+      if (peakEl) {
+        if (peakPct > 2) {
+          peakEl.style.display = 'block';
+          peakEl.style.bottom = `${peakPct.toFixed(1)}%`;
+        } else {
+          peakEl.style.display = 'none';
+        }
+      }
+
+      if (peak >= 0.98) {
+        vuClipTime = now;
+      }
+      if (clipEl) {
+        if (now - vuClipTime < 600) {
+          clipEl.style.background = '#ef4444';
+          clipEl.style.boxShadow = '0 0 6px #ef4444';
+        } else {
+          clipEl.style.background = 'rgba(239, 68, 68, 0.25)';
+          clipEl.style.boxShadow = 'none';
+        }
+      }
+
+      if (dbEl) {
+        if (rmsDb <= -50) {
+          dbEl.textContent = '-∞';
+        } else {
+          dbEl.textContent = `${Math.round(rmsDb)}`;
+        }
+      }
+    }
+
+    vuAnimId = requestAnimationFrame(renderVU);
+  }
+
+  function stopVUMonitor(preserveStream = false) {
     if (vuAnimId) {
       cancelAnimationFrame(vuAnimId);
       vuAnimId = null;
@@ -1860,7 +1925,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       try { vuAnalyser.disconnect(); } catch (_) {}
       vuAnalyser = null;
     }
-    if (vuStream) {
+    if (!preserveStream && vuStream) {
       try {
         vuStream.getTracks().forEach(t => t.stop());
       } catch (_) {}
@@ -1877,13 +1942,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       clipEl.style.boxShadow = 'none';
     }
     if (dbEl) dbEl.textContent = '-∞';
+    setVUMeterGrayedOut(true);
   }
 
   if (recordDeviceSelect) {
     recordDeviceSelect.addEventListener('change', () => {
-      if (activeRecordModalTab === 'record') {
-        startVUMonitor();
-      }
+      startVUMonitor();
+    });
+  }
+  if (recordAutoGain) {
+    recordAutoGain.addEventListener('change', () => {
+      startVUMonitor();
     });
   }
 
@@ -2051,6 +2120,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       recordSetupModal.style.display = 'none';
     }
     if (btnRecord) btnRecord.classList.remove('recording');
+    if (btnStartRecordingAction) {
+      btnStartRecordingAction.textContent = 'Start Recording';
+      btnStartRecordingAction.disabled = false;
+    }
     isRecording = false;
     recordingState = 'idle';
     pass2StreamStartTime = null;
@@ -2068,6 +2141,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.isRecordingMode = false;
     audio.setPlaybackAudioSession();
     audio.stop();
+    if (btnStartRecordingAction) {
+      btnStartRecordingAction.textContent = 'Start Recording';
+      btnStartRecordingAction.disabled = false;
+    }
     cleanupRecordingNodes();
     showToast('Recording cancelled', 'info');
   }
@@ -2105,7 +2182,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.__nanodaw_mic = recMicSource;
 
     // Start playback immediately from playhead (No countdown/prelude)
-    audio.seek(recordingStartPlayhead);
+    if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+      audio.seek(recordingStartPlayhead);
+    }
     audio.play();
 
     takeStartTime = performance.now();
@@ -2133,35 +2212,38 @@ document.addEventListener('DOMContentLoaded', async () => {
         timeline.clearSyncLines();
       }
 
-      // 2. Acquire mic stream with user-selected / smart autoGainControl (noiseSuppression & echoCancellation false)
-      const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
-      const audioConstraints = {
-        sampleRate: { ideal: 44100 },
-        channelCount: { ideal: 1 },
-        echoCancellation: false,
-        autoGainControl: useAutoGain,
-        noiseSuppression: false
-      };
-      if (deviceId) {
-        audioConstraints.deviceId = { ideal: deviceId };
-      }
+      // 2. Acquire mic stream: reuse pre-warmed stream transferred from VU meter monitor if active!
+      const isStreamActive = recStream && recStream.active && recStream.getAudioTracks().length > 0 && recStream.getAudioTracks()[0].readyState === 'live';
+      if (!isStreamActive) {
+        const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+        const audioConstraints = {
+          sampleRate: { ideal: 44100 },
+          channelCount: { ideal: 1 },
+          echoCancellation: false,
+          autoGainControl: useAutoGain,
+          noiseSuppression: false
+        };
+        if (deviceId) {
+          audioConstraints.deviceId = { ideal: deviceId };
+        }
 
-      try {
-        recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-      } catch (e1) {
-        console.warn('Initial constraints with deviceId failed, retrying ideal 44100:', e1);
         try {
-          recStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              sampleRate: { ideal: 44100 },
-              echoCancellation: false,
-              autoGainControl: useAutoGain,
-              noiseSuppression: false
-            }
-          });
-        } catch (e2) {
-          console.warn('Retrying basic audio getUserMedia:', e2);
-          recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        } catch (e1) {
+          console.warn('Initial constraints with deviceId failed, retrying ideal 44100:', e1);
+          try {
+            recStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                sampleRate: { ideal: 44100 },
+                echoCancellation: false,
+                autoGainControl: useAutoGain,
+                noiseSuppression: false
+              }
+            });
+          } catch (e2) {
+            console.warn('Retrying basic audio getUserMedia:', e2);
+            recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          }
         }
       }
 
@@ -2204,6 +2286,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } catch (err) {
       console.error('Failed to start recording:', err);
+      if (btnStartRecordingAction) {
+        btnStartRecordingAction.textContent = 'Start Recording';
+        btnStartRecordingAction.disabled = false;
+      }
       audio.isRecording = false;
       audio.isRecordingMode = false;
       audio.setPlaybackAudioSession();
@@ -2346,7 +2432,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (hudTimer) hudTimer.textContent = '15s limit';
 
       // Start music playback from recordingStartPlayhead
-      audio.seek(recordingStartPlayhead);
+      if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+        audio.seek(recordingStartPlayhead);
+      }
       audio.play();
 
       // 15-second safety timeout
@@ -2683,7 +2771,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const downbeatTime = startPreludeTime + 8 * dt;
     pass2DownbeatScheduledTime = downbeatTime;
 
-    audio.seek(recordingStartPlayhead);
+    if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+      audio.seek(recordingStartPlayhead);
+    }
     audio.play(downbeatTime);
 
     // Live metronome during take if requested
@@ -2777,7 +2867,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const downbeatTime = startPreludeTime + 4 * dt;
     pass2DownbeatScheduledTime = downbeatTime;
 
-    audio.seek(recordingStartPlayhead);
+    if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+      audio.seek(recordingStartPlayhead);
+    }
     audio.play(downbeatTime);
 
     // Live metronome during take if requested in single-pass mode
@@ -3215,10 +3307,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         audio.isRecordingMode = true;
         audio.setPlayAndRecordAudioSession();
-        switchRecordModalTab('record');
         populateSyncGuideTracks();
         updateRecordModalToggles();
         initAutoGainDefault();
+        switchRecordModalTab('record');
+
+        // Reset start recording button to default
+        if (btnStartRecordingAction) {
+          btnStartRecordingAction.textContent = 'Start Recording';
+          btnStartRecordingAction.disabled = false;
+        }
 
         // Proactively pre-allocate standby buffers and pre-warm AudioWorklet ahead of time!
         pass1AudioStore.prepareAheadOfTime(4);
@@ -3226,14 +3324,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         const preCtx = audio.getOrCreateAudioContext();
         if (preCtx) ensureRecorderWorklet(preCtx);
 
+        // Pre-warm chunk decoding for all tracks at current playhead so multi-track playback starts instantly
+        if (audio.prioritizeSeek) {
+          audio.prioritizeSeek(audio.playheadPosition || 0);
+        }
+
         if (recordSetupModal) {
           recordSetupModal.classList.remove('hidden');
           recordSetupModal.style.display = 'flex';
+          setVUMeterGrayedOut(true);
           updateGuideTrackSyncHint();
           refreshAudioInputDevices().then(() => {
-            if (activeRecordModalTab === 'record') {
-              startVUMonitor();
-            }
+            startVUMonitor();
           });
         }
       }
@@ -3260,11 +3362,36 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnStartRecordingAction) {
     btnStartRecordingAction.addEventListener('click', () => {
-      stopVUMonitor();
+      // 1. Immediate visual feedback on the button
+      btnStartRecordingAction.textContent = '⏳ Initializing...';
+      btnStartRecordingAction.disabled = true;
+
+      // 2. Transfer active VU stream to recStream to eliminate secondary getUserMedia spinup delay!
+      if (vuStream && vuStream.active && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
+        recStream = vuStream;
+        vuStream = null;
+      }
+      stopVUMonitor(true);
+
+      // 3. Close the modal
       if (recordSetupModal) {
         recordSetupModal.classList.add('hidden');
         recordSetupModal.style.display = 'none';
       }
+
+      // 4. Immediate visual feedback: Show recording HUD with "INIT" status right away!
+      if (recordingHUD) {
+        recordingHUD.classList.remove('hidden');
+        recordingHUD.style.display = 'flex';
+      }
+      if (hudRecStatusText) hudRecStatusText.textContent = 'INIT';
+      if (hudInstruction) hudInstruction.textContent = '⏳ Initializing recording...';
+      if (hudClickBeads) {
+        hudClickBeads.classList.add('hidden');
+        hudClickBeads.style.display = 'none';
+      }
+
+      // 5. Kick off recording flow
       startRecordingFlow();
     });
   }
