@@ -610,6 +610,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const btnStartRecordingAction = document.getElementById('btnStartRecordingAction');
 
   const recordingHUD = document.getElementById('recordingHUD');
+  const hudInstructionBox = document.getElementById('hudInstructionBox');
   const hudRecStatusText = document.getElementById('hudRecStatusText');
   const hudTimer = document.getElementById('hudTimer');
   const hudInstruction = document.getElementById('hudInstruction');
@@ -631,6 +632,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let pass1AudioChunks = [];
   let pass2AudioChunks = [];
   let pass1ClickEvents = [];
+  let pass2ClickEvents = [];
   let pass1TimeoutId = null;
   let pass1PostWaitTimeoutId = null;
   let hudTimerIntervalId = null;
@@ -642,6 +644,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let totalPass2Samples = 0;
   let pass2StreamStartTime = null;
   let pass2DownbeatScheduledTime = null;
+  let recordingStartPlayhead = 0;
 
   async function refreshAudioInputDevices() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
@@ -738,6 +741,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     [bead1, bead2, bead3, bead4].forEach(b => {
       if (b) b.className = 'click-bead';
     });
+  }
+
+  // High-precision transient peak finder
+  function findTransientPeak(pcm, start, end) {
+    const s0 = Math.max(0, start);
+    const s1 = Math.min(pcm.length, end);
+    let bestIdx = s0;
+    let maxMetric = -1;
+    let peakAbs = 0;
+    let sumSq = 0;
+    for (let s = s0; s < s1; s++) {
+      const v = pcm[s];
+      const amp = Math.abs(v);
+      sumSq += v * v;
+      const diff = s > 0 ? Math.abs(v - pcm[s - 1]) : 0;
+      const metric = amp * 0.65 + diff * 0.35;
+      if (metric > maxMetric) {
+        maxMetric = metric;
+        bestIdx = s;
+        peakAbs = amp;
+      }
+    }
+    const n = Math.max(1, s1 - s0);
+    const rms = Math.sqrt(sumSq / n) || 1e-9;
+    return { idx: bestIdx, peakAbs: peakAbs, crest: peakAbs / rms };
   }
 
   function playSynthBeep(time, freq = 900, dur = 0.08) {
@@ -873,6 +901,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       audio.isRecordingMode = true;
       audio.isRecording = true;
       audio.setPlayAndRecordAudioSession();
+      recordingStartPlayhead = audio.playheadPosition || 0;
 
       // 2. Acquire mic stream without browser audio DSP filters for pure transient response & 44.1kHz CD quality
       const audioConstraints = {
@@ -1023,13 +1052,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Tap support: User can tap on HUD / beads on screen as an explicit click
     const onHudTap = (evt) => {
-      if (recordingState !== 'pass1') return;
+      if (recordingState !== 'pass1' && recordingState !== 'pass2_prelude') return;
       if (evt.target.closest('#btnStopRecordingAction')) return;
       evt.preventDefault();
       evt.stopPropagation();
       const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
       if (now - lastTransientTime > minRefractorySec) {
-        registerClick(now, totalPass1Samples);
+        if (recordingState === 'pass1') {
+          registerClick(now, totalPass1Samples);
+        } else if (recordingState === 'pass2_prelude') {
+          pass2ClickEvents.push({ ctxTime: now, samplePos: totalPass2Samples });
+        }
       }
     };
     if (hudInstructionBox) {
@@ -1040,8 +1073,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     recScriptProcessor.connect(recSilentGain);
     recSilentGain.connect(recAudioCtx.destination);
 
-    // Start music playback from t0
-    audio.seek(0);
+    // Start music playback from recordingStartPlayhead
+    audio.seek(recordingStartPlayhead);
     audio.play();
 
     // 15-second safety timeout
@@ -1082,21 +1115,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     for (let k = 0; k < 4; k++) {
       const roughPos = pass1ClickEvents[k]?.samplePos ?? Math.round(k * (totalP1 / 4));
-      const startS = Math.max(0, roughPos - searchWindowSamples);
-      const endS = Math.min(totalP1, roughPos + searchWindowSamples);
-
-      let peakIdx = roughPos;
-      let maxMetric = -1;
-      for (let s = startS; s < endS; s++) {
-        const amp = Math.abs(p1Full[s]);
-        const diff = s > 0 ? Math.abs(p1Full[s] - p1Full[s - 1]) : 0;
-        const metric = amp * 0.65 + diff * 0.35;
-        if (metric > maxMetric) {
-          maxMetric = metric;
-          peakIdx = s;
-        }
-      }
-      exactPeaks.push(peakIdx);
+      const peakInfo = findTransientPeak(p1Full, roughPos - searchWindowSamples, roughPos + searchWindowSamples);
+      exactPeaks.push(peakInfo.idx);
     }
 
     // 3. Compute tempo using all 4 taps via linear regression & robust outlier-rejected median
@@ -1162,8 +1182,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 5. Prepare Pass 2 recording pipeline
     pass2AudioChunks = [];
+    pass2ClickEvents = [];
     totalPass2Samples = 0;
-    pass2StreamStartTime = null;
+    pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
     recordingState = 'pass2_prelude';
     resetClickBeads();
 
@@ -1174,6 +1195,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudClickBeads.style.display = 'flex';
     }
 
+    let p2LastTransientTime = 0;
+    let p2AmbientFloor = 0.005;
+
     recScriptProcessor.onaudioprocess = (e) => {
       if (pass2StreamStartTime === null && recAudioCtx) {
         pass2StreamStartTime = recAudioCtx.currentTime;
@@ -1182,7 +1206,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       const copy = new Float32Array(input.length);
       copy.set(input);
       pass2AudioChunks.push(copy);
+      const currentOffset = totalPass2Samples;
       totalPass2Samples += input.length;
+
+      // Real-time transient tracking during Pass 2 prelude
+      if (recordingState === 'pass2_prelude') {
+        let peak = 0;
+        let diffSum = 0;
+        let sumSq = 0;
+        for (let i = 0; i < input.length; i++) {
+          const absVal = Math.abs(input[i]);
+          if (absVal > peak) peak = absVal;
+          sumSq += input[i] * input[i];
+          if (i > 0) diffSum += Math.abs(input[i] - input[i - 1]);
+        }
+        const rms = Math.sqrt(sumSq / input.length);
+        const hfMetric = diffSum / input.length;
+        p2AmbientFloor = 0.95 * p2AmbientFloor + 0.05 * rms;
+
+        const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
+        if (peak > 0.020 && (peak > p2AmbientFloor * 1.5 || hfMetric > 0.006) && (now - p2LastTransientTime > 0.14)) {
+          p2LastTransientTime = now;
+          pass2ClickEvents.push({ ctxTime: now, samplePos: currentOffset });
+        }
+      }
     };
 
     // 6. Schedule the 8-beat prelude in Web Audio
@@ -1238,12 +1285,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Beat 9: DOWNBEAT!
-    // Backing music starts playback from time 0 at the exact downbeat timestamp
+    // Backing music starts playback from recordingStartPlayhead at the exact downbeat timestamp
     const downbeatTime = startPreludeTime + 8 * dt;
     pass2DownbeatScheduledTime = downbeatTime;
 
     // Hardware sample-accurate audio engine start at downbeatTime
-    audio.seek(0);
+    audio.seek(recordingStartPlayhead);
     audio.play(downbeatTime);
 
     // UI update when downbeat arrives
@@ -1277,8 +1324,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     detectedIntervalSec = dt;
 
     pass2AudioChunks = [];
+    pass2ClickEvents = [];
     totalPass2Samples = 0;
-    pass2StreamStartTime = null;
+    pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
     recordingState = 'pass2_prelude';
     resetClickBeads();
 
@@ -1333,7 +1381,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const downbeatTime = startPreludeTime + 4 * dt;
     pass2DownbeatScheduledTime = downbeatTime;
 
-    audio.seek(0);
+    audio.seek(recordingStartPlayhead);
     audio.play(downbeatTime);
 
     const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
@@ -1359,13 +1407,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.isRecordingMode = false;
     audio.setPlaybackAudioSession();
 
-    // 1. Immediately hide all recording overlays
+    // 1. Immediately hide all recording overlays and stop timer
+    if (recordingHUD) {
+      recordingHUD.classList.add('hidden');
+      recordingHUD.style.display = 'none';
+    }
+    if (btnRecord) btnRecord.classList.remove('recording');
+    if (hudTimerIntervalId) {
+      clearInterval(hudTimerIntervalId);
+      hudTimerIntervalId = null;
+    }
+
+    // 2. Snapshot timing references BEFORE calling cleanupRecordingNodes()
+    const scheduledDownbeatTime = pass2DownbeatScheduledTime;
+    const streamStartTime = pass2StreamStartTime;
+
+    // 3. Stop mic stream and processing nodes cleanly
     cleanupRecordingNodes();
 
-    // 2. Stop audio playback
+    // 4. Stop audio playback
     audio.stop();
 
-    // 3. Process audio and create the new track
+    // 5. Process audio and create the new track
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
     let takePCM = null;
@@ -1379,32 +1442,97 @@ document.addEventListener('DOMContentLoaded', async () => {
         offset += chunk.length;
       }
 
-      // Calculate sample-accurate downbeat trim index
-      let downbeatSample = 0;
-      if (pass2DownbeatScheduledTime && pass2StreamStartTime && pass2DownbeatScheduledTime > pass2StreamStartTime) {
-        downbeatSample = Math.round((pass2DownbeatScheduledTime - pass2StreamStartTime) * sampleRate);
+      const is4Click = record4ClickSync ? record4ClickSync.checked : true;
+      const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 78));
+      const dtSamples = Math.round(dt * sampleRate);
+
+      let projected5thTapSample = 0;
+
+      if (is4Click) {
+        // Alignment specification:
+        // The projected location for the peak of the 9th tap (which is the projected location
+        // of the 5th user tap in the 2nd recording, preceded by the calibration taps) must coincide
+        // exactly with the location of the playhead on the timeline (at the start of recording).
+        // This projected location for the 5th tap on the 2nd recording must be the first sample
+        // of the newly-recorded track. Timing fit is completely independent of system latency.
+
+        let expectedUser1Sample = 0;
+        if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
+          expectedUser1Sample = Math.round((scheduledDownbeatTime - (4 * dt) - streamStartTime) * sampleRate);
+        } else {
+          expectedUser1Sample = Math.round((0.150 + 4 * dt) * sampleRate);
+        }
+
+        // Search for the 4 user calibration tap peaks (Beats 5, 6, 7, 8)
+        const detectedPeaks = [];
+        const winSamples = Math.round(Math.min(0.200 * sampleRate, 0.40 * dtSamples));
+
+        // Use pass2ClickEvents during the calibration window if available:
+        const preludeClicks = pass2ClickEvents.filter(ev => {
+          const s = ev.samplePos;
+          return s >= expectedUser1Sample - winSamples && s < expectedUser1Sample + 4.5 * dtSamples;
+        });
+
+        let rough1 = expectedUser1Sample;
+        if (preludeClicks.length > 0) {
+          rough1 = preludeClicks[0].samplePos;
+        }
+        const p1 = findTransientPeak(fullPass2, rough1 - winSamples, rough1 + winSamples);
+
+        if (p1.peakAbs >= 0.015 && p1.crest >= 2.0) {
+          detectedPeaks.push(p1.idx);
+
+          // Track Taps 2, 3, 4 adaptively spaced by ~dtSamples from previous peak
+          for (let k = 1; k < 4; k++) {
+            const roughK = detectedPeaks[k - 1] + dtSamples;
+            const pk = findTransientPeak(fullPass2, roughK - winSamples, roughK + winSamples);
+            if (pk.peakAbs >= 0.012 && pk.crest >= 1.8) {
+              detectedPeaks.push(pk.idx);
+            } else {
+              detectedPeaks.push(roughK);
+            }
+          }
+        } else if (preludeClicks.length >= 3) {
+          for (let k = 0; k < Math.min(4, preludeClicks.length); k++) {
+            detectedPeaks.push(preludeClicks[k].samplePos);
+          }
+          while (detectedPeaks.length < 4) {
+            detectedPeaks.push(detectedPeaks[detectedPeaks.length - 1] + dtSamples);
+          }
+        }
+
+        if (detectedPeaks.length === 4) {
+          // Linear regression across the 4 calibration taps in the 2nd recording:
+          const slope = (3 * (detectedPeaks[3] - detectedPeaks[0]) + (detectedPeaks[2] - detectedPeaks[1])) / 10;
+          const centroid = (detectedPeaks[0] + detectedPeaks[1] + detectedPeaks[2] + detectedPeaks[3]) / 4;
+          // Projected 5th user tap (Beat 9 downbeat):
+          projected5thTapSample = Math.round(centroid + 2.5 * slope);
+          console.log(`[4-Click-Sync] Calib peaks in Pass 2: [${detectedPeaks.join(', ')}], slope: ${slope.toFixed(1)}, projected 5th tap (Beat 9): ${projected5thTapSample}`);
+        } else {
+          // Nominal projection from prelude start time
+          if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
+            projected5thTapSample = Math.round((scheduledDownbeatTime - streamStartTime) * sampleRate);
+          } else {
+            projected5thTapSample = Math.round((0.150 + 8 * dt) * sampleRate);
+          }
+          console.log(`[4-Click-Sync] Nominal projected 5th tap (Beat 9): ${projected5thTapSample}`);
+        }
       } else {
-        const is4Click = record4ClickSync ? record4ClickSync.checked : true;
-        const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 78));
-        const preludeSec = is4Click ? (8 * dt) : (4 * dt);
-        downbeatSample = Math.round(preludeSec * sampleRate);
+        // Standard count-in (4 synth beeps): downbeat is Beat 5
+        if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
+          projected5thTapSample = Math.round((scheduledDownbeatTime - streamStartTime) * sampleRate);
+        } else {
+          projected5thTapSample = Math.round((0.150 + 4 * dt) * sampleRate);
+        }
       }
 
-      // Latency compensation:
-      // When user listens on Bluetooth (PowerBeats), A2DP output buffer delay is ~160ms
-      // With phone built-in speaker / wired: ~40ms
-      const isBt = /bluetooth|headset|hands-free|sco|powerbeat|airpod/i.test(recordDeviceSelect?.selectedOptions?.[0]?.textContent || '');
-      const hardwareLatencySec = isBt ? 0.160 : 0.040;
-      const latencySamples = Math.round(hardwareLatencySec * sampleRate);
+      const trimSamples = projected5thTapSample;
+      console.log(`[Recording Trim] total: ${totalSamples}, projected5thTapSample: ${projected5thTapSample}, trimSamples: ${trimSamples}`);
 
-      const trimSamples = downbeatSample + latencySamples;
-      console.log(`[Recording Trim] total: ${totalSamples}, downbeatSample: ${downbeatSample}, latencySamples: ${latencySamples}, trimSamples: ${trimSamples}`);
-
-      if (totalSamples > trimSamples + Math.round(sampleRate * 0.1)) {
-        // Discard the prelude up to the downbeat!
+      if (totalSamples > trimSamples + Math.round(sampleRate * 0.05)) {
+        // The projected 5th tap on the 2nd recording becomes the first sample of the newly-recorded track!
         takePCM = fullPass2.subarray(trimSamples);
       } else {
-        // Stopped before or right at downbeat: keep all audio captured in Pass 2!
         takePCM = fullPass2;
       }
     } else if (pass1AudioChunks.length > 0) {
@@ -1435,10 +1563,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     recordedTakesCount++;
     const takeName = `Recorded Take ${recordedTakesCount}`;
-    audio.addRecordedTrack(takeName, takeBuffer, 0, '#ef4444');
+    // The first sample of takeBuffer corresponds to the projected 5th tap,
+    // which coincides exactly with the playhead at the start of recording!
+    audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444');
 
     showToast(`Added "${takeName}" (${(takePCM.length / sampleRate).toFixed(1)}s) to project!`, 'success', 4000);
-    audio.seek(0);
+    audio.seek(recordingStartPlayhead);
     timeline.render();
     timeline.renderWaveforms();
     timeline.updateInspectorPane();
