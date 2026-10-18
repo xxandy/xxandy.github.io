@@ -12,7 +12,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=64">
+  <link rel="stylesheet" href="styles.css?v=65">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -23,7 +23,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v64</span>
+        <span class="version-badge" id="appVersionBadge">v65</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -457,88 +457,42 @@
           </div>
 
           <!-- Hardware/System Preamp Auto Gain Toggle -->
-          <div style="background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:10px 12px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
-            <div style="display:flex; flex-direction:column; gap:2px;">
-              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff; margin:0;">
-                <input type="checkbox" id="recordAutoGain" style="width:16px; height:16px; accent-color:var(--accent-cyan); cursor:pointer;">
-                <span>Mic Preamp Boost (Auto Gain)</span>
-              </label>
-              <span id="recordAutoGainHint" style="font-size:11px; color:var(--text-secondary); margin-left:24px;">
-                Controls hardware AGC. Auto: ON for iPad/iOS, OFF for Android.
-              </span>
-            </div>
-            <span id="recordAutoGainBadge" style="font-size:10px; font-weight:700; background:rgba(6, 182, 212, 0.15); color:var(--accent-cyan); border:1px solid rgba(6, 182, 212, 0.3); padding:2px 6px; border-radius:4px; white-space:nowrap;">
-              AUTO
-            </span>
+          <div style="background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:8px 12px; display:flex; align-items:center;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff; margin:0;">
+              <input type="checkbox" id="recordAutoGain" style="width:16px; height:16px; accent-color:var(--accent-cyan); cursor:pointer;">
+              <span>Mic Preamp Boost (Auto Gain)</span>
+            </label>
           </div>
 
-          <!-- nanodaw Internal Gain Control & Noise Filter Toggle (OFF by default) -->
-          <div style="background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:10px 12px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
-            <div style="display:flex; flex-direction:column; gap:2px;">
-              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff; margin:0;">
-                <input type="checkbox" id="recordInternalGain" style="width:16px; height:16px; accent-color:var(--accent-cyan); cursor:pointer;">
-                <span>nanodaw Internal Gain & Noise Filter</span>
-              </label>
-              <span id="recordInternalGainHint" style="font-size:11px; color:var(--text-secondary); margin-left:24px;">
-                Software 75% gain boost + low-cut/hiss noise suppression. OFF by default.
-              </span>
-            </div>
+          <!-- NANOdaw Internal Gain Control & Noise Filter Toggle (OFF by default) -->
+          <div style="background:rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:8px; padding:8px 12px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff; margin:0;">
+              <input type="checkbox" id="recordInternalGain" style="width:16px; height:16px; accent-color:var(--accent-cyan); cursor:pointer;">
+              <span>NANOdaw Internal Gain & Noise Filter</span>
+            </label>
             <span id="recordInternalGainBadge" style="font-size:10px; font-weight:700; background:rgba(255, 255, 255, 0.08); color:var(--text-secondary); border:1px solid var(--border-color); padding:2px 6px; border-radius:4px; white-space:nowrap;">
               OFF
             </span>
           </div>
 
-          <div style="background:rgba(6, 182, 212, 0.08); border:1px solid rgba(6, 182, 212, 0.25); border-radius:8px; padding:10px 12px; display:flex; gap:10px; align-items:flex-start;">
-            <span style="font-size:18px; line-height:1; flex-shrink:0;">🎧</span>
-            <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
-              <strong style="color:var(--accent-cyan);">CD-Quality Audio Mode:</strong>
-              When using wireless Bluetooth headsets (Powerbeats, AirPods), nanodaw automatically selects your <strong>Phone's Built-in Mic</strong> so your headphones receive full <strong>44.1kHz CD-quality stereo playback</strong> while recording in studio quality!
-            </div>
-          </div>
-
-          <!-- nanodaw 2-pass sync Container -->
+          <!-- NANOdaw sync Container -->
           <div style="background:rgba(239, 68, 68, 0.08); border:1px solid rgba(239, 68, 68, 0.25); border-radius:8px; padding:12px;">
             <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:600; font-size:13px; color:#fff;">
               <input type="checkbox" id="record2PassSync" checked style="width:16px; height:16px; accent-color:#ef4444; cursor:pointer;">
-              <span>nanodaw 2-pass sync <span style="font-size:10px; background:#ef4444; color:#fff; padding:2px 6px; border-radius:4px; margin-left:4px; font-weight:700;">DEFAULT</span></span>
+              <span>NANOdaw sync</span>
             </label>
 
             <!-- 2-Pass Options (visible when record2PassSync is checked) -->
             <div id="container2PassSync" style="margin-top:12px; margin-left:26px; display:flex; flex-direction:column; gap:12px;">
               <div style="font-size:11.5px; font-weight:600; color:var(--text-secondary);">Pass 1 Guide Beat:</div>
 
-              <!-- Option 1: Metronome Synth Beeps (Default) -->
+              <!-- Option 1: Backing Track / Metronome Sync (Default) -->
               <div style="display:flex; flex-direction:column; gap:6px;">
                 <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
-                  <input type="radio" name="pass1GuideMode" id="guideModeSynth" value="synth" checked style="accent-color:#ef4444; cursor:pointer;">
-                  <span>Metronome Synth Beeps</span>
-                </label>
-                <div id="guideSynthSubOptions" style="margin-left:22px; display:flex; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <span>Tempo:</span>
-                    <input type="number" id="syncSynthTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
-                    <span>BPM (8 beeps: 4 count + 4 tap-along)</span>
-                  </div>
-                  <div style="display:flex; align-items:center; gap:10px;">
-                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#fff;">
-                      <input type="checkbox" id="syncMetronomeOn" checked style="accent-color:#ef4444; cursor:pointer;">
-                      <span>Metronome ON during take</span>
-                    </label>
-                    <div style="display:flex; align-items:center; gap:4px;">
-                      <span>Volume:</span>
-                      <input type="text" id="syncMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Option 2: Backing Track / Metronome Sync -->
-              <div style="display:flex; flex-direction:column; gap:6px;">
-                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
-                  <input type="radio" name="pass1GuideMode" id="guideModeTrack" value="track" style="accent-color:#ef4444; cursor:pointer;">
+                  <input type="radio" name="pass1GuideMode" id="guideModeTrack" value="track" checked style="accent-color:#ef4444; cursor:pointer;">
                   <span>Backing Track / Metronome Sync</span>
                 </label>
-                <div id="guideTrackSubOptions" style="margin-left:22px; display:none; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
+                <div id="guideTrackSubOptions" style="margin-left:22px; display:flex; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
                   <div style="display:flex; align-items:center; gap:8px;">
                     <span>Guide Track:</span>
                     <select id="syncGuideTrackSelect" class="input-styled" style="padding:3px 8px; font-size:12px; max-width:240px;">
@@ -557,6 +511,31 @@
                   </div>
                   <div style="font-size:11px; color:rgba(255,255,255,0.45); line-height:1.4;">
                     No countdown. Recording starts immediately from playhead. Tap along with beats in the chosen track to lock timing.
+                  </div>
+                </div>
+              </div>
+
+              <!-- Option 2: Metronome Synth Beeps -->
+              <div style="display:flex; flex-direction:column; gap:6px;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
+                  <input type="radio" name="pass1GuideMode" id="guideModeSynth" value="synth" style="accent-color:#ef4444; cursor:pointer;">
+                  <span>Metronome Synth Beeps</span>
+                </label>
+                <div id="guideSynthSubOptions" style="margin-left:22px; display:none; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span>Tempo:</span>
+                    <input type="number" id="syncSynthTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
+                    <span>BPM (8 beeps: 4 count + 4 tap-along)</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#fff;">
+                      <input type="checkbox" id="syncMetronomeOn" checked style="accent-color:#ef4444; cursor:pointer;">
+                      <span>Metronome ON during take</span>
+                    </label>
+                    <div style="display:flex; align-items:center; gap:4px;">
+                      <span>Volume:</span>
+                      <input type="text" id="syncMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
+                    </div>
                   </div>
                 </div>
               </div>
@@ -620,7 +599,7 @@
             <span style="font-size:18px; line-height:1; flex-shrink:0;">⏱️</span>
             <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
               <strong style="color:#38bdf8;">Offline Metronome Track:</strong>
-              Generates an offline synthesized audio track at the <strong>TOP of your project</strong>. Beat 1 is accented. This track can be selected for instant track-based sync.
+              Generates an offline synthesized audio track at the <strong>TOP of your project</strong>. Beat 1 is accented. This track can be selected for track-based sync.
             </div>
           </div>
 
@@ -682,12 +661,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=64"></script>
-  <script src="js/mp3-decoder.js?v=64"></script>
-  <script src="js/state-manager.js?v=64"></script>
-  <script src="js/waveform-cache.js?v=64"></script>
-  <script src="js/audio-engine.js?v=64"></script>
-  <script src="js/timeline-ui.js?v=64"></script>
-  <script src="js/app.js?v=64"></script>
+  <script src="js/profiler.js?v=65"></script>
+  <script src="js/mp3-decoder.js?v=65"></script>
+  <script src="js/state-manager.js?v=65"></script>
+  <script src="js/waveform-cache.js?v=65"></script>
+  <script src="js/audio-engine.js?v=65"></script>
+  <script src="js/timeline-ui.js?v=65"></script>
+  <script src="js/app.js?v=65"></script>
 </body>
 </html>

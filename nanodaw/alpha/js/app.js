@@ -879,7 +879,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const pass1AudioStore = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
 
-  // nanodaw Internal Gain Control & Automatic Noise Suppression
+  // NANOdaw Internal Gain Control & Automatic Noise Suppression
   // Includes: 2nd-order 80Hz Low-Cut (rumble filter) + 10.5kHz High-Cut (hiss filter) + Downward Noise Expander + 75% Peak Scaling
   function processInternalGainAndNoiseSuppression(pcm, sampleRate = 44100, targetPeak = 0.75) {
     if (!pcm || pcm.length === 0) return pcm;
@@ -960,7 +960,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       for (let i = 0; i < len; i++) {
         out[i] = Math.max(-1.0, Math.min(1.0, out[i] * gain));
       }
-      console.log(`[nanodaw Internal Gain] Filtered & boosted take by ${gain.toFixed(2)}x (+${(20 * Math.log10(gain)).toFixed(1)}dB). Peak was ${maxAmp.toFixed(4)}, now ${(maxAmp * gain).toFixed(4)} (~${Math.round(targetPeak * 100)}%).`);
+      console.log(`[NANOdaw Internal Gain] Filtered & boosted take by ${gain.toFixed(2)}x (+${(20 * Math.log10(gain)).toFixed(1)}dB). Peak was ${maxAmp.toFixed(4)}, now ${(maxAmp * gain).toFixed(4)} (~${Math.round(targetPeak * 100)}%).`);
     } else if (maxAmp > 0.98) {
       const gain = 0.95 / maxAmp;
       for (let i = 0; i < len; i++) {
@@ -1326,7 +1326,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (containerSinglePass) containerSinglePass.style.display = is2Pass ? 'none' : 'flex';
 
     if (is2Pass) {
-      const isSynth = guideModeSynth ? guideModeSynth.checked : true;
+      const isSynth = guideModeSynth ? guideModeSynth.checked : false;
       if (guideSynthSubOptions) guideSynthSubOptions.style.display = isSynth ? 'flex' : 'none';
       if (guideTrackSubOptions) guideTrackSubOptions.style.display = isSynth ? 'none' : 'flex';
     } else {
@@ -1469,7 +1469,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       syncGuideTrackSelect.appendChild(opt);
     });
 
-    // Auto-select first Metronome* track if present; otherwise default to "None"
+    // Auto-select first Metronome* track if present; otherwise first available track; otherwise "None"
     if (metroTracks.length > 0) {
       syncGuideTrackSelect.value = String(metroTracks[0].idx);
       const firstMetro = metroTracks[0].track;
@@ -1479,6 +1479,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (singleMetronomeTempo) singleMetronomeTempo.value = mTempo;
         if (metroTempo) metroTempo.value = mTempo;
       }
+    } else if (otherTracks.length > 0) {
+      syncGuideTrackSelect.value = String(otherTracks[0].idx);
     } else {
       syncGuideTrackSelect.value = '';
     }
@@ -1968,8 +1970,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isTrackGuide = guideModeTrack ? guideModeTrack.checked : false;
       const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
 
-      if (use2PassSync && isTrackGuide && selectedGuideTrackIdx !== '') {
-        await startTrackSyncRecording(parseInt(selectedGuideTrackIdx, 10));
+      if (use2PassSync && isTrackGuide) {
+        if (selectedGuideTrackIdx !== '') {
+          await startTrackSyncRecording(parseInt(selectedGuideTrackIdx, 10));
+        } else {
+          audio.isRecording = false;
+          audio.isRecordingMode = false;
+          audio.setPlaybackAudioSession();
+          cleanupRecordingNodes();
+          if (btnRecord) btnRecord.classList.remove('recording');
+          if (recordingHUD) {
+            recordingHUD.classList.add('hidden');
+            recordingHUD.style.display = 'none';
+          }
+          showToast('Please select a guide track or generate a Metronome track first.', 'warning', 4000);
+          return;
+        }
       } else if (use2PassSync) {
         await startPass1Calibration();
       } else {
@@ -2000,7 +2016,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudLatencyText.style.display = 'none';
     }
 
-    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : true;
+    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : false;
 
     let lastTransientTime = 0;
     const minRefractorySec = 0.14; // Refractory debounce window between clicks
@@ -2424,7 +2440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // In 2-pass-mode with synth beeps: MIX Guide 1 beeps 5-8 at -4dB softly in background of user taps
-    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : true;
+    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : false;
     if (isSynthGuide) {
       const softBeepVol = 0.8 * Math.pow(10, -4 / 20); // 4dB lower than standard beep volume 0.8
       for (let i = 0; i < 4; i++) {
@@ -2896,7 +2912,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         reason = `Could not detect all ${numBeats} distinct tap peaks in your recording (detected ${takePeaksSec.length} of ${numBeats} around beats ${firstBeat}–${firstBeat + numBeats - 1}). Please tap louder or closer to the microphone.`;
       }
 
-      const alertMsg = `nanodaw Track Sync Notice:\n\n${reason}\n\nThe track has been added directly below "${guideTrack.name}" at playhead (${recordingStartPlayhead.toFixed(2)}s) without alignment shift.`;
+      const alertMsg = `NANOdaw Track Sync Notice:\n\n${reason}\n\nThe track has been added directly below "${guideTrack.name}" at playhead (${recordingStartPlayhead.toFixed(2)}s) without alignment shift.`;
 
       fallbackAddTrack(fullPass2, sampleRate, guideIdx);
 
