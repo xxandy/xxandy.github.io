@@ -936,22 +936,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { idx: bestIdx, peakAbs: peakAbs, crest: peakAbs / rms };
   }
 
-  // Linear interpolation segment resampler for time-fitting user calibration taps
-  function resampleSegment(src, srcStart, srcEnd, targetLen) {
-    const out = new Float32Array(targetLen);
-    const srcLen = srcEnd - srcStart;
-    if (srcLen <= 0 || targetLen <= 0) return out;
-    const step = (srcLen - 1) / Math.max(1, targetLen - 1);
-    for (let i = 0; i < targetLen; i++) {
-      const pos = srcStart + i * step;
-      const i0 = Math.floor(pos);
-      const i1 = Math.min(src.length - 1, i0 + 1);
-      const frac = pos - i0;
-      out[i] = src[i0] * (1 - frac) + src[i1] * frac;
-    }
-    return out;
-  }
-
   function playSynthBeep(time, freq = 900, dur = 0.08, destNode = null, volume = 0.8) {
     if (!recAudioCtx) return;
     try {
@@ -1420,33 +1404,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     console.log(`[Pass 1 Synth Guide] Authoritative tempo: ${dt.toFixed(4)}s (${Math.round(60 / dt)} BPM), Est. Latency: ${estLatencyMs}ms, Tap peaks: [${detectedTapPeaks.join(', ')}]`);
 
-    // 3. Construct TIME-FITTED user calibration audio:
-    // Distance between Tap 1 and Tap 2 is exactly 1 beat (dtSamples).
-    // Distance between Tap 2 and Tap 3 is exactly 1 beat (dtSamples).
-    // Distance between Tap 3 and Tap 4 is exactly 1 beat (dtSamples).
-    // User Tap 1 peak is placed at exact index preLeadSamples.
+    // 3. Extract continuous waveform recorded from Phase 1 exactly as the user tapped them:
+    // User Tap 1 peak is positioned at preLeadSamples so it sounds exactly 1 beat after the 4th beep.
     const preLeadSamples = Math.min(detectedTapPeaks[0], Math.round(0.040 * sampleRate));
+    const startSlice = Math.max(0, detectedTapPeaks[0] - preLeadSamples);
     const postRingoutSamples = Math.min(totalP1 - detectedTapPeaks[3], Math.round(1.50 * dtSamples));
+    const endSlice = Math.min(totalP1, detectedTapPeaks[3] + postRingoutSamples);
 
-    const calibLen = preLeadSamples + (3 * dtSamples) + postRingoutSamples;
-    const calibPCM = new Float32Array(calibLen);
-
-    // Attack leading up to Tap 1
-    calibPCM.set(p1Full.subarray(detectedTapPeaks[0] - preLeadSamples, detectedTapPeaks[0]), 0);
-
-    // Resample Beat 1 (Tap 1 peak to Tap 2 peak) to exact dtSamples
-    calibPCM.set(resampleSegment(p1Full, detectedTapPeaks[0], detectedTapPeaks[1], dtSamples), preLeadSamples);
-
-    // Resample Beat 2 (Tap 2 peak to Tap 3 peak) to exact dtSamples
-    calibPCM.set(resampleSegment(p1Full, detectedTapPeaks[1], detectedTapPeaks[2], dtSamples), preLeadSamples + dtSamples);
-
-    // Resample Beat 3 (Tap 3 peak to Tap 4 peak) to exact dtSamples
-    calibPCM.set(resampleSegment(p1Full, detectedTapPeaks[2], detectedTapPeaks[3], dtSamples), preLeadSamples + 2 * dtSamples);
-
-    // Full natural ringout after Tap 4
-    if (postRingoutSamples > 0) {
-      calibPCM.set(p1Full.subarray(detectedTapPeaks[3], detectedTapPeaks[3] + postRingoutSamples), preLeadSamples + 3 * dtSamples);
-    }
+    const calibPCM = p1Full.slice(startSlice, endSlice);
 
     // Apply gentle 3ms cosine fade-in and 25ms fade-out
     const fadeInSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.003));
