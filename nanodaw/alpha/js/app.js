@@ -1104,18 +1104,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // High-precision transient peak finder
-  function findTransientPeak(pcm, start, end) {
+  // High-precision transient peak finder with support for claimed beat exclusion
+  function findTransientPeak(pcm, start, end, excludedRanges = []) {
     const s0 = Math.max(0, start);
     const s1 = Math.min(pcm.length, end);
-    let bestIdx = s0;
+    let bestIdx = -1;
     let maxMetric = -1;
     let peakAbs = 0;
     let sumSq = 0;
+    let validCount = 0;
+
+    function isExcluded(idx) {
+      if (!excludedRanges || excludedRanges.length === 0) return false;
+      for (let i = 0; i < excludedRanges.length; i++) {
+        const r = excludedRanges[i];
+        if (idx >= r.start && idx <= r.end) return true;
+      }
+      return false;
+    }
+
     for (let s = s0; s < s1; s++) {
       const v = pcm[s];
       const amp = Math.abs(v);
       sumSq += v * v;
+      if (isExcluded(s)) continue;
+      validCount++;
       const diff = s > 0 ? Math.abs(v - pcm[s - 1]) : 0;
       const metric = amp * 0.65 + diff * 0.35;
       if (metric > maxMetric) {
@@ -1124,9 +1137,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         peakAbs = amp;
       }
     }
-    const n = Math.max(1, s1 - s0);
-    const rms = Math.sqrt(sumSq / n) || 1e-9;
-    return { idx: bestIdx, peakAbs: peakAbs, crest: peakAbs / rms };
+    const n = Math.max(1, validCount);
+    const rms = Math.sqrt(sumSq / Math.max(1, s1 - s0)) || 1e-9;
+    return {
+      idx: bestIdx >= 0 ? bestIdx : s0,
+      peakAbs: bestIdx >= 0 ? peakAbs : 0,
+      crest: (bestIdx >= 0 && rms > 0) ? (peakAbs / rms) : 0,
+      found: bestIdx >= 0
+    };
   }
 
   function playSynthBeep(time, freq = 900, dur = 0.08, destNode = null, volume = 0.8) {
@@ -2309,11 +2327,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     const firstBeat = Math.max(1, parseInt(syncTrackFirstBeat?.value, 10) || 5);
     const numBeats = Math.max(1, parseInt(syncTrackNumBeats?.value, 10) || 4);
 
-    // 1. Detect N peaks in the Guide Track
-    // "the 'sync beats' are counted from the current play head !"
-    // "when searching for peaks: Widen the area of the search by a lot - error on the side of too much. Don't try to compute it based on hardware latency."
+    // 1. Detect N peaks in the Guide Track, marking each as claimed so subsequent beats cannot rematch them
     const metroPeaksTimelineSec = [];
+    const guideClaimedRanges = [];
     const searchWinSecGuide = 0.40 * dt;
+    const exclRadiusGuide = Math.round(0.30 * dt * guideSR);
+    let lastMetroPeakSample = null;
 
     for (let k = 0; k < numBeats; k++) {
       const expTimelineSec = recordingStartPlayhead + (firstBeat - 1 + k) * dt;
@@ -2321,28 +2340,54 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) {
         continue;
       }
-      const s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
+      let s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
+      // Chronological constraint: beat k must occur strictly after beat k-1
+      if (lastMetroPeakSample !== null) {
+        s0 = Math.max(s0, lastMetroPeakSample + Math.round(0.35 * dt * guideSR));
+      }
       const s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
-      const pk = findTransientPeak(guidePCM, s0, s1);
-      if (pk.peakAbs >= 0.008 && pk.crest >= 1.3) {
+      if (s0 >= s1) continue;
+
+      const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
+      if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.3) {
         metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
+        lastMetroPeakSample = pk.idx;
+        // Mark as CLAIMED so it cannot be matched with future beats
+        guideClaimedRanges.push({
+          start: Math.max(0, pk.idx - exclRadiusGuide),
+          end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
+        });
       }
     }
 
-    // 2. Detect N peaks in the newly-recorded take
-    // User taps relative to start of take buffer (which started at recordingStartPlayhead)
-    // Widened search window to accommodate user tapping / listening delay
+    // 2. Detect N peaks in the newly-recorded take, marking each matched beat as CLAIMED
+    // User instruction: "each time a beat pair is matched, mark them as 'claimed'. Already-matched beats shouldn't be matched with future beats."
     const takePeaksSec = [];
+    const takeClaimedRanges = [];
     const searchWinEarlySec = 0.45 * dt;
     const searchWinLateSec = 0.85 * dt;
+    const exclRadiusTake = Math.round(0.30 * dt * sampleRate);
+    let lastTakePeakSample = null;
 
     for (let k = 0; k < numBeats; k++) {
       const expTakeSec = (firstBeat - 1 + k) * dt;
-      const s0 = Math.max(0, Math.round((expTakeSec - searchWinEarlySec) * sampleRate));
+      let s0 = Math.max(0, Math.round((expTakeSec - searchWinEarlySec) * sampleRate));
+      // Chronological constraint: beat k must occur strictly after beat k-1
+      if (lastTakePeakSample !== null) {
+        s0 = Math.max(s0, lastTakePeakSample + Math.round(0.35 * dt * sampleRate));
+      }
       const s1 = Math.min(fullPass2.length, Math.round((expTakeSec + searchWinLateSec) * sampleRate));
-      const pk = findTransientPeak(fullPass2, s0, s1);
-      if (pk.peakAbs >= 0.008 && pk.crest >= 1.3) {
+      if (s0 >= s1) continue;
+
+      const pk = findTransientPeak(fullPass2, s0, s1, takeClaimedRanges);
+      if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.3) {
         takePeaksSec.push(pk.idx / sampleRate);
+        lastTakePeakSample = pk.idx;
+        // Mark as CLAIMED so it cannot be matched with future beats
+        takeClaimedRanges.push({
+          start: Math.max(0, pk.idx - exclRadiusTake),
+          end: Math.min(fullPass2.length - 1, pk.idx + exclRadiusTake)
+        });
       }
     }
 

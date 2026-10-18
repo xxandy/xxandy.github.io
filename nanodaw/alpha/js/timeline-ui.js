@@ -657,7 +657,15 @@ class TimelineUI {
       });
     }
 
-    // 2. Timeline ruler recomputes timestamps and draws cue dots in realtime (NO GPU stretching)
+    // 2. Scale beat-matching sync lines SVG overlay smoothly with pinch
+    if (this.syncLinesOverlay) {
+      const headerWidth = this.getTrackHeaderWidth();
+      const focalPixelX = headerWidth + (this.pinchFocalTime * this.touchPinchInitialZoom);
+      this.syncLinesOverlay.style.transformOrigin = `${focalPixelX}px 0`;
+      this.syncLinesOverlay.style.transform = `scaleX(${effectiveRatio})`;
+    }
+
+    // 3. Timeline ruler recomputes timestamps and draws cue dots in realtime (NO GPU stretching)
     if (this.rulerCanvas) {
       this.rulerCanvas.style.transform = 'none';
     }
@@ -667,6 +675,12 @@ class TimelineUI {
   endPinch() {
     if (!this.isPinching) return;
     this.isPinching = false;
+
+    // Reset sync lines overlay transform so it redraws sharply at final zoom
+    if (this.syncLinesOverlay) {
+      this.syncLinesOverlay.style.transform = '';
+      this.syncLinesOverlay.style.transformOrigin = '';
+    }
 
     // Hide uncached tracks cue overlay
     if (this.pinchTracksOverlay) {
@@ -1635,18 +1649,61 @@ class TimelineUI {
       circR.setAttribute('stroke-width', '1.5');
       overlay.appendChild(circR);
 
-      // 4. Subtle anchor badge text above Peak 1
+      // 4. Tiny SVG Anchor above Peak 1 (drawn with vector lines, no font)
       if (isAnchor) {
-        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        text.setAttribute('x', xm.toFixed(1));
-        text.setAttribute('y', (Math.min(metroY, recY) - 6).toFixed(1));
-        text.setAttribute('fill', '#10b981');
-        text.setAttribute('font-size', '10px');
-        text.setAttribute('font-weight', '700');
-        text.setAttribute('font-family', 'sans-serif');
-        text.setAttribute('text-anchor', 'middle');
-        text.textContent = 'Anchor Beat';
-        overlay.appendChild(text);
+        const topY = Math.min(metroY, recY);
+        const anchorG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        const anchorY = topY - 14;
+        anchorG.setAttribute('transform', `translate(${xm.toFixed(1)}, ${anchorY.toFixed(1)})`);
+        anchorG.setAttribute('stroke', '#10b981');
+        anchorG.setAttribute('fill', 'none');
+        anchorG.setAttribute('stroke-linecap', 'round');
+        anchorG.setAttribute('stroke-linejoin', 'round');
+
+        // Ring at top
+        const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        ring.setAttribute('cx', '0');
+        ring.setAttribute('cy', '-5');
+        ring.setAttribute('r', '2.2');
+        ring.setAttribute('stroke-width', '1.5');
+        anchorG.appendChild(ring);
+
+        // Stock (crossbar)
+        const stock = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        stock.setAttribute('x1', '-5');
+        stock.setAttribute('y1', '-2.2');
+        stock.setAttribute('x2', '5');
+        stock.setAttribute('y2', '-2.2');
+        stock.setAttribute('stroke-width', '1.6');
+        anchorG.appendChild(stock);
+
+        // Shank (vertical shaft)
+        const shank = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        shank.setAttribute('x1', '0');
+        shank.setAttribute('y1', '-3');
+        shank.setAttribute('x2', '0');
+        shank.setAttribute('y2', '5.5');
+        shank.setAttribute('stroke-width', '1.6');
+        anchorG.appendChild(shank);
+
+        // Curved arms / crown (U-shaped arc curving upward)
+        const arms = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        arms.setAttribute('d', 'M -5.5 2 Q -5.5 6.5, 0 6.5 Q 5.5 6.5, 5.5 2');
+        arms.setAttribute('stroke-width', '1.6');
+        anchorG.appendChild(arms);
+
+        // Flukes (pointed tips on the ends of the arms)
+        const leftFluke = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        leftFluke.setAttribute('d', 'M -7 3.5 L -5.5 1.5 L -4 3.5');
+        leftFluke.setAttribute('stroke-width', '1.2');
+        anchorG.appendChild(leftFluke);
+
+        const rightFluke = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        rightFluke.setAttribute('d', 'M 4 3.5 L 5.5 1.5 L 7 3.5');
+        rightFluke.setAttribute('stroke-width', '1.2');
+        anchorG.appendChild(rightFluke);
+
+        overlay.appendChild(anchorG);
       }
     }
   }
