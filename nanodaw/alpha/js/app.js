@@ -936,7 +936,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { idx: bestIdx, peakAbs: peakAbs, crest: peakAbs / rms };
   }
 
-  function playSynthBeep(time, freq = 900, dur = 0.08, destNode = null) {
+  // Linear interpolation segment resampler for time-fitting user calibration taps
+  function resampleSegment(src, srcStart, srcEnd, targetLen) {
+    const out = new Float32Array(targetLen);
+    const srcLen = srcEnd - srcStart;
+    if (srcLen <= 0 || targetLen <= 0) return out;
+    const step = (srcLen - 1) / Math.max(1, targetLen - 1);
+    for (let i = 0; i < targetLen; i++) {
+      const pos = srcStart + i * step;
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(src.length - 1, i0 + 1);
+      const frac = pos - i0;
+      out[i] = src[i0] * (1 - frac) + src[i1] * frac;
+    }
+    return out;
+  }
+
+  function playSynthBeep(time, freq = 900, dur = 0.08, destNode = null, volume = 0.8) {
     if (!recAudioCtx) return;
     try {
       const osc = recAudioCtx.createOscillator();
@@ -944,8 +960,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       osc.type = 'triangle'; // Richer harmonics than sine, clearly audible on mobile phone speakers
       const playTime = Math.max(recAudioCtx.currentTime, time);
       osc.frequency.setValueAtTime(freq, playTime);
-      g.gain.setValueAtTime(0.8, playTime);
-      g.gain.exponentialRampToValueAtTime(0.001, playTime + dur);
+      const startGain = Math.max(0.0001, volume);
+      g.gain.setValueAtTime(startGain, playTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, playTime + dur);
       osc.connect(g);
       g.connect(destNode || recAudioCtx.destination);
       osc.start(playTime);
@@ -1142,6 +1159,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     pass1AudioChunks = [];
     pass1ClickEvents = [];
     totalPass1Samples = 0;
+    pass1StreamStartTime = null;
     resetClickBeads();
 
     if (hudLatencyText) {
@@ -1168,6 +1186,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function registerClick(now, samplePos) {
       if (recordingState !== 'pass1') return;
+      // In synth guide mode, ignore speaker audio during count-in beeps (Beeps 1 to 4)
+      if (isSynthGuide && pass1GuideStartTime && now < pass1GuideStartTime + (3.75 * (detectedIntervalSec || 0.5))) return;
       lastTransientTime = now;
       pass1ClickEvents.push({ ctxTime: now, samplePos: samplePos });
 
@@ -1250,7 +1270,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     recScriptProcessor.connect(recSilentGain);
     recSilentGain.connect(recAudioCtx.destination);
 
-    pass1StreamStartTime = recAudioCtx.currentTime;
+    if (pass1StreamStartTime === null) {
+      pass1StreamStartTime = recAudioCtx.currentTime;
+    }
 
     if (isSynthGuide) {
       // --- Option 1: Metronome Synth Beeps Mode ---
@@ -1291,8 +1313,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (hudInstruction) hudInstruction.textContent = `Tap along with beeps! Click ${tapIdx + 1} of 4`;
             const bead = [bead1, bead2, bead3, bead4][tapIdx];
             if (bead) {
-              bead.className = 'click-bead active';
-              setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
+              bead.className = 'click-bead beep';
+              setTimeout(() => {
+                if (bead && !bead.classList.contains('active')) bead.className = 'click-bead';
+              }, dt * 450);
             }
           }
         }, delayMs);
@@ -1337,6 +1361,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function finishPass1SynthGuide(dt) {
     if (!isRecording) return;
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+    const dtSamples = Math.round(dt * sampleRate);
 
     // Concatenate all Pass 1 recorded PCM
     const totalP1 = pass1AudioChunks.reduce((acc, c) => acc + c.length, 0);
@@ -1347,44 +1372,81 @@ document.addEventListener('DOMContentLoaded', async () => {
       p1Offset += chunk.length;
     }
 
-    // Expected arrival times for Beeps 5, 6, 7, 8 in mic recording
-    const searchWinSamples = Math.round(Math.min(0.200 * sampleRate, 0.40 * dt * sampleRate));
+    const searchWin = Math.round(0.20 * dtSamples);
     const detectedTapPeaks = [];
-    const latencyDeltas = [];
 
-    for (let k = 0; k < 4; k++) {
-      const theoreticalStreamSec = (pass1GuideStartTime - pass1StreamStartTime) + (4 + k) * dt;
-      const expectedSample = Math.round(theoreticalStreamSec * sampleRate);
+    // Nominal arrival of Beep 5 in mic recording (assuming 0 latency from stream start)
+    const streamStart = pass1StreamStartTime ?? (pass1GuideStartTime - 0.150);
+    const nominalBeep5Sec = (pass1GuideStartTime - streamStart) + 4 * dt;
+    const nominalBeep5Sample = Math.round(nominalBeep5Sec * sampleRate);
 
-      let searchCenter = expectedSample;
-      if (pass1ClickEvents[k] && Math.abs(pass1ClickEvents[k].samplePos - expectedSample) < searchWinSamples * 2) {
-        searchCenter = pass1ClickEvents[k].samplePos;
+    // 1. Locate User Tap 1 peak (on Beep 5)
+    let roughTap1 = nominalBeep5Sample;
+    if (pass1ClickEvents.length > 0) {
+      roughTap1 = pass1ClickEvents[0].samplePos;
+    }
+    let pk1 = findTransientPeak(p1Full, roughTap1 - searchWin, roughTap1 + searchWin);
+    if (pk1.peakAbs < 0.010 && pass1ClickEvents.length === 0) {
+      // If no click event registered, search wider forward window (accounting for hardware roundtrip latency)
+      pk1 = findTransientPeak(p1Full, nominalBeep5Sample - Math.round(0.05 * sampleRate), nominalBeep5Sample + Math.round(1.10 * dtSamples));
+    }
+    const tap1Peak = (pk1.peakAbs >= 0.008) ? pk1.idx : roughTap1;
+    detectedTapPeaks.push(tap1Peak);
+
+    // 2. Locate User Taps 2, 3, 4 peaks (on Beeps 6, 7, 8)
+    for (let k = 1; k < 4; k++) {
+      const expectedK = tap1Peak + k * dtSamples;
+      let roughK = expectedK;
+      if (pass1ClickEvents[k] && Math.abs(pass1ClickEvents[k].samplePos - expectedK) < 0.35 * dtSamples) {
+        roughK = pass1ClickEvents[k].samplePos;
       }
-
-      const pk = findTransientPeak(p1Full, searchCenter - searchWinSamples, searchCenter + searchWinSamples);
-      const actualSample = pk.peakAbs >= 0.010 ? pk.idx : searchCenter;
-      detectedTapPeaks.push(actualSample);
-
-      const actualStreamSec = actualSample / sampleRate;
-      latencyDeltas.push((actualStreamSec - theoreticalStreamSec) * 1000);
+      const pkK = findTransientPeak(p1Full, roughK - searchWin, roughK + searchWin);
+      const tapKPeak = (pkK.peakAbs >= 0.008) ? pkK.idx : roughK;
+      detectedTapPeaks.push(tapKPeak);
     }
 
-    // Unobtrusive estimated latency readout (informational only!)
-    const avgLatency = Math.round(latencyDeltas.reduce((a, b) => a + b, 0) / latencyDeltas.length);
+    // Ensure strictly ascending peaks with valid intervals
+    for (let k = 1; k < 4; k++) {
+      if (detectedTapPeaks[k] <= detectedTapPeaks[k - 1] + Math.round(0.20 * dtSamples)) {
+        detectedTapPeaks[k] = detectedTapPeaks[k - 1] + dtSamples;
+      }
+    }
+
+    // Estimated roundtrip latency readout (informational)
+    const estLatencyMs = Math.round(((tap1Peak / sampleRate) - nominalBeep5Sec) * 1000);
     if (hudLatencyText) {
-      hudLatencyText.textContent = `Est. Latency: ${avgLatency >= 0 ? '+' : ''}${avgLatency}ms`;
+      hudLatencyText.textContent = `Est. Latency: ${estLatencyMs >= 0 ? '+' : ''}${estLatencyMs}ms`;
       hudLatencyText.style.display = 'block';
     }
-    console.log(`[Pass 1 Synth Guide] Authoritative tempo: ${dt.toFixed(4)}s (${Math.round(60 / dt)} BPM), Est. Latency: ${avgLatency}ms`);
+    console.log(`[Pass 1 Synth Guide] Authoritative tempo: ${dt.toFixed(4)}s (${Math.round(60 / dt)} BPM), Est. Latency: ${estLatencyMs}ms, Tap peaks: [${detectedTapPeaks.join(', ')}]`);
 
-    // Extract continuous user calibration audio slice
-    // From start of first beat (with 40ms attack approach) to 1.5 beats after the 4th beat
+    // 3. Construct TIME-FITTED user calibration audio:
+    // Distance between Tap 1 and Tap 2 is exactly 1 beat (dtSamples).
+    // Distance between Tap 2 and Tap 3 is exactly 1 beat (dtSamples).
+    // Distance between Tap 3 and Tap 4 is exactly 1 beat (dtSamples).
+    // User Tap 1 peak is placed at exact index preLeadSamples.
     const preLeadSamples = Math.min(detectedTapPeaks[0], Math.round(0.040 * sampleRate));
-    const startSlice = Math.max(0, detectedTapPeaks[0] - preLeadSamples);
-    const postRingoutSamples = Math.min(totalP1 - detectedTapPeaks[3], Math.round(1.50 * dt * sampleRate));
-    const endSlice = Math.min(totalP1, detectedTapPeaks[3] + postRingoutSamples);
+    const postRingoutSamples = Math.min(totalP1 - detectedTapPeaks[3], Math.round(1.50 * dtSamples));
 
-    const calibPCM = p1Full.slice(startSlice, endSlice);
+    const calibLen = preLeadSamples + (3 * dtSamples) + postRingoutSamples;
+    const calibPCM = new Float32Array(calibLen);
+
+    // Attack leading up to Tap 1
+    calibPCM.set(p1Full.subarray(detectedTapPeaks[0] - preLeadSamples, detectedTapPeaks[0]), 0);
+
+    // Resample Beat 1 (Tap 1 peak to Tap 2 peak) to exact dtSamples
+    calibPCM.set(resampleSegment(p1Full, detectedTapPeaks[0], detectedTapPeaks[1], dtSamples), preLeadSamples);
+
+    // Resample Beat 2 (Tap 2 peak to Tap 3 peak) to exact dtSamples
+    calibPCM.set(resampleSegment(p1Full, detectedTapPeaks[1], detectedTapPeaks[2], dtSamples), preLeadSamples + dtSamples);
+
+    // Resample Beat 3 (Tap 3 peak to Tap 4 peak) to exact dtSamples
+    calibPCM.set(resampleSegment(p1Full, detectedTapPeaks[2], detectedTapPeaks[3], dtSamples), preLeadSamples + 2 * dtSamples);
+
+    // Full natural ringout after Tap 4
+    if (postRingoutSamples > 0) {
+      calibPCM.set(p1Full.subarray(detectedTapPeaks[3], detectedTapPeaks[3] + postRingoutSamples), preLeadSamples + 3 * dtSamples);
+    }
 
     // Apply gentle 3ms cosine fade-in and 25ms fade-out
     const fadeInSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.003));
@@ -1619,7 +1681,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }, delayMs);
     }
 
-    // Beats 5 to 8: Continuous user calibration audio
+    // Beats 5 to 8: Continuous user calibration audio (time-fitted)
     const preLeadSec = preLeadSamples / sampleRate;
     const userAudioStartTime = (startPreludeTime + 4 * dt) - preLeadSec;
 
@@ -1627,12 +1689,23 @@ document.addEventListener('DOMContentLoaded', async () => {
       const calibSrc = recAudioCtx.createBufferSource();
       calibSrc.buffer = calibBuffer;
       const calibGainNode = recAudioCtx.createGain();
-      calibGainNode.gain.setValueAtTime(2.0, userAudioStartTime);
+      calibGainNode.gain.setValueAtTime(1.2, userAudioStartTime);
       calibSrc.connect(calibGainNode);
       calibGainNode.connect(recAudioCtx.destination);
       calibSrc.start(userAudioStartTime);
     } catch (e) {
       console.warn('Error playing calibration buffer:', e);
+    }
+
+    // In 2-pass-mode with synth beeps: MIX Guide 1 beeps 5-8 at -4dB softly in background of user taps
+    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : true;
+    if (isSynthGuide) {
+      const softBeepVol = 0.8 * Math.pow(10, -4 / 20); // 4dB lower than standard beep volume 0.8
+      for (let i = 0; i < 4; i++) {
+        const beatTime = startPreludeTime + (4 + i) * dt;
+        const freq = (i === 3 ? 1800 : 1000); // 1800 Hz on 8th beat before downbeat
+        playSynthBeep(beatTime, freq, 0.08, null, softBeepVol);
+      }
     }
 
     // UI bead feedback for Beats 5 to 8
@@ -1641,7 +1714,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
       setTimeout(() => {
         if (recordingState !== 'pass2_prelude') return;
-        if (hudInstruction) hudInstruction.textContent = `Your Click ${i + 1} of 4 (calibrating...)`;
+        if (hudInstruction) hudInstruction.textContent = isSynthGuide
+          ? `Your Tap ${i + 1} of 4 (with guide beep)`
+          : `Your Click ${i + 1} of 4 (calibrating...)`;
         const bead = [bead1, bead2, bead3, bead4][i];
         if (bead) {
           bead.className = 'click-bead active';
