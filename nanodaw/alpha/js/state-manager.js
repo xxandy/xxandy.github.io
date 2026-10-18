@@ -374,18 +374,24 @@ class StateManager {
     return 266;
   }
 
-  addTrack(trackData, trackState = { volume: 1.0, mute: false, solo: false }) {
+  insertTrack(trackData, trackState = { volume: 1.0, mute: false, solo: false }, insertIndex = null) {
     if (!this.project) {
       this.project = { title: 'Untitled Project', tracks: [], markers: [] };
     }
     if (!this.project.tracks) {
       this.project.tracks = [];
     }
-    this.project.tracks.push(trackData);
-    this.tracksState.push(trackState);
-    const index = this.project.tracks.length - 1;
-    this.selectedTrackIndex = index;
-    this.notify('track_added', { track: trackData, index });
-    return index;
+    const idx = (insertIndex !== null && insertIndex !== undefined && insertIndex >= 0 && insertIndex <= this.project.tracks.length)
+      ? insertIndex
+      : this.project.tracks.length;
+    this.project.tracks.splice(idx, 0, trackData);
+    this.tracksState.splice(idx, 0, trackState);
+    this.selectedTrackIndex = idx;
+    this.notify('track_added', { track: trackData, index: idx });
+    return idx;
+  }
+
+  addTrack(trackData, trackState = { volume: 1.0, mute: false, solo: false }) {
+    return this.insertTrack(trackData, trackState, null);
   }
 }

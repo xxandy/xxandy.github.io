@@ -56,6 +56,8 @@ class TimelineUI {
     this.pinchAnchorScreenX = 0;
     this.pinchCanvasFocalX = 0;
     this.pinchTracksOverlay = null;
+    this.syncLinesData = null;
+    this.syncLinesOverlay = null;
 
     // Runtime flag for Option C (hardware-stretched waveform) vs Option A (dots only, waveform suppressed)
     let storedStretch = null;
@@ -1496,6 +1498,7 @@ class TimelineUI {
         }
       );
     });
+    this.renderSyncLines();
   }
 
   renderWaveformForTrack(trackIndex) {
@@ -1525,6 +1528,127 @@ class TimelineUI {
         window: win
       }
     );
+    this.renderSyncLines();
+  }
+
+  ensureSyncLinesOverlay() {
+    if (!this.syncLinesOverlay) {
+      this.syncLinesOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      this.syncLinesOverlay.id = 'syncLinesOverlay';
+      this.syncLinesOverlay.setAttribute('class', 'sync-lines-overlay');
+      this.syncLinesOverlay.style.position = 'absolute';
+      this.syncLinesOverlay.style.top = '0';
+      this.syncLinesOverlay.style.left = '0';
+      this.syncLinesOverlay.style.width = '100%';
+      this.syncLinesOverlay.style.height = '100%';
+      this.syncLinesOverlay.style.pointerEvents = 'none';
+      this.syncLinesOverlay.style.zIndex = '25';
+      if (this.timelineContent) {
+        this.timelineContent.appendChild(this.syncLinesOverlay);
+      }
+    }
+    return this.syncLinesOverlay;
+  }
+
+  setSyncLines(data) {
+    this.syncLinesData = data;
+    this.renderSyncLines();
+  }
+
+  clearSyncLines() {
+    this.syncLinesData = null;
+    if (this.syncLinesOverlay) {
+      this.syncLinesOverlay.innerHTML = '';
+      this.syncLinesOverlay.style.display = 'none';
+    }
+  }
+
+  renderSyncLines() {
+    if (!this.syncLinesData || !this.tracksContainer) {
+      if (this.syncLinesOverlay) this.syncLinesOverlay.style.display = 'none';
+      return;
+    }
+
+    const { metroTrackIndex, recTrackIndex, metroPeaksTimelineSec, recPeaksTimelineSec } = this.syncLinesData;
+    if (!metroPeaksTimelineSec || !recPeaksTimelineSec || metroPeaksTimelineSec.length === 0) {
+      if (this.syncLinesOverlay) this.syncLinesOverlay.style.display = 'none';
+      return;
+    }
+
+    const metroRow = this.tracksContainer.querySelector(`.track-row[data-index="${metroTrackIndex}"]`);
+    const recRow = this.tracksContainer.querySelector(`.track-row[data-index="${recTrackIndex}"]`);
+    if (!metroRow || !recRow) {
+      if (this.syncLinesOverlay) this.syncLinesOverlay.style.display = 'none';
+      return;
+    }
+
+    const overlay = this.ensureSyncLinesOverlay();
+    overlay.style.display = 'block';
+    overlay.innerHTML = '';
+
+    const headerWidth = this.getTrackHeaderWidth();
+    const tracksTop = this.tracksContainer.offsetTop || 0;
+
+    const metroY = tracksTop + metroRow.offsetTop + (metroRow.offsetHeight / 2);
+    const recY = tracksTop + recRow.offsetTop + (recRow.offsetHeight / 2);
+
+    const n = Math.min(metroPeaksTimelineSec.length, recPeaksTimelineSec.length);
+    for (let k = 0; k < n; k++) {
+      const tm = metroPeaksTimelineSec[k];
+      const tr = recPeaksTimelineSec[k];
+      const xm = headerWidth + (tm * this.pixelsPerSecond);
+      const xr = headerWidth + (tr * this.pixelsPerSecond);
+
+      const isAnchor = (k === 0);
+      const strokeColor = isAnchor ? '#10b981' : '#f59e0b'; // Emerald for anchor peak, Amber for follow peaks
+
+      // 1. Dotted line linking metronome peak to recorded peak
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', xm.toFixed(1));
+      line.setAttribute('y1', metroY.toFixed(1));
+      line.setAttribute('x2', xr.toFixed(1));
+      line.setAttribute('y2', recY.toFixed(1));
+      line.setAttribute('stroke', strokeColor);
+      line.setAttribute('stroke-width', isAnchor ? '2.5' : '1.8');
+      line.setAttribute('stroke-dasharray', isAnchor ? '5 3' : '4 4');
+      line.setAttribute('stroke-linecap', 'round');
+      line.setAttribute('opacity', '0.9');
+      overlay.appendChild(line);
+
+      // 2. Circle marker on metronome track peak
+      const circM = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circM.setAttribute('cx', xm.toFixed(1));
+      circM.setAttribute('cy', metroY.toFixed(1));
+      circM.setAttribute('r', isAnchor ? '4.5' : '3.5');
+      circM.setAttribute('fill', '#38bdf8');
+      circM.setAttribute('stroke', strokeColor);
+      circM.setAttribute('stroke-width', '1.5');
+      overlay.appendChild(circM);
+
+      // 3. Circle marker on recorded track peak
+      const circR = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circR.setAttribute('cx', xr.toFixed(1));
+      circR.setAttribute('cy', recY.toFixed(1));
+      circR.setAttribute('r', isAnchor ? '4.5' : '3.5');
+      circR.setAttribute('fill', '#ef4444');
+      circR.setAttribute('stroke', strokeColor);
+      circR.setAttribute('stroke-width', '1.5');
+      overlay.appendChild(circR);
+
+      // 4. Subtle anchor badge text above Peak 1
+      if (isAnchor) {
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', xm.toFixed(1));
+        text.setAttribute('y', (Math.min(metroY, recY) - 6).toFixed(1));
+        text.setAttribute('fill', '#10b981');
+        text.setAttribute('font-size', '10px');
+        text.setAttribute('font-weight', '700');
+        text.setAttribute('font-family', 'sans-serif');
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = 'Anchor Beat';
+        overlay.appendChild(text);
+      }
+    }
   }
 
   updateTrackStatus(trackIndex) {

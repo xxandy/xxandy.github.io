@@ -1431,9 +1431,8 @@ class AudioEngine {
   /**
    * Add a recorded audio buffer as a new track
    */
-  addRecordedTrack(name, audioBuffer, offset = 0, color = '#ef4444') {
+  addRecordedTrack(name, audioBuffer, offset = 0, color = '#ef4444', insertIndex = null) {
     const CHUNK_DURATION = 20.0;
-    const index = this.tracks.length;
     const duration = audioBuffer.duration;
     const numChunks = Math.max(1, Math.ceil(duration / CHUNK_DURATION));
     const chunks = [];
@@ -1470,9 +1469,13 @@ class AudioEngine {
       });
     }
 
+    const idx = (insertIndex !== null && insertIndex !== undefined && insertIndex >= 0 && insertIndex <= this.tracks.length)
+      ? insertIndex
+      : this.tracks.length;
+
     const trackData = {
-      index,
-      name: name || `Take ${index + 1}`,
+      index: idx,
+      name: name || `Take ${idx + 1}`,
       url: '',
       offset: Math.max(0, Number(offset) || 0),
       duration,
@@ -1490,23 +1493,24 @@ class AudioEngine {
       color: color || '#ef4444'
     };
 
-    this.tracks.push(trackData);
+    this.tracks.splice(idx, 0, trackData);
+    this.tracks.forEach((t, i) => { t.index = i; });
     this.reconnectAllTrackNodes();
 
     const totalDuration = this.getTotalDuration();
     if (this.loopEnd < totalDuration) this.loopEnd = totalDuration;
 
     if (this.state) {
-      this.state.addTrack({
+      this.state.insertTrack({
         name: trackData.name,
         url: '',
         offset: trackData.offset,
         duration,
         color: trackData.color
-      }, { volume: 1.0, mute: false, solo: false });
+      }, { volume: 1.0, mute: false, solo: false }, idx);
     }
 
-    this.emit('track_added', { trackIndex: index, track: trackData, totalDuration });
+    this.emit('track_added', { trackIndex: idx, track: trackData, totalDuration });
     return trackData;
   }
 

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=56">
+  <link rel="stylesheet" href="styles.css?v=57">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -20,7 +20,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v56</span>
+        <span class="version-badge" id="appVersionBadge">v57</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -423,109 +423,178 @@
 
   <!-- Record Setup Modal -->
   <div class="modal-backdrop hidden" id="recordSetupModal" style="display: none;">
-    <div class="modal-card" style="max-width: 480px;">
-      <div class="modal-header">
-        <h3 style="display:flex; align-items:center; gap:8px;">
-          <span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 8px #ef4444;"></span>
-          Record onto New Track
-        </h3>
-        <button class="btn-close-modal" id="btnCloseRecordSetupModal">&times;</button>
+    <div class="modal-card" style="max-width: 500px;">
+      <div class="modal-header" style="flex-direction:column; align-items:stretch; gap:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h3 style="display:flex; align-items:center; gap:8px;" id="recordModalHeaderTitle">
+            <span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 8px #ef4444;"></span>
+            Record / Metronome Setup
+          </h3>
+          <button class="btn-close-modal" id="btnCloseRecordSetupModal">&times;</button>
+        </div>
+
+        <!-- Tab Switcher: Record vs Metronome Track -->
+        <div style="display:flex; background:rgba(255,255,255,0.06); padding:3px; border-radius:8px; gap:4px;">
+          <button id="tabBtnRecord" type="button" class="btn" style="flex:1; padding:6px 12px; font-size:12.5px; font-weight:600; border-radius:6px; background:#ef4444; color:#fff; border:none; cursor:pointer;">
+            🎙️ Audio Record
+          </button>
+          <button id="tabBtnMetronome" type="button" class="btn" style="flex:1; padding:6px 12px; font-size:12.5px; font-weight:600; border-radius:6px; background:transparent; color:var(--text-secondary); border:none; cursor:pointer;">
+            ⏱️ Metronome Track
+          </button>
+        </div>
       </div>
       <div class="modal-body" style="display:flex; flex-direction:column; gap:16px;">
-        <div>
-          <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Input Device:</label>
-          <select class="input-styled" id="recordDeviceSelect" style="width:100%; cursor:pointer;">
-            <option value="">Default Microphone</option>
-          </select>
-        </div>
-
-        <div style="background:rgba(6, 182, 212, 0.08); border:1px solid rgba(6, 182, 212, 0.25); border-radius:8px; padding:10px 12px; display:flex; gap:10px; align-items:flex-start;">
-          <span style="font-size:18px; line-height:1; flex-shrink:0;">🎧</span>
-          <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
-            <strong style="color:var(--accent-cyan);">CD-Quality Audio Mode:</strong>
-            When using wireless Bluetooth headsets (Powerbeats, AirPods), nanodaw automatically selects your <strong>Phone's Built-in Mic</strong> so your headphones receive full <strong>44.1kHz CD-quality stereo playback</strong> while recording in studio quality!
+        <!-- Tab 1: Audio Record Content -->
+        <div id="tabContentRecord" style="display:flex; flex-direction:column; gap:16px;">
+          <div>
+            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Input Device:</label>
+            <select class="input-styled" id="recordDeviceSelect" style="width:100%; cursor:pointer;">
+              <option value="">Default Microphone</option>
+            </select>
           </div>
-        </div>
 
-        <!-- nanodaw 2-pass sync Container -->
-        <div style="background:rgba(239, 68, 68, 0.08); border:1px solid rgba(239, 68, 68, 0.25); border-radius:8px; padding:12px;">
-          <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:600; font-size:13px; color:#fff;">
-            <input type="checkbox" id="record2PassSync" checked style="width:16px; height:16px; accent-color:#ef4444; cursor:pointer;">
-            <span>nanodaw 2-pass sync <span style="font-size:10px; background:#ef4444; color:#fff; padding:2px 6px; border-radius:4px; margin-left:4px; font-weight:700;">DEFAULT</span></span>
-          </label>
+          <div style="background:rgba(6, 182, 212, 0.08); border:1px solid rgba(6, 182, 212, 0.25); border-radius:8px; padding:10px 12px; display:flex; gap:10px; align-items:flex-start;">
+            <span style="font-size:18px; line-height:1; flex-shrink:0;">🎧</span>
+            <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
+              <strong style="color:var(--accent-cyan);">CD-Quality Audio Mode:</strong>
+              When using wireless Bluetooth headsets (Powerbeats, AirPods), nanodaw automatically selects your <strong>Phone's Built-in Mic</strong> so your headphones receive full <strong>44.1kHz CD-quality stereo playback</strong> while recording in studio quality!
+            </div>
+          </div>
 
-          <!-- 2-Pass Options (visible when record2PassSync is checked) -->
-          <div id="container2PassSync" style="margin-top:12px; margin-left:26px; display:flex; flex-direction:column; gap:12px;">
-            <div style="font-size:11.5px; font-weight:600; color:var(--text-secondary);">Pass 1 Guide Beat:</div>
+          <!-- nanodaw 2-pass sync Container -->
+          <div style="background:rgba(239, 68, 68, 0.08); border:1px solid rgba(239, 68, 68, 0.25); border-radius:8px; padding:12px;">
+            <label style="display:flex; align-items:center; gap:10px; cursor:pointer; font-weight:600; font-size:13px; color:#fff;">
+              <input type="checkbox" id="record2PassSync" checked style="width:16px; height:16px; accent-color:#ef4444; cursor:pointer;">
+              <span>nanodaw 2-pass sync <span style="font-size:10px; background:#ef4444; color:#fff; padding:2px 6px; border-radius:4px; margin-left:4px; font-weight:700;">DEFAULT</span></span>
+            </label>
 
-            <!-- Option 1: Metronome Synth Beeps (Default) -->
-            <div style="display:flex; flex-direction:column; gap:6px;">
-              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
-                <input type="radio" name="pass1GuideMode" id="guideModeSynth" value="synth" checked style="accent-color:#ef4444; cursor:pointer;">
-                <span>Metronome Synth Beeps</span>
-              </label>
-              <div id="guideSynthSubOptions" style="margin-left:22px; display:flex; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <span>Tempo:</span>
-                  <input type="number" id="syncSynthTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
-                  <span>BPM (8 beeps: 4 count + 4 tap-along)</span>
+            <!-- 2-Pass Options (visible when record2PassSync is checked) -->
+            <div id="container2PassSync" style="margin-top:12px; margin-left:26px; display:flex; flex-direction:column; gap:12px;">
+              <div style="font-size:11.5px; font-weight:600; color:var(--text-secondary);">Pass 1 Guide Beat:</div>
+
+              <!-- Option 1: Metronome Synth Beeps (Default) -->
+              <div style="display:flex; flex-direction:column; gap:6px;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
+                  <input type="radio" name="pass1GuideMode" id="guideModeSynth" value="synth" checked style="accent-color:#ef4444; cursor:pointer;">
+                  <span>Metronome Synth Beeps</span>
+                </label>
+                <div id="guideSynthSubOptions" style="margin-left:22px; display:flex; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span>Tempo:</span>
+                    <input type="number" id="syncSynthTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
+                    <span>BPM (8 beeps: 4 count + 4 tap-along)</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#fff;">
+                      <input type="checkbox" id="syncMetronomeOn" checked style="accent-color:#ef4444; cursor:pointer;">
+                      <span>Metronome ON during take</span>
+                    </label>
+                    <div style="display:flex; align-items:center; gap:4px;">
+                      <span>Volume:</span>
+                      <input type="text" id="syncMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
+                    </div>
+                  </div>
                 </div>
-                <div style="display:flex; align-items:center; gap:10px;">
-                  <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:#fff;">
-                    <input type="checkbox" id="syncMetronomeOn" checked style="accent-color:#ef4444; cursor:pointer;">
-                    <span>Metronome ON during take</span>
-                  </label>
-                  <div style="display:flex; align-items:center; gap:4px;">
-                    <span>Volume:</span>
-                    <input type="text" id="syncMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
+              </div>
+
+              <!-- Option 2: Backing Track / Metronome Sync -->
+              <div style="display:flex; flex-direction:column; gap:6px;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
+                  <input type="radio" name="pass1GuideMode" id="guideModeTrack" value="track" style="accent-color:#ef4444; cursor:pointer;">
+                  <span>Backing Track / Metronome Sync</span>
+                </label>
+                <div id="guideTrackSubOptions" style="margin-left:22px; display:none; flex-direction:column; gap:8px; font-size:11.5px; color:var(--text-secondary);">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span>Guide Track:</span>
+                    <select id="syncGuideTrackSelect" class="input-styled" style="padding:3px 8px; font-size:12px; max-width:240px;">
+                      <option value="">None</option>
+                    </select>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:12px; margin-top:2px;">
+                    <div style="display:flex; align-items:center; gap:6px;">
+                      <span>First beat to sync:</span>
+                      <input type="number" id="syncTrackFirstBeat" class="input-styled" value="5" min="1" max="64" style="width:50px; padding:3px 6px; font-size:12px;">
+                    </div>
+                    <div style="display:flex; align-items:center; gap:6px;">
+                      <span>Beats to sync:</span>
+                      <input type="number" id="syncTrackNumBeats" class="input-styled" value="4" min="1" max="16" style="width:50px; padding:3px 6px; font-size:12px;">
+                    </div>
+                  </div>
+                  <div style="font-size:11px; color:rgba(255,255,255,0.45); line-height:1.4;">
+                    No countdown. Recording starts immediately from playhead. Tap along with beats in the chosen track to lock timing.
                   </div>
                 </div>
               </div>
             </div>
 
-            <!-- Option 2: Backing Track -->
-            <div style="display:flex; flex-direction:column; gap:6px;">
+            <!-- Single-Pass Fallback (visible when record2PassSync is unchecked) -->
+            <div id="containerSinglePass" style="margin-top:12px; margin-left:26px; display:none; flex-direction:column; gap:10px;">
               <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
-                <input type="radio" name="pass1GuideMode" id="guideModeTrack" value="track" style="accent-color:#ef4444; cursor:pointer;">
-                <span>Backing Track</span>
+                <input type="checkbox" id="singleMetronomeOn" style="accent-color:#ef4444; cursor:pointer;">
+                <span>Metronome ON (realtime click during recording)</span>
               </label>
-              <div id="guideTrackSubOptions" style="margin-left:22px; display:none; align-items:center; gap:8px; font-size:11.5px; color:var(--text-secondary);">
-                <span>Guide Track:</span>
-                <select id="syncGuideTrackSelect" class="input-styled" style="padding:3px 8px; font-size:12px; max-width:200px;">
-                  <option value="">None</option>
-                </select>
+              <div id="singleMetronomeSubOptions" style="margin-left:22px; display:none; align-items:center; gap:12px; font-size:11.5px; color:var(--text-secondary);">
+                <div style="display:flex; align-items:center; gap:6px;">
+                  <span>Tempo:</span>
+                  <input type="number" id="singleMetronomeTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
+                  <span>BPM</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:4px;">
+                  <span>Volume:</span>
+                  <input type="text" id="singleMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
+                </div>
               </div>
+              <p style="margin:4px 0 0 0; font-size:11px; color:rgba(255,255,255,0.45); line-height:1.4;">
+                Single-pass mode relies on system-reported audio latency for track placement.
+              </p>
             </div>
           </div>
 
-          <!-- Single-Pass Fallback (visible when record2PassSync is unchecked) -->
-          <div id="containerSinglePass" style="margin-top:12px; margin-left:26px; display:none; flex-direction:column; gap:10px;">
-            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600; color:#fff;">
-              <input type="checkbox" id="singleMetronomeOn" style="accent-color:#ef4444; cursor:pointer;">
-              <span>Metronome ON (realtime click during recording)</span>
-            </label>
-            <div id="singleMetronomeSubOptions" style="margin-left:22px; display:none; align-items:center; gap:12px; font-size:11.5px; color:var(--text-secondary);">
-              <div style="display:flex; align-items:center; gap:6px;">
-                <span>Tempo:</span>
-                <input type="number" id="singleMetronomeTempo" class="input-styled" value="90" min="40" max="240" style="width:65px; padding:3px 6px; font-size:12px;">
-                <span>BPM</span>
-              </div>
-              <div style="display:flex; align-items:center; gap:4px;">
-                <span>Volume:</span>
-                <input type="text" id="singleMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
-              </div>
-            </div>
-            <p style="margin:4px 0 0 0; font-size:11px; color:rgba(255,255,255,0.45); line-height:1.4;">
-              Single-pass mode relies on system-reported audio latency for track placement.
-            </p>
+          <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
+            <button class="btn btn-secondary" id="btnCancelRecordSetup">Cancel</button>
+            <button class="btn btn-primary" id="btnStartRecordingAction" style="background:#ef4444; color:#fff; font-weight:600; box-shadow:0 0 12px rgba(239,68,68,0.4);">
+              Start Recording
+            </button>
           </div>
         </div>
 
-        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
-          <button class="btn btn-secondary" id="btnCancelRecordSetup">Cancel</button>
-          <button class="btn btn-primary" id="btnStartRecordingAction" style="background:#ef4444; color:#fff; font-weight:600; box-shadow:0 0 12px rgba(239,68,68,0.4);">
-            Start Recording
-          </button>
+        <!-- Tab 2: Metronome Track Generator Content -->
+        <div id="tabContentMetronome" style="display:none; flex-direction:column; gap:14px;">
+          <div>
+            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Track Name:</label>
+            <input type="text" id="metroTrackName" class="input-styled" value="Metronome 1" style="width:100%; padding:6px 10px; font-size:13px;">
+          </div>
+
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div>
+              <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Tempo (BPM):</label>
+              <input type="number" id="metroTempo" class="input-styled" value="90" min="40" max="240" style="width:100%; padding:6px 10px; font-size:13px;">
+            </div>
+            <div>
+              <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Beats per Measure:</label>
+              <input type="number" id="metroBeatsPerMeasure" class="input-styled" value="4" min="1" max="16" style="width:100%; padding:6px 10px; font-size:13px;">
+            </div>
+          </div>
+
+          <div>
+            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Duration (mm:ss):</label>
+            <input type="text" id="metroDuration" class="input-styled" value="03:00" placeholder="03:00" style="width:100%; padding:6px 10px; font-size:13px;">
+          </div>
+
+          <div style="background:rgba(56, 189, 248, 0.08); border:1px solid rgba(56, 189, 248, 0.25); border-radius:8px; padding:10px 12px; display:flex; gap:10px; align-items:flex-start;">
+            <span style="font-size:18px; line-height:1; flex-shrink:0;">⏱️</span>
+            <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.45;">
+              <strong style="color:#38bdf8;">Offline Metronome Track:</strong>
+              Generates an offline synthesized audio track at the <strong>TOP of your project</strong>. Beat 1 is accented. This track can be selected for instant track-based sync.
+            </div>
+          </div>
+
+          <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
+            <button class="btn btn-secondary" id="btnCancelMetronome">Cancel</button>
+            <button class="btn btn-primary" id="btnGoMetronome" style="background:#38bdf8; color:#0f172a; font-weight:700; box-shadow:0 0 12px rgba(56,189,248,0.4);">
+              Go (Generate Track)
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -578,12 +647,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=56"></script>
-  <script src="js/mp3-decoder.js?v=56"></script>
-  <script src="js/state-manager.js?v=56"></script>
-  <script src="js/waveform-cache.js?v=56"></script>
-  <script src="js/audio-engine.js?v=56"></script>
-  <script src="js/timeline-ui.js?v=56"></script>
-  <script src="js/app.js?v=56"></script>
+  <script src="js/profiler.js?v=57"></script>
+  <script src="js/mp3-decoder.js?v=57"></script>
+  <script src="js/state-manager.js?v=57"></script>
+  <script src="js/waveform-cache.js?v=57"></script>
+  <script src="js/audio-engine.js?v=57"></script>
+  <script src="js/timeline-ui.js?v=57"></script>
+  <script src="js/app.js?v=57"></script>
 </body>
 </html>
