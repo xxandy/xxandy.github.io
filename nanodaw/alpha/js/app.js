@@ -679,6 +679,37 @@ document.addEventListener('DOMContentLoaded', async () => {
   const metroDuration = document.getElementById('metroDuration');
   const btnGoMetronome = document.getElementById('btnGoMetronome');
   const btnCancelMetronome = document.getElementById('btnCancelMetronome');
+  const recordAutoGain = document.getElementById('recordAutoGain');
+  const recordAutoGainBadge = document.getElementById('recordAutoGainBadge');
+
+  function isIOSorIPad() {
+    const ua = navigator.userAgent || '';
+    const isIOSPlatform = /iPad|iPhone|iPod/.test(ua);
+    const isIPadOS = (typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    return isIOSPlatform || isIPadOS;
+  }
+
+  let autoGainUserOverridden = false;
+  function initAutoGainDefault() {
+    if (!recordAutoGain) return;
+    if (!autoGainUserOverridden) {
+      const isAppleMobile = isIOSorIPad();
+      recordAutoGain.checked = isAppleMobile;
+      if (recordAutoGainBadge) {
+        recordAutoGainBadge.textContent = isAppleMobile ? 'AUTO (iPad ON)' : 'AUTO (Android OFF)';
+      }
+    }
+  }
+
+  if (recordAutoGain) {
+    initAutoGainDefault();
+    recordAutoGain.addEventListener('change', () => {
+      autoGainUserOverridden = true;
+      if (recordAutoGainBadge) {
+        recordAutoGainBadge.textContent = recordAutoGain.checked ? 'MANUAL (ON)' : 'MANUAL (OFF)';
+      }
+    });
+  }
 
   let activeRecordModalTab = 'record'; // 'record' or 'metronome'
   let isTrackSyncTake = false;
@@ -824,30 +855,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const pass1AudioStore = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
-
-  function normalizeToTarget(pcm, targetPeak = 0.75) {
-    if (!pcm || pcm.length === 0) return pcm;
-    let maxAmp = 0;
-    for (let i = 0; i < pcm.length; i++) {
-      const a = Math.abs(pcm[i]);
-      if (a > maxAmp) maxAmp = a;
-    }
-    // Only amplify if there is actual audio above noise floor (e.g. maxAmp >= 0.003)
-    // and don't amplify beyond 25x (+28dB) to prevent noise explosion on dead silence
-    if (maxAmp >= 0.003 && maxAmp < targetPeak) {
-      const gain = Math.min(25.0, targetPeak / maxAmp);
-      for (let i = 0; i < pcm.length; i++) {
-        pcm[i] = Math.max(-1.0, Math.min(1.0, pcm[i] * gain));
-      }
-      console.log(`[Audio Normalization] Amplified take by ${gain.toFixed(2)}x (+${(20 * Math.log10(gain)).toFixed(1)}dB). Peak was ${maxAmp.toFixed(4)}, now ${(maxAmp * gain).toFixed(4)} (~${Math.round(targetPeak * 100)}% of max).`);
-    } else if (maxAmp > 0.98) {
-      const gain = 0.95 / maxAmp;
-      for (let i = 0; i < pcm.length; i++) {
-        pcm[i] *= gain;
-      }
-    }
-    return pcm;
-  }
 
   let workletInitPromise = null;
 
@@ -1476,11 +1483,12 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (typeof navigator !== 'undefined' && navigator.audioSession) {
             try { navigator.audioSession.type = 'play-and-record'; } catch (_) {}
           }
+          const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
           const tempStream = await navigator.mediaDevices.getUserMedia({
             audio: {
               sampleRate: { ideal: 44100 },
               echoCancellation: false,
-              autoGainControl: false,
+              autoGainControl: useAutoGain,
               noiseSuppression: false
             }
           });
@@ -1797,12 +1805,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         timeline.clearSyncLines();
       }
 
-      // 2. Acquire mic stream without browser audio DSP filters for pure transient response & 44.1kHz CD quality
+      // 2. Acquire mic stream with user-selected / smart autoGainControl (noiseSuppression & echoCancellation false)
+      const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
       const audioConstraints = {
         sampleRate: { ideal: 44100 },
         channelCount: { ideal: 1 },
         echoCancellation: false,
-        autoGainControl: false,
+        autoGainControl: useAutoGain,
         noiseSuppression: false
       };
       if (deviceId) {
@@ -1818,7 +1827,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             audio: {
               sampleRate: { ideal: 44100 },
               echoCancellation: false,
-              autoGainControl: false,
+              autoGainControl: useAutoGain,
               noiseSuppression: false
             }
           });
@@ -2014,8 +2023,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
     const dtSamples = Math.round(dt * sampleRate);
 
-    // Concatenate all Pass 1 recorded PCM in one batched operation and normalize to 0.75
-    const p1Full = normalizeToTarget(pass1AudioStore.toFlatArray(), 0.75);
+    // Concatenate all Pass 1 recorded PCM in one batched operation without digital modification
+    const p1Full = pass1AudioStore.toFlatArray();
     const totalP1 = p1Full.length;
 
     const searchWin = Math.round(0.20 * dtSamples);
@@ -2108,8 +2117,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isRecording) return;
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
-    // 1. Gather all recorded PCM from Pass 1 in one batched operation and normalize to 0.75
-    const p1Full = normalizeToTarget(pass1AudioStore.toFlatArray(), 0.75);
+    // 1. Gather all recorded PCM from Pass 1 in one batched operation without digital modification
+    const p1Full = pass1AudioStore.toFlatArray();
     const totalP1 = p1Full.length;
 
     // 2. High-precision transient peak detection for all 4 taps in p1Full
@@ -2496,8 +2505,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (pass2AudioStore.totalSamples > 0) {
       const fullPass2 = pass2AudioStore.toFlatArray();
-      // Normalize recorded take to 75% of max volume (0.75 / -2.5 dBFS)
-      normalizeToTarget(fullPass2, 0.75);
       const totalSamples = fullPass2.length;
 
       // If this was a Track Sync take, process it using peak alignment
@@ -2603,8 +2610,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         takePCM = fullPass2;
       }
     } else if (pass1AudioStore.totalSamples > 0) {
-      // Stopped during Pass 1: keep all audio captured in Pass 1 normalized to 0.75!
-      takePCM = normalizeToTarget(pass1AudioStore.toFlatArray(), 0.75);
+      // Stopped during Pass 1: keep all audio captured in Pass 1 as recorded
+      takePCM = pass1AudioStore.toFlatArray();
     }
 
     // Fallback if no audio samples were captured
@@ -2710,7 +2717,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    // 2. Detect N peaks in the newly-recorded take (fullPass2 is already normalized to 0.75!)
+    // 2. Detect N peaks in the newly-recorded take directly from raw captured system audio
     // User instruction: "each time a beat pair is matched, mark them as 'claimed'. Already-matched beats shouldn't be matched with future beats."
     const takePeaksSec = [];
     const takeClaimedRanges = [];
@@ -2857,6 +2864,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         switchRecordModalTab('record');
         populateSyncGuideTracks();
         updateRecordModalToggles();
+        initAutoGainDefault();
 
         // Proactively pre-allocate standby buffers and pre-warm AudioWorklet ahead of time!
         pass1AudioStore.prepareAheadOfTime(4);
