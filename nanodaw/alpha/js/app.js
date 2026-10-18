@@ -1333,7 +1333,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     metroTracks.forEach(({ track, idx }) => {
       const opt = document.createElement('option');
       opt.value = String(idx);
-      opt.textContent = `⏱️ Track ${idx + 1}: ${track.name || 'Metronome'}`;
+      const trkTempo = track.tempo || state.project?.tracks?.[idx]?.tempo;
+      const bpmLabel = trkTempo ? ` (${trkTempo} BPM)` : '';
+      opt.textContent = `⏱️ Track ${idx + 1}: ${track.name || 'Metronome'}${bpmLabel}`;
       syncGuideTrackSelect.appendChild(opt);
     });
 
@@ -1348,6 +1350,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Auto-select first Metronome* track if present; otherwise default to "None"
     if (metroTracks.length > 0) {
       syncGuideTrackSelect.value = String(metroTracks[0].idx);
+      const firstMetro = metroTracks[0].track;
+      const mTempo = firstMetro.tempo || state.project?.tracks?.[metroTracks[0].idx]?.tempo;
+      if (mTempo) {
+        if (syncSynthTempo) syncSynthTempo.value = mTempo;
+        if (singleMetronomeTempo) singleMetronomeTempo.value = mTempo;
+        if (metroTempo) metroTempo.value = mTempo;
+      }
     } else {
       syncGuideTrackSelect.value = '';
     }
@@ -1363,6 +1372,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (metroTempo && (!metroTempo.value || metroTempo.value === '90')) {
       metroTempo.value = defaultTempo;
     }
+  }
+
+  if (syncGuideTrackSelect) {
+    syncGuideTrackSelect.addEventListener('change', () => {
+      const gIdx = parseInt(syncGuideTrackSelect.value, 10);
+      if (!isNaN(gIdx) && audio.tracks[gIdx]) {
+        const trk = audio.tracks[gIdx];
+        const trkTempo = trk.tempo || state.project?.tracks?.[gIdx]?.tempo;
+        if (trkTempo) {
+          if (syncSynthTempo) syncSynthTempo.value = trkTempo;
+          if (singleMetronomeTempo) singleMetronomeTempo.value = trkTempo;
+          if (metroTempo) metroTempo.value = trkTempo;
+          if (state.project) {
+            state.project.tempo = trkTempo;
+            state.project.bpm = trkTempo;
+          }
+        }
+      }
+    });
   }
 
   if (record2PassSync) record2PassSync.addEventListener('change', updateRecordModalToggles);
@@ -1400,8 +1428,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       audio.isRecordingMode = false;
       audio.setPlaybackAudioSession();
 
-      // Insert at the TOP of the project (index 0)
-      const trackData = audio.addRecordedTrack(trackName, metroBuffer, 0, '#38bdf8', 0);
+      // Insert at the TOP of the project (index 0) with full metronome metadata
+      const trackData = audio.addRecordedTrack(trackName, metroBuffer, 0, '#38bdf8', 0, {
+        isMetronome: true,
+        tempo,
+        beatsPerMeasure
+      });
       if (trackData) {
         trackData.tempo = tempo;
         trackData.isMetronome = true;
@@ -2628,37 +2660,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     const guideSR = guideBuffer.sampleRate;
     const guideOffset = Number(guideTrack.offset) || 0;
 
-    const guideIsMetro = guideTrack.isMetronome || /^metronome/i.test(guideTrack.name || '');
-    const tempo = guideTrack.tempo || state.project?.tempo || state.project?.bpm || parseInt(syncSynthTempo?.value, 10) || 90;
+    const guideIsMetro = guideTrack.isMetronome || state.project?.tracks?.[guideIdx]?.isMetronome || /^metronome/i.test(guideTrack.name || '');
+    const tempo = guideTrack.tempo || state.project?.tracks?.[guideIdx]?.tempo || state.project?.tempo || state.project?.bpm || parseInt(syncSynthTempo?.value, 10) || 90;
     const dt = 60 / tempo;
     const firstBeat = Math.max(1, parseInt(syncTrackFirstBeat?.value, 10) || 5);
     const numBeats = Math.max(1, parseInt(syncTrackNumBeats?.value, 10) || 4);
 
-    // 1. Detect N peaks in the Guide Track, marking each as claimed so subsequent beats cannot rematch them
+    // 1. Locate N peaks in the Guide Track
     const metroPeaksTimelineSec = [];
     const guideClaimedRanges = [];
     const exclRadiusGuide = Math.round(0.25 * dt * guideSR);
     let lastMetroPeakSample = null;
 
     if (guideIsMetro) {
-      // For generated metronome tracks, the clicks are at mathematically exact sample offsets!
+      // For generated metronome tracks, we generated the audio and know the exact tempo!
+      // The clicks are at mathematically exact timestamps - no transient searching needed!
       for (let k = 0; k < numBeats; k++) {
         const beatNum = firstBeat + k; // 1-based beat index
-        const centerSample = Math.round((beatNum - 1) * dt * guideSR);
-        const winEarly = Math.round(0.15 * dt * guideSR);
-        const winLate = Math.round(0.35 * dt * guideSR);
-        const s0 = Math.max(0, centerSample - winEarly);
-        const s1 = Math.min(guidePCM.length, centerSample + winLate);
-        if (s0 >= s1) continue;
-
-        const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
-        if (pk.found && pk.peakAbs >= 0.008) {
-          metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
-          guideClaimedRanges.push({
-            start: Math.max(0, pk.idx - exclRadiusGuide),
-            end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
-          });
-        }
+        const beatTimeSec = guideOffset + ((beatNum - 1) * dt);
+        metroPeaksTimelineSec.push(beatTimeSec);
       }
     } else {
       // For general audio/backing tracks: wide adaptive search anchored from previous peak

@@ -1431,7 +1431,7 @@ class AudioEngine {
   /**
    * Add a recorded audio buffer as a new track
    */
-  addRecordedTrack(name, audioBuffer, offset = 0, color = '#ef4444', insertIndex = null) {
+  addRecordedTrack(name, audioBuffer, offset = 0, color = '#ef4444', insertIndex = null, extraMetadata = {}) {
     const CHUNK_DURATION = 20.0;
     const duration = audioBuffer.duration;
     const numChunks = Math.max(1, Math.ceil(duration / CHUNK_DURATION));
@@ -1490,7 +1490,8 @@ class AudioEngine {
       gainNode: null,
       analyserNode: null,
       sourceNode: null,
-      color: color || '#ef4444'
+      color: color || '#ef4444',
+      ...extraMetadata
     };
 
     this.tracks.splice(idx, 0, trackData);
@@ -1506,7 +1507,8 @@ class AudioEngine {
         url: '',
         offset: trackData.offset,
         duration,
-        color: trackData.color
+        color: trackData.color,
+        ...extraMetadata
       }, { volume: 1.0, mute: false, solo: false }, idx);
     }
 
