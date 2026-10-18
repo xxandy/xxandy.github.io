@@ -711,6 +711,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  const recordInternalGain = document.getElementById('recordInternalGain');
+  const recordInternalGainBadge = document.getElementById('recordInternalGainBadge');
+
+  if (recordInternalGain) {
+    // ALWAYS off by default
+    recordInternalGain.checked = false;
+    recordInternalGain.addEventListener('change', () => {
+      if (recordInternalGainBadge) {
+        if (recordInternalGain.checked) {
+          recordInternalGainBadge.textContent = 'ON';
+          recordInternalGainBadge.style.background = 'rgba(6, 182, 212, 0.2)';
+          recordInternalGainBadge.style.color = 'var(--accent-cyan)';
+          recordInternalGainBadge.style.borderColor = 'rgba(6, 182, 212, 0.4)';
+        } else {
+          recordInternalGainBadge.textContent = 'OFF';
+          recordInternalGainBadge.style.background = 'rgba(255, 255, 255, 0.08)';
+          recordInternalGainBadge.style.color = 'var(--text-secondary)';
+          recordInternalGainBadge.style.borderColor = 'var(--border-color)';
+        }
+      }
+    });
+  }
+
   let activeRecordModalTab = 'record'; // 'record' or 'metronome'
   let isTrackSyncTake = false;
   let trackSyncGuideIndex = null;
@@ -855,6 +878,98 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const pass1AudioStore = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
+
+  // nanodaw Internal Gain Control & Automatic Noise Suppression
+  // Includes: 2nd-order 80Hz Low-Cut (rumble filter) + 10.5kHz High-Cut (hiss filter) + Downward Noise Expander + 75% Peak Scaling
+  function processInternalGainAndNoiseSuppression(pcm, sampleRate = 44100, targetPeak = 0.75) {
+    if (!pcm || pcm.length === 0) return pcm;
+    const len = pcm.length;
+    const out = new Float32Array(len);
+
+    // 1. 2nd-order Butterworth High-Pass Filter (80 Hz Low-Cut to remove table/room rumble and mains hum)
+    const f_hp = 80, q_hp = 0.7071;
+    const w0_hp = 2 * Math.PI * f_hp / sampleRate;
+    const cos_hp = Math.cos(w0_hp);
+    const alpha_hp = Math.sin(w0_hp) / (2 * q_hp);
+    const a0_hp = 1 + alpha_hp;
+    const b0_hp = ((1 + cos_hp) / 2) / a0_hp;
+    const b1_hp = (-(1 + cos_hp)) / a0_hp;
+    const b2_hp = ((1 + cos_hp) / 2) / a0_hp;
+    const a1_hp = (-2 * cos_hp) / a0_hp;
+    const a2_hp = (1 - alpha_hp) / a0_hp;
+
+    // 2. 2nd-order Butterworth Low-Pass Filter (10.5 kHz High-Cut to remove electronic high-frequency hiss)
+    const f_lp = 10500, q_lp = 0.7071;
+    const w0_lp = 2 * Math.PI * f_lp / sampleRate;
+    const cos_lp = Math.cos(w0_lp);
+    const alpha_lp = Math.sin(w0_lp) / (2 * q_lp);
+    const a0_lp = 1 + alpha_lp;
+    const b0_lp = ((1 - cos_lp) / 2) / a0_lp;
+    const b1_lp = (1 - cos_lp) / a0_lp;
+    const b2_lp = ((1 - cos_lp) / 2) / a0_lp;
+    const a1_lp = (-2 * cos_lp) / a0_lp;
+    const a2_lp = (1 - alpha_lp) / a0_lp;
+
+    let x1_hp = 0, x2_hp = 0, y1_hp = 0, y2_hp = 0;
+    let x1_lp = 0, x2_lp = 0, y1_lp = 0, y2_lp = 0;
+
+    for (let i = 0; i < len; i++) {
+      const inSamp = pcm[i];
+      const hpSamp = b0_hp * inSamp + b1_hp * x1_hp + b2_hp * x2_hp - a1_hp * y1_hp - a2_hp * y2_hp;
+      x2_hp = x1_hp; x1_hp = inSamp;
+      y2_hp = y1_hp; y1_hp = hpSamp;
+
+      const lpSamp = b0_lp * hpSamp + b1_lp * x1_lp + b2_lp * x2_lp - a1_lp * y1_lp - a2_lp * y2_lp;
+      x2_lp = x1_lp; x1_lp = hpSamp;
+      y2_lp = y1_lp; y1_lp = lpSamp;
+
+      out[i] = lpSamp;
+    }
+
+    // 3. Gentle Downward Expander (Noise Gate during silent intervals)
+    let sumSq = 0;
+    const sampleLimit = Math.min(len, sampleRate);
+    for (let i = 0; i < sampleLimit; i++) sumSq += out[i] * out[i];
+    const estRms = Math.sqrt(sumSq / sampleLimit);
+    const gateThreshold = Math.max(0.003, estRms * 1.4);
+
+    let currentGain = 1.0;
+    const attackCoeff = Math.exp(-1 / (0.002 * sampleRate)); // 2ms fast attack to keep transients punchy
+    const releaseCoeff = Math.exp(-1 / (0.080 * sampleRate)); // 80ms smooth release
+
+    for (let i = 0; i < len; i++) {
+      const absVal = Math.abs(out[i]);
+      const targetGain = absVal > gateThreshold ? 1.0 : 0.20; // 14 dB attenuation during quiet intervals
+      if (targetGain > currentGain) {
+        currentGain = attackCoeff * currentGain + (1 - attackCoeff) * targetGain;
+      } else {
+        currentGain = releaseCoeff * currentGain + (1 - releaseCoeff) * targetGain;
+      }
+      out[i] *= currentGain;
+    }
+
+    // 4. Amplitude Scaling to targetPeak (0.75 / -2.5 dBFS)
+    let maxAmp = 0;
+    for (let i = 0; i < len; i++) {
+      const a = Math.abs(out[i]);
+      if (a > maxAmp) maxAmp = a;
+    }
+
+    if (maxAmp >= 0.003 && maxAmp < targetPeak) {
+      const gain = Math.min(25.0, targetPeak / maxAmp);
+      for (let i = 0; i < len; i++) {
+        out[i] = Math.max(-1.0, Math.min(1.0, out[i] * gain));
+      }
+      console.log(`[nanodaw Internal Gain] Filtered & boosted take by ${gain.toFixed(2)}x (+${(20 * Math.log10(gain)).toFixed(1)}dB). Peak was ${maxAmp.toFixed(4)}, now ${(maxAmp * gain).toFixed(4)} (~${Math.round(targetPeak * 100)}%).`);
+    } else if (maxAmp > 0.98) {
+      const gain = 0.95 / maxAmp;
+      for (let i = 0; i < len; i++) {
+        out[i] *= gain;
+      }
+    }
+
+    return out;
+  }
 
   let workletInitPromise = null;
 
@@ -2023,8 +2138,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
     const dtSamples = Math.round(dt * sampleRate);
 
-    // Concatenate all Pass 1 recorded PCM in one batched operation without digital modification
-    const p1Full = pass1AudioStore.toFlatArray();
+    // Concatenate all Pass 1 recorded PCM in one batched operation
+    let p1Full = pass1AudioStore.toFlatArray();
+    if (recordInternalGain && recordInternalGain.checked) {
+      p1Full = processInternalGainAndNoiseSuppression(p1Full, sampleRate, 0.75);
+    }
     const totalP1 = p1Full.length;
 
     const searchWin = Math.round(0.20 * dtSamples);
@@ -2117,8 +2235,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isRecording) return;
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
-    // 1. Gather all recorded PCM from Pass 1 in one batched operation without digital modification
-    const p1Full = pass1AudioStore.toFlatArray();
+    // 1. Gather all recorded PCM from Pass 1 in one batched operation
+    let p1Full = pass1AudioStore.toFlatArray();
+    if (recordInternalGain && recordInternalGain.checked) {
+      p1Full = processInternalGainAndNoiseSuppression(p1Full, sampleRate, 0.75);
+    }
     const totalP1 = p1Full.length;
 
     // 2. High-precision transient peak detection for all 4 taps in p1Full
@@ -2504,7 +2625,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     let takePCM = null;
 
     if (pass2AudioStore.totalSamples > 0) {
-      const fullPass2 = pass2AudioStore.toFlatArray();
+      let fullPass2 = pass2AudioStore.toFlatArray();
+      if (recordInternalGain && recordInternalGain.checked) {
+        fullPass2 = processInternalGainAndNoiseSuppression(fullPass2, sampleRate, 0.75);
+      }
       const totalSamples = fullPass2.length;
 
       // If this was a Track Sync take, process it using peak alignment
@@ -2610,8 +2734,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         takePCM = fullPass2;
       }
     } else if (pass1AudioStore.totalSamples > 0) {
-      // Stopped during Pass 1: keep all audio captured in Pass 1 as recorded
+      // Stopped during Pass 1: keep all audio captured in Pass 1
       takePCM = pass1AudioStore.toFlatArray();
+      if (recordInternalGain && recordInternalGain.checked) {
+        takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
+      }
     }
 
     // Fallback if no audio samples were captured
