@@ -92,7 +92,7 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
       this.ambientFloor = 0.95 * this.ambientFloor + 0.05 * rms;
 
       const currentSamplePos = this.totalSamplesProcessed;
-      if (peak > 0.025 && (peak > this.ambientFloor * 1.6 || hf > 0.007)) {
+      if (peak > 0.008 && (peak > this.ambientFloor * 1.5 || hf > 0.004)) {
         if (currentSamplePos - this.lastTransientSample > this.minRefractorySamples) {
           this.lastTransientSample = currentSamplePos;
           this.port.postMessage({

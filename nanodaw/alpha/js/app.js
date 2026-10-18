@@ -825,6 +825,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   const pass1AudioStore = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
 
+  function normalizeToTarget(pcm, targetPeak = 0.75) {
+    if (!pcm || pcm.length === 0) return pcm;
+    let maxAmp = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      const a = Math.abs(pcm[i]);
+      if (a > maxAmp) maxAmp = a;
+    }
+    // Only amplify if there is actual audio above noise floor (e.g. maxAmp >= 0.003)
+    // and don't amplify beyond 25x (+28dB) to prevent noise explosion on dead silence
+    if (maxAmp >= 0.003 && maxAmp < targetPeak) {
+      const gain = Math.min(25.0, targetPeak / maxAmp);
+      for (let i = 0; i < pcm.length; i++) {
+        pcm[i] = Math.max(-1.0, Math.min(1.0, pcm[i] * gain));
+      }
+      console.log(`[Audio Normalization] Amplified take by ${gain.toFixed(2)}x (+${(20 * Math.log10(gain)).toFixed(1)}dB). Peak was ${maxAmp.toFixed(4)}, now ${(maxAmp * gain).toFixed(4)} (~${Math.round(targetPeak * 100)}% of max).`);
+    } else if (maxAmp > 0.98) {
+      const gain = 0.95 / maxAmp;
+      for (let i = 0; i < pcm.length; i++) {
+        pcm[i] *= gain;
+      }
+    }
+    return pcm;
+  }
+
   let workletInitPromise = null;
 
   async function ensureRecorderWorklet(ctx) {
@@ -917,7 +941,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                   this.ambientFloor = 0.95 * this.ambientFloor + 0.05 * rms;
 
                   const currentSamplePos = this.totalSamplesProcessed;
-                  if (peak > 0.025 && (peak > this.ambientFloor * 1.6 || hf > 0.007)) {
+                  if (peak > 0.008 && (peak > this.ambientFloor * 1.5 || hf > 0.004)) {
                     if (currentSamplePos - this.lastTransientSample > this.minRefractorySamples) {
                       this.lastTransientSample = currentSamplePos;
                       this.port.postMessage({
@@ -1362,7 +1386,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (btnGoMetronome) {
     btnGoMetronome.addEventListener('click', () => {
       const trackName = (metroTrackName?.value || '').trim() || getNextAvailableMetronomeName();
-      const tempo = parseInt(metroTempo?.value, 10) || state.project?.tempo || 90;
+      const tempo = parseInt(metroTempo?.value, 10) || state.project?.tempo || state.project?.bpm || 90;
       const beatsPerMeasure = parseInt(metroBeatsPerMeasure?.value, 10) || 4;
       const durSec = parseDurationToSeconds(metroDuration?.value || '03:00');
 
@@ -1377,7 +1401,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       audio.setPlaybackAudioSession();
 
       // Insert at the TOP of the project (index 0)
-      audio.addRecordedTrack(trackName, metroBuffer, 0, '#38bdf8', 0);
+      const trackData = audio.addRecordedTrack(trackName, metroBuffer, 0, '#38bdf8', 0);
+      if (trackData) {
+        trackData.tempo = tempo;
+        trackData.isMetronome = true;
+        trackData.beatsPerMeasure = beatsPerMeasure;
+      }
+
+      // Synchronize tempo state everywhere so Record tab and Track Sync use the identical tempo!
+      if (syncSynthTempo) syncSynthTempo.value = tempo;
+      if (singleMetronomeTempo) singleMetronomeTempo.value = tempo;
+      if (metroTempo) metroTempo.value = tempo;
+      if (state.project) {
+        state.project.tempo = tempo;
+        state.project.bpm = tempo;
+      }
 
       // Re-render project
       timeline.render();
@@ -1944,8 +1982,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
     const dtSamples = Math.round(dt * sampleRate);
 
-    // Concatenate all Pass 1 recorded PCM in one batched operation
-    const p1Full = pass1AudioStore.toFlatArray();
+    // Concatenate all Pass 1 recorded PCM in one batched operation and normalize to 0.75
+    const p1Full = normalizeToTarget(pass1AudioStore.toFlatArray(), 0.75);
     const totalP1 = p1Full.length;
 
     const searchWin = Math.round(0.20 * dtSamples);
@@ -2038,8 +2076,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isRecording) return;
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
-    // 1. Gather all recorded PCM from Pass 1 in one batched operation
-    const p1Full = pass1AudioStore.toFlatArray();
+    // 1. Gather all recorded PCM from Pass 1 in one batched operation and normalize to 0.75
+    const p1Full = normalizeToTarget(pass1AudioStore.toFlatArray(), 0.75);
     const totalP1 = p1Full.length;
 
     // 2. High-precision transient peak detection for all 4 taps in p1Full
@@ -2426,6 +2464,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (pass2AudioStore.totalSamples > 0) {
       const fullPass2 = pass2AudioStore.toFlatArray();
+      // Normalize recorded take to 75% of max volume (0.75 / -2.5 dBFS)
+      normalizeToTarget(fullPass2, 0.75);
       const totalSamples = fullPass2.length;
 
       // If this was a Track Sync take, process it using peak alignment
@@ -2531,8 +2571,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         takePCM = fullPass2;
       }
     } else if (pass1AudioStore.totalSamples > 0) {
-      // Stopped during Pass 1: keep all audio captured in Pass 1!
-      takePCM = pass1AudioStore.toFlatArray();
+      // Stopped during Pass 1: keep all audio captured in Pass 1 normalized to 0.75!
+      takePCM = normalizeToTarget(pass1AudioStore.toFlatArray(), 0.75);
     }
 
     // Fallback if no audio samples were captured
@@ -2588,7 +2628,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const guideSR = guideBuffer.sampleRate;
     const guideOffset = Number(guideTrack.offset) || 0;
 
-    const tempo = state.project?.tempo || parseInt(syncSynthTempo?.value, 10) || 90;
+    const guideIsMetro = guideTrack.isMetronome || /^metronome/i.test(guideTrack.name || '');
+    const tempo = guideTrack.tempo || state.project?.tempo || state.project?.bpm || parseInt(syncSynthTempo?.value, 10) || 90;
     const dt = 60 / tempo;
     const firstBeat = Math.max(1, parseInt(syncTrackFirstBeat?.value, 10) || 5);
     const numBeats = Math.max(1, parseInt(syncTrackNumBeats?.value, 10) || 4);
@@ -2596,57 +2637,83 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 1. Detect N peaks in the Guide Track, marking each as claimed so subsequent beats cannot rematch them
     const metroPeaksTimelineSec = [];
     const guideClaimedRanges = [];
-    const searchWinSecGuide = 0.40 * dt;
-    const exclRadiusGuide = Math.round(0.30 * dt * guideSR);
+    const exclRadiusGuide = Math.round(0.25 * dt * guideSR);
     let lastMetroPeakSample = null;
 
-    for (let k = 0; k < numBeats; k++) {
-      const expTimelineSec = recordingStartPlayhead + (firstBeat - 1 + k) * dt;
-      const expGuideRelSec = expTimelineSec - guideOffset;
-      if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) {
-        continue;
-      }
-      let s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
-      // Chronological constraint: beat k must occur strictly after beat k-1
-      if (lastMetroPeakSample !== null) {
-        s0 = Math.max(s0, lastMetroPeakSample + Math.round(0.35 * dt * guideSR));
-      }
-      const s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
-      if (s0 >= s1) continue;
+    if (guideIsMetro) {
+      // For generated metronome tracks, the clicks are at mathematically exact sample offsets!
+      for (let k = 0; k < numBeats; k++) {
+        const beatNum = firstBeat + k; // 1-based beat index
+        const centerSample = Math.round((beatNum - 1) * dt * guideSR);
+        const winEarly = Math.round(0.15 * dt * guideSR);
+        const winLate = Math.round(0.35 * dt * guideSR);
+        const s0 = Math.max(0, centerSample - winEarly);
+        const s1 = Math.min(guidePCM.length, centerSample + winLate);
+        if (s0 >= s1) continue;
 
-      const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
-      if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.3) {
-        metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
-        lastMetroPeakSample = pk.idx;
-        // Mark as CLAIMED so it cannot be matched with future beats
-        guideClaimedRanges.push({
-          start: Math.max(0, pk.idx - exclRadiusGuide),
-          end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
-        });
+        const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
+        if (pk.found && pk.peakAbs >= 0.008) {
+          metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
+          guideClaimedRanges.push({
+            start: Math.max(0, pk.idx - exclRadiusGuide),
+            end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
+          });
+        }
+      }
+    } else {
+      // For general audio/backing tracks: wide adaptive search anchored from previous peak
+      const searchWinSecGuide = 0.70 * dt;
+      for (let k = 0; k < numBeats; k++) {
+        let s0, s1;
+        if (lastMetroPeakSample === null) {
+          const expTimelineSec = recordingStartPlayhead + (firstBeat - 1) * dt;
+          const expGuideRelSec = expTimelineSec - guideOffset;
+          if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) continue;
+          s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
+          s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
+        } else {
+          const center = lastMetroPeakSample + Math.round(dt * guideSR);
+          s0 = Math.max(lastMetroPeakSample + Math.round(0.35 * dt * guideSR), center - Math.round(0.45 * dt * guideSR));
+          s1 = Math.min(guidePCM.length, center + Math.round(0.45 * dt * guideSR));
+        }
+        if (s0 >= s1) continue;
+
+        const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
+        if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
+          metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
+          lastMetroPeakSample = pk.idx;
+          guideClaimedRanges.push({
+            start: Math.max(0, pk.idx - exclRadiusGuide),
+            end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
+          });
+        }
       }
     }
 
-    // 2. Detect N peaks in the newly-recorded take, marking each matched beat as CLAIMED
+    // 2. Detect N peaks in the newly-recorded take (fullPass2 is already normalized to 0.75!)
     // User instruction: "each time a beat pair is matched, mark them as 'claimed'. Already-matched beats shouldn't be matched with future beats."
     const takePeaksSec = [];
     const takeClaimedRanges = [];
-    const searchWinEarlySec = 0.45 * dt;
-    const searchWinLateSec = 0.85 * dt;
-    const exclRadiusTake = Math.round(0.30 * dt * sampleRate);
+    const exclRadiusTake = Math.round(0.25 * dt * sampleRate);
     let lastTakePeakSample = null;
 
     for (let k = 0; k < numBeats; k++) {
-      const expTakeSec = (firstBeat - 1 + k) * dt;
-      let s0 = Math.max(0, Math.round((expTakeSec - searchWinEarlySec) * sampleRate));
-      // Chronological constraint: beat k must occur strictly after beat k-1
-      if (lastTakePeakSample !== null) {
-        s0 = Math.max(s0, lastTakePeakSample + Math.round(0.35 * dt * sampleRate));
+      let s0, s1;
+      if (lastTakePeakSample === null) {
+        // Wide search for the first anchor tap around expected time
+        const expTakeSec = (firstBeat - 1) * dt;
+        s0 = Math.max(0, Math.round((expTakeSec - 0.70 * dt) * sampleRate));
+        s1 = Math.min(fullPass2.length, Math.round((expTakeSec + 0.95 * dt) * sampleRate));
+      } else {
+        // Subsequent taps anchored from previous tap peak + dt
+        const center = lastTakePeakSample + Math.round(dt * sampleRate);
+        s0 = Math.max(lastTakePeakSample + Math.round(0.35 * dt * sampleRate), center - Math.round(0.45 * dt * sampleRate));
+        s1 = Math.min(fullPass2.length, center + Math.round(0.45 * dt * sampleRate));
       }
-      const s1 = Math.min(fullPass2.length, Math.round((expTakeSec + searchWinLateSec) * sampleRate));
       if (s0 >= s1) continue;
 
       const pk = findTransientPeak(fullPass2, s0, s1, takeClaimedRanges);
-      if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.3) {
+      if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
         takePeaksSec.push(pk.idx / sampleRate);
         lastTakePeakSample = pk.idx;
         // Mark as CLAIMED so it cannot be matched with future beats

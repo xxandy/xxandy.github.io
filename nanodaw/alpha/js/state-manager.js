@@ -97,6 +97,13 @@ class StateManager {
    * Load project data and merge with URL parameters
    */
   initProject(projectData, projectUrl, isNew = false) {
+    if (projectData) {
+      if (typeof projectData.tempo === 'undefined' && typeof projectData.bpm === 'number') {
+        projectData.tempo = projectData.bpm;
+      } else if (typeof projectData.bpm === 'undefined' && typeof projectData.tempo === 'number') {
+        projectData.bpm = projectData.tempo;
+      }
+    }
     this.project = projectData;
     this.projectUrl = projectUrl;
     this.isNewProject = Boolean(isNew);
