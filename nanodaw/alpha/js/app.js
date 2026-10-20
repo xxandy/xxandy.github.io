@@ -900,11 +900,79 @@ document.addEventListener('DOMContentLoaded', async () => {
   const pass1AudioStore = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
 
+  // NANOdaw Intelligent Transient Pop & Glitch Suppressor
+  // Automatically detects and seamlessly repairs micro-glitches, CoreAudio resampler slips, chassis taps, and electrical pops
+  function suppressAudioGlitches(pcm, sampleRate = 44100) {
+    if (!pcm || pcm.length < 64) return pcm;
+    const len = pcm.length;
+    const out = new Float32Array(pcm);
+    const winSize = Math.max(32, Math.round(sampleRate * 0.005));
+    let i = 2;
+    let repaired = 0;
+
+    while (i < len - 32) {
+      const d = Math.abs(out[i] - out[i - 1]);
+      if (d > 0.18) {
+        const s0 = Math.max(0, i - winSize);
+        const s1 = Math.max(1, i - 4);
+        let sumSq = 0;
+        let count = 0;
+        for (let j = s0; j < s1; j++) {
+          sumSq += out[j] * out[j];
+          count++;
+        }
+        const localRms = count > 0 ? Math.sqrt(sumSq / count) : 0.05;
+
+        // An abnormal transient impulse / chassis click / resampler pop:
+        if (d > Math.max(0.08, localRms * 3.8)) {
+          const burstStart = i - 1;
+          const maxBurstLen = Math.round(sampleRate * 0.0025);
+          let burstEnd = Math.min(len - 1, burstStart + maxBurstLen);
+          let calmCount = 0;
+
+          for (let j = burstStart + 1; j < Math.min(len - 2, burstStart + maxBurstLen + 20); j++) {
+            const dj = Math.abs(out[j] - out[j - 1]);
+            if (dj < Math.max(0.06, localRms * 1.8)) {
+              calmCount++;
+              if (calmCount >= 5) {
+                burstEnd = j - 4;
+                break;
+              }
+            } else {
+              calmCount = 0;
+            }
+          }
+
+          const blen = burstEnd - burstStart;
+          if (blen > 0) {
+            const y0 = out[burstStart];
+            const y1 = out[burstEnd];
+            for (let k = 0; k < blen; k++) {
+              const mu = k / blen;
+              const w = 0.5 * (1 - Math.cos(Math.PI * mu));
+              out[burstStart + k] = (1 - w) * y0 + w * y1;
+            }
+            repaired++;
+            i = burstEnd + 10;
+            continue;
+          }
+        }
+      }
+      i++;
+    }
+
+    if (repaired > 0) {
+      console.log(`[NANOdaw Glitch Suppressor] Successfully repaired ${repaired} transient pop/glitch event(s).`);
+    }
+    return out;
+  }
+
   // NANOdaw Internal Gain Control & Automatic Noise Suppression
   // Includes: 2nd-order 80Hz Low-Cut (rumble filter) + 10.5kHz High-Cut (hiss filter) + Downward Noise Expander + 75% Peak Scaling
   function processInternalGainAndNoiseSuppression(pcm, sampleRate = 44100, targetPeak = 0.75) {
     if (!pcm || pcm.length === 0) return pcm;
-    const len = pcm.length;
+    const cleanPcm = suppressAudioGlitches(pcm, sampleRate);
+    const len = cleanPcm.length;
     const out = new Float32Array(len);
 
     // 1. 2nd-order Butterworth High-Pass Filter (80 Hz Low-Cut to remove table/room rumble and mains hum)
@@ -935,7 +1003,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let x1_lp = 0, x2_lp = 0, y1_lp = 0, y2_lp = 0;
 
     for (let i = 0; i < len; i++) {
-      const inSamp = pcm[i];
+      const inSamp = cleanPcm[i];
       const hpSamp = b0_hp * inSamp + b1_hp * x1_hp + b2_hp * x2_hp - a1_hp * y1_hp - a2_hp * y2_hp;
       x2_hp = x1_hp; x1_hp = inSamp;
       y2_hp = y1_hp; y1_hp = hpSamp;
@@ -1028,7 +1096,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                   const data = e.data;
                   if (!data) return;
                   if (data.type === 'recycle_buffer' && data.buffer) {
-                    if (data.buffer.byteLength === this.chunkSize * 4) {
+                    if (data.buffer.byteLength === this.chunkSize * 4 && this.bufferPool.length < 16) {
                       this.bufferPool.push(new Float32Array(data.buffer));
                     }
                   } else if (data.type === 'set_config') {
@@ -1627,9 +1695,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             try { navigator.audioSession.type = 'play-and-record'; } catch (_) {}
           }
           const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+          const targetSampleRate = audio.audioCtx ? audio.audioCtx.sampleRate : undefined;
           const tempStream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              sampleRate: { ideal: 44100 },
+              sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
               echoCancellation: false,
               autoGainControl: useAutoGain,
               noiseSuppression: false
@@ -1754,9 +1823,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const selectedDeviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
       const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+      const vuCtx = audio.getOrCreateAudioContext();
+      const targetSampleRate = vuCtx ? vuCtx.sampleRate : undefined;
       const constraints = {
         audio: {
-          sampleRate: { ideal: 44100 },
+          sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
           channelCount: { ideal: 1 },
           echoCancellation: false,
           autoGainControl: useAutoGain,
@@ -2212,12 +2283,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         timeline.clearSyncLines();
       }
 
-      // 2. Acquire mic stream: reuse pre-warmed stream transferred from VU meter monitor if active!
+      // 2. Obtain master AudioContext and ensure it is active
+      recAudioCtx = audio.getOrCreateAudioContext();
+      if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
+        await recAudioCtx.resume();
+      }
+      const targetSampleRate = recAudioCtx ? recAudioCtx.sampleRate : undefined;
+
+      // 3. Acquire mic stream: reuse pre-warmed stream transferred from VU meter monitor if active!
       const isStreamActive = recStream && recStream.active && recStream.getAudioTracks().length > 0 && recStream.getAudioTracks()[0].readyState === 'live';
       if (!isStreamActive) {
         const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
         const audioConstraints = {
-          sampleRate: { ideal: 44100 },
+          sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
           channelCount: { ideal: 1 },
           echoCancellation: false,
           autoGainControl: useAutoGain,
@@ -2230,11 +2308,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
           recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         } catch (e1) {
-          console.warn('Initial constraints with deviceId failed, retrying ideal 44100:', e1);
+          console.warn('Initial constraints with deviceId failed, retrying ideal sample rate:', e1);
           try {
             recStream = await navigator.mediaDevices.getUserMedia({
               audio: {
-                sampleRate: { ideal: 44100 },
+                sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
                 echoCancellation: false,
                 autoGainControl: useAutoGain,
                 noiseSuppression: false
@@ -2245,12 +2323,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
           }
         }
-      }
-
-      // 3. Obtain master AudioContext and ensure it is active
-      recAudioCtx = audio.getOrCreateAudioContext();
-      if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
-        await recAudioCtx.resume();
       }
 
       isRecording = true;
@@ -2945,6 +3017,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (pass2AudioStore.totalSamples > 0) {
       let fullPass2 = pass2AudioStore.toFlatArray();
+      fullPass2 = suppressAudioGlitches(fullPass2, sampleRate);
       if (recordInternalGain && recordInternalGain.checked) {
         fullPass2 = processInternalGainAndNoiseSuppression(fullPass2, sampleRate, 0.75);
       }
@@ -3055,6 +3128,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (pass1AudioStore.totalSamples > 0) {
       // Stopped during Pass 1: keep all audio captured in Pass 1
       takePCM = pass1AudioStore.toFlatArray();
+      takePCM = suppressAudioGlitches(takePCM, sampleRate);
       if (recordInternalGain && recordInternalGain.checked) {
         takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
       }
@@ -3230,14 +3304,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Align Peak 1 (anchor) exactly with Peak 1 in the metronome track
     // targetOffset + takePeaksSec[0] = metroPeaksTimelineSec[0]
     const targetOffset = metroPeaksTimelineSec[0] - takePeaksSec[0];
-    let finalOffset = targetOffset;
-    let finalPCM = fullPass2;
-    let trimmedSec = 0;
+
+    // Trim the prelude calibration taps so they don't pollute the newly-recorded track:
+    const lastTapSec = takePeaksSec[numBeats - 1];
+    const tapDecayMargin = Math.min(0.20, 0.35 * dt);
+    const calibEndSec = lastTapSec + tapDecayMargin;
+
+    let trimSamples = 0;
+    if (fullPass2.length / sampleRate > calibEndSec + 0.1) {
+      trimSamples = Math.round(calibEndSec * sampleRate);
+    }
+    let trimmedSec = trimSamples / sampleRate;
+    let finalPCM = trimSamples > 0 ? fullPass2.subarray(trimSamples) : fullPass2;
+    let finalOffset = targetOffset + trimmedSec;
 
     if (finalOffset < 0) {
-      const trimSamples = Math.min(finalPCM.length, Math.round(-finalOffset * sampleRate));
-      finalPCM = finalPCM.subarray(trimSamples);
-      trimmedSec = trimSamples / sampleRate;
+      const extraTrim = Math.min(finalPCM.length, Math.round(-finalOffset * sampleRate));
+      finalPCM = finalPCM.subarray(extraTrim);
+      trimmedSec += extraTrim / sampleRate;
       finalOffset = 0;
     }
 
@@ -3276,7 +3360,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function fallbackAddTrack(rawTakePCM, sampleRate, guideIdx) {
-    let pcm = rawTakePCM;
+    let pcm = suppressAudioGlitches(rawTakePCM, sampleRate);
     if (!pcm || pcm.length < Math.round(sampleRate * 0.1)) {
       pcm = new Float32Array(Math.round(sampleRate * 1.0));
     }

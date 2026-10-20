@@ -31,7 +31,7 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
 
       if (data.type === 'recycle_buffer' && data.buffer) {
         // Recycle returned buffer back into standby pool with zero GC allocation
-        if (data.buffer.byteLength === this.chunkSize * 4) {
+        if (data.buffer.byteLength === this.chunkSize * 4 && this.bufferPool.length < 16) {
           this.bufferPool.push(new Float32Array(data.buffer));
         }
       } else if (data.type === 'set_config') {

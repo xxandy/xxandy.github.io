@@ -215,12 +215,12 @@ class AudioEngine {
         return null;
       }
       try {
-        this.audioCtx = new AudioCtxClass({ sampleRate: 44100, latencyHint: 'interactive' });
+        this.audioCtx = new AudioCtxClass({ latencyHint: 'interactive' });
       } catch (_) {
         try {
-          this.audioCtx = new AudioCtxClass({ latencyHint: 'interactive' });
-        } catch (__) {
           this.audioCtx = new AudioCtxClass();
+        } catch (__) {
+          this.audioCtx = null;
         }
       }
 
@@ -1689,7 +1689,7 @@ class AudioEngine {
 
     const trackBuffers = [];
     let maxEndSec = 0;
-    const sampleRate = 44100;
+    const sampleRate = this.audioCtx?.sampleRate || 44100;
 
     for (let i = 0; i < tracks.length; i++) {
       const buf = await this.getTrackAudioBuffer(i);
