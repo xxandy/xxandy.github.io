@@ -1,0 +1,81 @@
+{
+  "title": "The Swing of Things",
+  "bpm": 154,
+  "tempo": 154,
+  "tracks": [
+    {
+      "name": "Instrumental",
+      "url": "../swing/instrumental.mp3",
+      "offset": 0.0,
+      "color": "#00f2fe",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (Lead)",
+      "url": "../swing/vocals_lead.mp3",
+      "offset": 0.0,
+      "color": "#ec4899",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (Backing)",
+      "url": "../swing/vocals_backing.mp3",
+      "offset": 0.0,
+      "color": "#8b5cf6",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (All / Full)",
+      "url": "../swing/vocals_all.mp3",
+      "offset": 0.0,
+      "color": "#10b981",
+      "volume": 1.0,
+      "mute": true,
+      "solo": false
+    }
+  ],
+  "markers": [
+    {
+      "name": "Intro",
+      "time": 0.0
+    },
+    {
+      "name": "Verse 1",
+      "time": 23.5
+    },
+    {
+      "name": "Chorus 1",
+      "time": 47.5
+    },
+    {
+      "name": "Verse 2",
+      "time": 79.5
+    },
+    {
+      "name": "Chorus 2",
+      "time": 108.5
+    },
+    {
+      "name": "Breakdown / Solo",
+      "time": 134.0
+    },
+    {
+      "name": "Bridge",
+      "time": 147.5
+    },
+    {
+      "name": "Chorus 3",
+      "time": 195.0
+    },
+    {
+      "name": "Outro",
+      "time": 223.5
+    }
+  ]
+}
