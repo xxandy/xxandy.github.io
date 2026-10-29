@@ -1,0 +1,99 @@
+{
+  "title": "Smooth Criminal (I Don't Knooow)",
+  "bpm": 134,
+  "tempo": 134,
+  "tracks": [
+    {
+      "name": "Instrumental",
+      "url": "instrumental.mp3",
+      "offset": 0.0,
+      "color": "#00f2fe",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (Lead)",
+      "url": "vocals_lead.mp3",
+      "offset": 0.0,
+      "color": "#ec4899",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (Harmony)",
+      "url": "vocals_harmony.mp3",
+      "offset": 0.0,
+      "color": "#8b5cf6",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (Female)",
+      "url": "vocals_female.mp3",
+      "offset": 0.0,
+      "color": "#f59e0b",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (Male)",
+      "url": "vocals_male.mp3",
+      "offset": 0.0,
+      "color": "#3b82f6",
+      "volume": 1.0,
+      "mute": false,
+      "solo": false
+    },
+    {
+      "name": "Vocals (All / Full)",
+      "url": "vocals_all.mp3",
+      "offset": 0.0,
+      "color": "#10b981",
+      "volume": 1.0,
+      "mute": true,
+      "solo": false
+    }
+  ],
+  "markers": [
+    {
+      "name": "Intro",
+      "time": 0.0
+    },
+    {
+      "name": "Verse 1",
+      "time": 18.0
+    },
+    {
+      "name": "Pre-Chorus",
+      "time": 36.0
+    },
+    {
+      "name": "Chorus 1",
+      "time": 50.0
+    },
+    {
+      "name": "Verse 2",
+      "time": 68.0
+    },
+    {
+      "name": "Chorus 2",
+      "time": 86.0
+    },
+    {
+      "name": "Breakdown / Solo",
+      "time": 130.0
+    },
+    {
+      "name": "Climax Chorus",
+      "time": 175.0
+    },
+    {
+      "name": "Outro",
+      "time": 205.0
+    }
+  ]
+}
