@@ -1,11 +1,11 @@
 {
-  "title": "The Swing of Things",
-  "bpm": 154,
-  "tempo": 154,
+  "title": "Blood on Blood",
+  "bpm": 136,
+  "tempo": 136,
   "tracks": [
     {
       "name": "Instrumental",
-      "url": "../swing/instrumental.mp3",
+      "url": "Instrumental.mp3",
       "offset": 0.0,
       "color": "#00f2fe",
       "volume": 1.0,
@@ -14,7 +14,7 @@
     },
     {
       "name": "Vocals (Lead)",
-      "url": "../swing/vocals_lead.mp3",
+      "url": "Lead.mp3",
       "offset": 0.0,
       "color": "#ec4899",
       "volume": 1.0,
@@ -23,20 +23,11 @@
     },
     {
       "name": "Vocals (Backing)",
-      "url": "../swing/vocals_backing.mp3",
+      "url": "Backing.mp3",
       "offset": 0.0,
       "color": "#8b5cf6",
       "volume": 1.0,
       "mute": false,
-      "solo": false
-    },
-    {
-      "name": "Vocals (All / Full)",
-      "url": "../swing/vocals_all.mp3",
-      "offset": 0.0,
-      "color": "#10b981",
-      "volume": 1.0,
-      "mute": true,
       "solo": false
     }
   ],
@@ -47,35 +38,43 @@
     },
     {
       "name": "Verse 1",
-      "time": 23.5
+      "time": 39.5
+    },
+    {
+      "name": "Pre-Chorus 1",
+      "time": 70.0
     },
     {
       "name": "Chorus 1",
-      "time": 47.5
+      "time": 81.0
     },
     {
       "name": "Verse 2",
-      "time": 79.5
+      "time": 115.0
+    },
+    {
+      "name": "Pre-Chorus 2",
+      "time": 145.0
     },
     {
       "name": "Chorus 2",
-      "time": 108.5
+      "time": 155.0
     },
     {
-      "name": "Breakdown / Solo",
-      "time": 134.0
-    },
-    {
-      "name": "Bridge",
-      "time": 147.5
-    },
-    {
-      "name": "Chorus 3",
+      "name": "Guitar Solo",
       "time": 195.0
     },
     {
+      "name": "Bridge",
+      "time": 240.0
+    },
+    {
+      "name": "Final Chorus",
+      "time": 290.0
+    },
+    {
       "name": "Outro",
-      "time": 223.5
+      "time": 330.0
     }
   ]
 }

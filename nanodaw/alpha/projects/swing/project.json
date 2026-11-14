@@ -5,7 +5,7 @@
   "tracks": [
     {
       "name": "Instrumental",
-      "url": "instrumental.mp3",
+      "url": "../../../projects/swing/Instrumental.mp3",
       "offset": 0.0,
       "color": "#00f2fe",
       "volume": 1.0,
@@ -14,7 +14,7 @@
     },
     {
       "name": "Vocals (Lead)",
-      "url": "vocals_lead.mp3",
+      "url": "../../../projects/swing/Lead.mp3",
       "offset": 0.0,
       "color": "#ec4899",
       "volume": 1.0,
@@ -23,20 +23,11 @@
     },
     {
       "name": "Vocals (Backing)",
-      "url": "vocals_backing.mp3",
+      "url": "../../../projects/swing/Backing.mp3",
       "offset": 0.0,
       "color": "#8b5cf6",
       "volume": 1.0,
       "mute": false,
-      "solo": false
-    },
-    {
-      "name": "Vocals (All / Full)",
-      "url": "vocals_all.mp3",
-      "offset": 0.0,
-      "color": "#10b981",
-      "volume": 1.0,
-      "mute": true,
       "solo": false
     }
   ],
