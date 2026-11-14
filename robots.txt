@@ -1,0 +1,3 @@
+# Block web and AI crawlers from indexing or crawling anything under /nanodaw/
+User-agent: *
+Disallow: /nanodaw/
