@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=71">
+  <link rel="stylesheet" href="styles.css?v=72">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -25,7 +25,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v71</span>
+        <span class="version-badge" id="appVersionBadge">v72</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -551,6 +551,23 @@
                       </div>
                     </div>
                   </div>
+
+                  <!-- Live Pre-Recording Peak Detection Check Bar -->
+                  <div id="syncTapTestBar" class="sync-tap-test-bar" role="status" aria-live="polite">
+                    <div class="sync-tap-test-left">
+                      <span id="syncTapTestDot" class="sync-tap-test-dot" aria-hidden="true"></span>
+                      <span id="syncTapTestLabel" class="sync-tap-test-label">Tap near mic to test peak detection</span>
+                    </div>
+                    <div class="sync-tap-test-right">
+                      <div class="sync-test-beads" aria-hidden="true">
+                        <span class="test-bead" id="testBead1">1</span>
+                        <span class="test-bead" id="testBead2">2</span>
+                        <span class="test-bead" id="testBead3">3</span>
+                        <span class="test-bead" id="testBead4">4</span>
+                      </div>
+                      <span id="syncSensBadge" class="sync-sens-badge" title="Peak detection sensitivity (drag slider on VU meter)">-24dB</span>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Single-Pass Fallback (visible when record2PassSync is unchecked) -->
@@ -577,24 +594,50 @@
               </div>
             </div>
 
-            <!-- Right Side: Vertical VU Meter Strip (grayed out until audio stack finishes background initialization) -->
-            <div id="recordVUMeterContainer" class="record-vu-meter-strip" title="Live Microphone Input Level" style="opacity:0.35; filter:grayscale(1); pointer-events:none; transition:opacity 0.25s ease, filter 0.25s ease;">
-              <!-- Clip Indicator LED -->
-              <div id="recordVUClipIndicator" style="width:8px; height:8px; border-radius:50%; background:rgba(239,68,68,0.25); border:1px solid rgba(239,68,68,0.5); transition:background 0.08s, box-shadow 0.08s;" title="Clip Warning"></div>
-              
-              <!-- VU Label -->
-              <div style="font-size:8px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:4px 0 2px 0;">VU</div>
-
-              <!-- Meter Bar Track -->
-              <div id="recordVUMeterTrack" style="flex:1; width:10px; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.06); border-radius:4px; position:relative; overflow:hidden; display:flex; flex-direction:column; justify-content:flex-end;">
-                <!-- Live Level Fill -->
-                <div id="recordVUMeterBar" style="width:100%; height:0%; background:linear-gradient(to top, #10b981 0%, #10b981 65%, #f59e0b 82%, #ef4444 100%); border-radius:3px; transition:height 0.04s ease-out;"></div>
-                <!-- Peak Hold Line -->
-                <div id="recordVUMeterPeak" style="position:absolute; left:0; right:0; bottom:0%; height:2px; background:#fff; box-shadow:0 0 3px #fff; display:none; pointer-events:none;"></div>
+            <!-- Right Side: Vertical VU Meter Strip + Superimposed Peak Sensitivity Slider -->
+            <div id="recordVUMeterContainer" class="record-vu-meter-strip sync-active" title="Live Microphone Level & Peak Detection Sensitivity" style="opacity:0.35; filter:grayscale(1); pointer-events:none; transition:opacity 0.25s ease, filter 0.25s ease;">
+              <!-- Top Indicators: Clip LED + Peak Detected Badge -->
+              <div class="vu-top-indicators">
+                <div id="recordVUClipIndicator" style="width:8px; height:8px; border-radius:50%; background:rgba(239,68,68,0.25); border:1px solid rgba(239,68,68,0.5); transition:background 0.08s, box-shadow 0.08s;" title="Clip Warning"></div>
+                <div id="recordVUPeakBadge" class="vu-peak-badge" title="Flashes when a sync tap peak is detected">PEAK</div>
               </div>
 
-              <!-- dB Readout -->
+              <!-- VU Label -->
+              <div style="font-size:8px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:2px 0;">VU</div>
+
+              <!-- Meter Bar + Superimposed Vertical Sensitivity Slider Stack -->
+              <div class="vu-meter-stack-wrap" id="vuMeterStackWrap">
+                <div id="recordVUMeterTrack" class="vu-meter-track-inner">
+                  <!-- Active Detection Zone Tint Above Threshold -->
+                  <div id="vuSensZoneFill" class="vu-sens-zone-fill"></div>
+                  <!-- Live Level Fill -->
+                  <div id="recordVUMeterBar" style="width:100%; height:0%; background:linear-gradient(to top, #10b981 0%, #10b981 65%, #f59e0b 82%, #ef4444 100%); border-radius:3px; transition:height 0.03s ease-out; position:relative; z-index:2;"></div>
+                  <!-- Peak Hold Line -->
+                  <div id="recordVUMeterPeak" style="position:absolute; left:0; right:0; bottom:0%; height:2px; background:#fff; box-shadow:0 0 3px #fff; display:none; pointer-events:none; z-index:3;"></div>
+                </div>
+
+                <!-- Superimposed Peak Detection Sensitivity Slider (visible ONLY when NANOdaw sync uses peak detection) -->
+                <div id="peakSensitivityOverlay" class="vu-sens-overlay" title="Peak Detection Sensitivity — drag down for quieter taps (more eager), drag up to ignore louder background noise">
+                  <div id="vuSensThresholdLine" class="vu-sens-threshold-line">
+                    <span id="vuSensThumb" class="vu-sens-thumb" aria-hidden="true"></span>
+                  </div>
+                  <input
+                    type="range"
+                    id="peakSensitivitySlider"
+                    class="vu-sens-range"
+                    min="-54"
+                    max="0"
+                    step="1"
+                    value="-24"
+                    aria-label="Peak detection sensitivity"
+                    aria-valuetext="-24 dB threshold (68% sensitivity)"
+                  >
+                </div>
+              </div>
+
+              <!-- dB & Sensitivity Readout -->
               <div id="recordVUMeterDb" style="font-size:7.5px; font-family:var(--font-mono, monospace); color:var(--text-muted); margin-top:3px; text-align:center; line-height:1;">INIT</div>
+              <div id="recordVUSensReadout" class="vu-sens-readout" title="Active Peak Trigger Threshold">-24dB</div>
             </div>
           </div>
 
@@ -672,13 +715,13 @@
     </div>
 
     <div class="hud-right">
-      <button type="button" class="btn btn-secondary btn-hud-log" id="btnHudGetLog" title="Download Realtime Diagnostic Log">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+      <button type="button" class="btn btn-secondary btn-hud-log" id="btnHudGetLog" title="Download Realtime Diagnostic Log" aria-label="Download diagnostic log">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
         </svg>
       </button>
       <button class="btn btn-danger btn-stop-rec" id="btnStopRecordingAction" title="Stop recording and save new track">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <rect x="4" y="4" width="16" height="16"/>
         </svg>
         <span class="btn-stop-rec-text">Stop & Save</span>
@@ -700,12 +743,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=71"></script>
-  <script src="js/mp3-decoder.js?v=71"></script>
-  <script src="js/state-manager.js?v=71"></script>
-  <script src="js/waveform-cache.js?v=71"></script>
-  <script src="js/audio-engine.js?v=71"></script>
-  <script src="js/timeline-ui.js?v=71"></script>
-  <script src="js/app.js?v=71"></script>
+  <script src="js/profiler.js?v=72"></script>
+  <script src="js/mp3-decoder.js?v=72"></script>
+  <script src="js/state-manager.js?v=72"></script>
+  <script src="js/waveform-cache.js?v=72"></script>
+  <script src="js/audio-engine.js?v=72"></script>
+  <script src="js/timeline-ui.js?v=72"></script>
+  <script src="js/app.js?v=72"></script>
 </body>
 </html>

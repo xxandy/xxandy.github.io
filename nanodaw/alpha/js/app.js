@@ -1340,15 +1340,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=71', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=72', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=71');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=72');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=71');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=72');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -1370,13 +1370,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 this.bufferPool = [];
                 for (let i = 0; i < 8; i++) this.bufferPool.push(new Float32Array(this.chunkSize));
                 this.activeBuffer = this.bufferPool.pop();
+                this.monoScratch = new Float32Array(512);
                 this.writeIndex = 0;
                 this.isRecording = true;
                 this.totalSamplesProcessed = 0;
                 this.detectTransients = false;
+                this.transientThreshold = 0.0631;
+                this.onsetRatio = 1.65;
                 this.lastTransientSample = -999999;
-                this.minRefractorySamples = 6000;
-                this.ambientFloor = 0.005;
+                this.ambientFloor = 0.003;
+                this.ch0Env = 0;
+                this.ch1Env = 0;
                 this.processCalls = 0;
                 this.emptyInputCalls = 0;
                 this.lastInputChannels = 0;
@@ -1395,10 +1399,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }
                   } else if (data.type === 'set_config') {
                     if (typeof data.detectTransients === 'boolean') this.detectTransients = data.detectTransients;
+                    if (typeof data.transientThreshold === 'number' && data.transientThreshold > 0) this.transientThreshold = data.transientThreshold;
+                    if (typeof data.onsetRatio === 'number' && data.onsetRatio > 1.0) this.onsetRatio = data.onsetRatio;
                     if (typeof data.isRecording === 'boolean') this.isRecording = data.isRecording;
                     if (typeof data.resetSampleCounter === 'boolean' && data.resetSampleCounter) {
                       this.totalSamplesProcessed = 0;
                       this.lastTransientSample = -999999;
+                      this.ambientFloor = 0.003;
                       this.writeIndex = 0;
                       this.processCalls = 0;
                       this.emptyInputCalls = 0;
@@ -1406,6 +1413,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                       this.poolMisses = 0;
                       this.ch0Peak = 0;
                       this.ch1Peak = 0;
+                      this.ch0Env = 0;
+                      this.ch1Env = 0;
                       this.firstProcessReported = false;
                     }
                   } else if (data.type === 'flush') {
@@ -1422,6 +1431,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                       totalSamples: this.totalSamplesProcessed,
                       ch0Peak: this.ch0Peak,
                       ch1Peak: this.ch1Peak,
+                      transientThreshold: this.transientThreshold,
                       workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
                       workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
                     });
@@ -1455,63 +1465,83 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const in0 = inputs[0];
                 const chCount = in0 ? in0.length : 0;
                 this.lastInputChannels = chCount;
-                const inputChannel = chCount > 0 ? in0[0] : null;
+                const ch0 = chCount > 0 ? in0[0] : null;
                 if (!this.firstProcessReported) {
                   this.firstProcessReported = true;
                   this.port.postMessage({
                     type: 'worklet_first_process',
                     inputCount: inputs.length,
                     channelCount: chCount,
-                    frameLen: inputChannel ? inputChannel.length : 0,
+                    frameLen: ch0 ? ch0.length : 0,
                     workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
                     workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
                   });
                 }
-                if (!inputChannel || inputChannel.length === 0) {
+                if (!ch0 || ch0.length === 0) {
                   this.emptyInputCalls++;
                   return true;
                 }
 
-                const len = inputChannel.length;
-                const ch1 = chCount > 1 ? in0[1] : null;
+                const len = ch0.length;
+                const ch1 = (chCount > 1 && in0[1] && in0[1].length === len) ? in0[1] : null;
                 for (let i = 0; i < len; i++) {
-                  const a0 = Math.abs(inputChannel[i]);
+                  const a0 = Math.abs(ch0[i]);
                   if (a0 > this.ch0Peak) this.ch0Peak = a0;
+                  this.ch0Env = a0 > this.ch0Env ? a0 : this.ch0Env * 0.9992;
                   if (ch1) {
                     const a1 = Math.abs(ch1[i]);
                     if (a1 > this.ch1Peak) this.ch1Peak = a1;
+                    this.ch1Env = a1 > this.ch1Env ? a1 : this.ch1Env * 0.9992;
                   }
                 }
-                let readIdx = 0;
+
+                let monoSrc = ch0;
+                if (ch1) {
+                  if (this.ch1Env > this.ch0Env * 2.8 && this.ch1Env > 0.001) {
+                    monoSrc = ch1;
+                  } else if (this.ch0Env > this.ch1Env * 2.8) {
+                    monoSrc = ch0;
+                  } else {
+                    if (this.monoScratch.length < len) this.monoScratch = new Float32Array(len);
+                    for (let i = 0; i < len; i++) this.monoScratch[i] = 0.5 * (ch0[i] + ch1[i]);
+                    monoSrc = this.monoScratch;
+                  }
+                }
 
                 if (this.detectTransients) {
                   let peak = 0;
-                  let diffSum = 0;
+                  let peakOffset = 0;
+                  let maxDiff = 0;
                   let sumSq = 0;
                   for (let i = 0; i < len; i++) {
-                    const val = inputChannel[i];
+                    const val = monoSrc[i];
                     const absVal = Math.abs(val);
-                    if (absVal > peak) peak = absVal;
+                    if (absVal > peak) { peak = absVal; peakOffset = i; }
                     sumSq += val * val;
-                    if (i > 0) diffSum += Math.abs(val - inputChannel[i - 1]);
+                    if (i > 0) {
+                      const d = Math.abs(val - monoSrc[i - 1]);
+                      if (d > maxDiff) maxDiff = d;
+                    }
                   }
                   const rms = Math.sqrt(sumSq / len);
-                  const hf = diffSum / len;
-                  this.ambientFloor = 0.95 * this.ambientFloor + 0.05 * rms;
-
-                  const currentSamplePos = this.totalSamplesProcessed;
-                  if (peak > 0.008 && (peak > this.ambientFloor * 1.5 || hf > 0.004)) {
-                    if (currentSamplePos - this.lastTransientSample > this.minRefractorySamples) {
-                      this.lastTransientSample = currentSamplePos;
-                      this.port.postMessage({
-                        type: 'transient',
-                        samplePos: currentSamplePos,
-                        peak: peak
-                      });
+                  const thresh = this.transientThreshold;
+                  if (peak < thresh) {
+                    this.ambientFloor = 0.94 * this.ambientFloor + 0.06 * rms;
+                  } else {
+                    this.ambientFloor = 0.992 * this.ambientFloor + 0.008 * Math.min(rms, thresh * 0.5);
+                  }
+                  const sr = (typeof sampleRate === 'number' && sampleRate > 8000) ? sampleRate : 44100;
+                  const refractSamples = Math.round(0.135 * sr);
+                  const eventSamplePos = this.totalSamplesProcessed + peakOffset;
+                  if (peak >= thresh && (peak >= this.ambientFloor * this.onsetRatio || maxDiff >= thresh * 0.16)) {
+                    if (eventSamplePos - this.lastTransientSample > refractSamples) {
+                      this.lastTransientSample = eventSamplePos;
+                      this.port.postMessage({ type: 'transient', samplePos: eventSamplePos, peak: peak });
                     }
                   }
                 }
 
+                let readIdx = 0;
                 while (readIdx < len) {
                   if (!this.activeBuffer) {
                     const nextBuf = this.bufferPool.pop();
@@ -1522,7 +1552,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                   const available = this.chunkSize - this.writeIndex;
                   const toCopy = Math.min(len - readIdx, available);
                   for (let i = 0; i < toCopy; i++) {
-                    this.activeBuffer[this.writeIndex + i] = inputChannel[readIdx + i];
+                    this.activeBuffer[this.writeIndex + i] = monoSrc[readIdx + i];
                   }
                   this.writeIndex += toCopy;
                   readIdx += toCopy;
@@ -1664,6 +1694,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               totalSamples: data.totalSamples,
               ch0Peak: Number((data.ch0Peak || 0).toFixed(5)),
               ch1Peak: Number((data.ch1Peak || 0).toFixed(5)),
+              transientThreshold: data.transientThreshold ? Number(data.transientThreshold.toFixed(5)) : undefined,
               workletSampleRate: data.workletSampleRate,
               workletCurrentTime: Number((data.workletCurrentTime || 0).toFixed(4))
             };
@@ -1728,6 +1759,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         type: 'set_config',
         isRecording: true,
         detectTransients: !!detectTransients,
+        transientThreshold: getPeakThresholdLinear(),
+        onsetRatio: getPeakOnsetRatio(),
         resetSampleCounter: true
       });
 
@@ -1738,6 +1771,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         durationMs: attachDur,
         workletChannelCount: recWorkletNode.channelCount,
         workletNumberOfInputs: recWorkletNode.numberOfInputs,
+        transientThresholdDb: peakSensDb,
         ctxState: recAudioCtx ? recAudioCtx.state : null
       }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PIPELINE_ATTACH : undefined,
@@ -1750,16 +1784,40 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       // Robust fallback to 4096-sample ScriptProcessorNode
       if (!recScriptProcessor) {
-        recScriptProcessor = recAudioCtx.createScriptProcessor(4096, 1, 1);
+        const inCh = Math.min(2, Math.max(1, recMicSource ? recMicSource.channelCount || 2 : 2));
+        recScriptProcessor = recAudioCtx.createScriptProcessor(4096, inCh, 1);
         recMicSource.connect(recScriptProcessor);
         recScriptProcessor.connect(recSilentGain);
         recSilentGain.connect(recAudioCtx.destination);
         window.__nanodaw_processor = recScriptProcessor;
       }
 
+      let spCh0Env = 0;
+      let spCh1Env = 0;
+      let spLastTransientMs = 0;
+
       recScriptProcessor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        const len = input.length;
+        const ch0 = e.inputBuffer.getChannelData(0);
+        const len = ch0.length;
+        const ch1 = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : null;
+        let input = ch0;
+        if (ch1) {
+          for (let i = 0; i < len; i++) {
+            const a0 = Math.abs(ch0[i]);
+            const a1 = Math.abs(ch1[i]);
+            spCh0Env = a0 > spCh0Env ? a0 : spCh0Env * 0.9992;
+            spCh1Env = a1 > spCh1Env ? a1 : spCh1Env * 0.9992;
+          }
+          if (spCh1Env > spCh0Env * 2.8 && spCh1Env > 0.001) {
+            input = ch1;
+          } else if (spCh0Env > spCh1Env * 2.8) {
+            input = ch0;
+          } else {
+            const mixed = new Float32Array(len);
+            for (let i = 0; i < len; i++) mixed[i] = 0.5 * (ch0[i] + ch1[i]);
+            input = mixed;
+          }
+        }
         recChunksReceivedTotal++;
 
         if (!recFirstChunkLogged) {
@@ -1779,6 +1837,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           });
         }
 
+        const prevSamples = recordingState === 'pass1' ? totalPass1Samples : totalPass2Samples;
         if (recordingState === 'pass1') {
           if (pass1StreamStartTime === null && recAudioCtx) {
             pass1StreamStartTime = recAudioCtx.currentTime;
@@ -1797,13 +1856,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (detectTransients && activeTransientCallback) {
           let peak = 0;
+          let peakOff = 0;
           for (let i = 0; i < len; i++) {
             const a = Math.abs(input[i]);
-            if (a > peak) peak = a;
+            if (a > peak) { peak = a; peakOff = i; }
           }
-          if (peak > 0.025) {
-            const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
-            activeTransientCallback(now, (recordingState === 'pass1' ? totalPass1Samples : totalPass2Samples));
+          const thresh = getPeakThresholdLinear();
+          const nowMs = performance.now();
+          if (peak >= thresh && nowMs - spLastTransientMs > 135) {
+            spLastTransientMs = nowMs;
+            const now = recAudioCtx ? recAudioCtx.currentTime : (nowMs / 1000);
+            activeTransientCallback(now, prevSamples + peakOff);
           }
         }
       };
@@ -1923,6 +1986,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (singleMetronomeSubOptions) singleMetronomeSubOptions.style.display = isSingleMetro ? 'flex' : 'none';
     }
     updateGuideTrackSyncHint();
+    if (typeof updatePeakSensitivityUI === 'function') {
+      updatePeakSensitivityUI();
+    }
   }
 
   function switchRecordModalTab(tab) {
@@ -2352,16 +2418,267 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // --- Real-Time VU Meter Live Microphone Monitor ---
+  // --- Real-Time VU Meter, Pre-Recording Peak Check & Superimposed Sensitivity Slider ---
+  const PEAK_SENS_STORAGE_KEY = 'nanodaw_peak_sens_db_v1';
+  const VU_MIN_DB = -54;
+  const SENS_MIN_DB = -50;
+  const SENS_MAX_DB = -3;
+
+  let peakSensDb = -24; // Default -24 dBFS (0.0631 linear): detects AIR taps down to ~12% amplitude while rejecting -32 dB room/handling bumps
+  try {
+    const savedSens = Number(localStorage.getItem(PEAK_SENS_STORAGE_KEY));
+    if (Number.isFinite(savedSens) && savedSens >= SENS_MIN_DB && savedSens <= SENS_MAX_DB) {
+      peakSensDb = Math.round(savedSens);
+    }
+  } catch (_) {}
+
+  function isPeakSyncConfigured() {
+    return Boolean(record2PassSync && record2PassSync.checked);
+  }
+
+  function getPeakThresholdLinear() {
+    return Math.pow(10, peakSensDb / 20);
+  }
+
+  function getPeakOnsetRatio() {
+    // Lower threshold (more eager) -> 1.45x ambient floor; higher threshold (less eager) -> 2.00x ambient floor
+    const norm = (peakSensDb - SENS_MIN_DB) / (SENS_MAX_DB - SENS_MIN_DB);
+    return 1.45 + Math.max(0, Math.min(1, norm)) * 0.55;
+  }
+
+  function getPeakSensitivityPercent() {
+    // -50 dB = 100% sensitivity (most eager), -3 dB = 0% sensitivity (least eager), -24 dB = 55%
+    return Math.round(((SENS_MAX_DB - peakSensDb) / (SENS_MAX_DB - SENS_MIN_DB)) * 100);
+  }
+
+  function updatePeakSensitivityUI() {
+    const syncActive = isPeakSyncConfigured();
+    const vuContainer = document.getElementById('recordVUMeterContainer');
+    const peakBadge = document.getElementById('recordVUPeakBadge');
+    const sensZoneFill = document.getElementById('vuSensZoneFill');
+    const sensOverlay = document.getElementById('peakSensitivityOverlay');
+    const sensLine = document.getElementById('vuSensThresholdLine');
+    const sensSlider = document.getElementById('peakSensitivitySlider');
+    const sensReadout = document.getElementById('recordVUSensReadout');
+    const tapTestBar = document.getElementById('syncTapTestBar');
+    const syncSensBadge = document.getElementById('syncSensBadge');
+
+    const pctFromBottom = Math.max(0, Math.min(100, ((peakSensDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
+    const sensPct = getPeakSensitivityPercent();
+
+    if (vuContainer) {
+      vuContainer.classList.toggle('sync-active', syncActive);
+    }
+    if (peakBadge) peakBadge.style.display = syncActive ? 'inline-block' : 'none';
+    if (sensZoneFill) {
+      sensZoneFill.style.display = syncActive ? 'block' : 'none';
+      sensZoneFill.style.bottom = `${pctFromBottom.toFixed(1)}%`;
+    }
+    if (sensOverlay) {
+      sensOverlay.style.display = syncActive ? 'block' : 'none';
+    }
+    if (sensLine) {
+      sensLine.style.bottom = `${pctFromBottom.toFixed(1)}%`;
+    }
+    if (sensSlider) {
+      sensSlider.value = String(peakSensDb);
+      sensSlider.setAttribute('aria-valuetext', `${peakSensDb} dB threshold (${sensPct}% sensitivity)`);
+    }
+    if (sensReadout) {
+      sensReadout.style.display = syncActive ? 'block' : 'none';
+      sensReadout.textContent = `${peakSensDb}dB`;
+    }
+    if (tapTestBar) {
+      tapTestBar.style.display = syncActive ? 'flex' : 'none';
+    }
+    if (syncSensBadge) {
+      syncSensBadge.textContent = `Sens ${sensPct}% (${peakSensDb}dB)`;
+    }
+
+    if (recWorkletNode) {
+      try {
+        recWorkletNode.port.postMessage({
+          type: 'set_config',
+          transientThreshold: getPeakThresholdLinear(),
+          onsetRatio: getPeakOnsetRatio()
+        });
+      } catch (_) {}
+    }
+  }
+
+  function setPeakSensitivityDb(rawDb) {
+    if (!Number.isFinite(rawDb)) return;
+    const clamped = Math.max(SENS_MIN_DB, Math.min(SENS_MAX_DB, Math.round(rawDb)));
+    if (clamped === peakSensDb) {
+      updatePeakSensitivityUI();
+      return;
+    }
+    peakSensDb = clamped;
+    try {
+      localStorage.setItem(PEAK_SENS_STORAGE_KEY, String(peakSensDb));
+    } catch (_) {}
+    updatePeakSensitivityUI();
+  }
+
+  let vuTapTestCount = 0;
+  let vuFlashTimerId = null;
+
+  function resetPreRecTapTest() {
+    vuTapTestCount = 0;
+    if (vuFlashTimerId) {
+      clearTimeout(vuFlashTimerId);
+      vuFlashTimerId = null;
+    }
+    const vuContainer = document.getElementById('recordVUMeterContainer');
+    const peakBadge = document.getElementById('recordVUPeakBadge');
+    const sensLine = document.getElementById('vuSensThresholdLine');
+    const tapTestBar = document.getElementById('syncTapTestBar');
+    const tapTestLabel = document.getElementById('syncTapTestLabel');
+    if (vuContainer) vuContainer.classList.remove('peak-hit');
+    if (peakBadge) peakBadge.classList.remove('detected');
+    if (sensLine) sensLine.classList.remove('detected');
+    if (tapTestBar) tapTestBar.classList.remove('detected');
+    if (tapTestLabel) tapTestLabel.textContent = 'Tap near mic to test peak detection';
+    ['testBead1', 'testBead2', 'testBead3', 'testBead4'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove('active');
+    });
+  }
+
+  function flashPreRecPeakDetected(peakLinear) {
+    vuTapTestCount++;
+    const cycleIdx = ((vuTapTestCount - 1) % 4) + 1;
+    if (cycleIdx === 1) {
+      ['testBead1', 'testBead2', 'testBead3', 'testBead4'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.remove('active');
+      });
+    }
+    const beadEl = document.getElementById(`testBead${cycleIdx}`);
+    if (beadEl) beadEl.classList.add('active');
+
+    const peakDb = peakLinear > 1e-5 ? (20 * Math.log10(peakLinear)) : -100;
+    const vuContainer = document.getElementById('recordVUMeterContainer');
+    const peakBadge = document.getElementById('recordVUPeakBadge');
+    const sensLine = document.getElementById('vuSensThresholdLine');
+    const tapTestBar = document.getElementById('syncTapTestBar');
+    const tapTestLabel = document.getElementById('syncTapTestLabel');
+
+    if (vuContainer) vuContainer.classList.add('peak-hit');
+    if (peakBadge) peakBadge.classList.add('detected');
+    if (sensLine) sensLine.classList.add('detected');
+    if (tapTestBar) tapTestBar.classList.add('detected');
+    if (tapTestLabel) {
+      tapTestLabel.textContent = `Peak #${vuTapTestCount} detected (${peakDb.toFixed(1)} dB)`;
+    }
+
+    if (vuFlashTimerId) clearTimeout(vuFlashTimerId);
+    vuFlashTimerId = setTimeout(() => {
+      if (vuContainer) vuContainer.classList.remove('peak-hit');
+      if (peakBadge) peakBadge.classList.remove('detected');
+      if (sensLine) sensLine.classList.remove('detected');
+      if (tapTestBar) tapTestBar.classList.remove('detected');
+      vuFlashTimerId = null;
+    }, 260);
+  }
+
+  // Wire superimposed Peak Detection Sensitivity Slider (pointer drag + keyboard accessible range)
+  (function initPeakSensitivityControls() {
+    const sensOverlay = document.getElementById('peakSensitivityOverlay');
+    const sensSlider = document.getElementById('peakSensitivitySlider');
+    const stackWrap = document.getElementById('vuMeterStackWrap');
+    let isPointerDraggingSens = false;
+
+    function updateFromClientY(clientY) {
+      const refEl = stackWrap || sensOverlay;
+      if (!refEl) return;
+      const rect = refEl.getBoundingClientRect();
+      if (!rect || rect.height <= 0) return;
+      const fracFromBottom = 1 - ((clientY - rect.top) / rect.height);
+      const rawDb = VU_MIN_DB + Math.max(0, Math.min(1, fracFromBottom)) * (-VU_MIN_DB);
+      setPeakSensitivityDb(rawDb);
+    }
+
+    if (sensOverlay) {
+      sensOverlay.addEventListener('pointerdown', (e) => {
+        if (!isPeakSyncConfigured()) return;
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        isPointerDraggingSens = true;
+        e.preventDefault();
+        try { sensOverlay.setPointerCapture(e.pointerId); } catch (_) {}
+        if (sensSlider) {
+          try { sensSlider.focus({ preventScroll: true }); } catch (_) {}
+        }
+        updateFromClientY(e.clientY);
+      });
+
+      sensOverlay.addEventListener('pointermove', (e) => {
+        if (!isPointerDraggingSens) return;
+        e.preventDefault();
+        updateFromClientY(e.clientY);
+      });
+
+      const endDrag = () => {
+        if (isPointerDraggingSens) {
+          isPointerDraggingSens = false;
+          recDiag('REC_PEAK_SENS_ADJUSTED', {
+            peakSensDb,
+            thresholdLinear: Number(getPeakThresholdLinear().toFixed(5)),
+            sensitivityPct: getPeakSensitivityPercent()
+          });
+        }
+      };
+      sensOverlay.addEventListener('pointerup', endDrag);
+      sensOverlay.addEventListener('pointercancel', endDrag);
+      sensOverlay.addEventListener('lostpointercapture', endDrag);
+    }
+
+    if (sensSlider) {
+      sensSlider.addEventListener('input', () => {
+        if (!isPointerDraggingSens) {
+          setPeakSensitivityDb(Number(sensSlider.value));
+        }
+      });
+      sensSlider.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          setPeakSensitivityDb(peakSensDb + 1);
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          setPeakSensitivityDb(peakSensDb - 1);
+        } else if (e.key === 'Home') {
+          e.preventDefault();
+          setPeakSensitivityDb(SENS_MIN_DB);
+        } else if (e.key === 'End') {
+          e.preventDefault();
+          setPeakSensitivityDb(SENS_MAX_DB);
+        }
+      });
+    }
+
+    updatePeakSensitivityUI();
+  })();
+
   let vuStream = null;
   let vuSource = null;
+  let vuSplitter = null;
   let vuAnalyser = null;
+  let vuAnalyserCh1 = null;
   let vuAnimId = null;
   let vuPeakHold = 0;
   let vuPeakHoldTime = 0;
   let vuClipTime = 0;
   let vuIsStarting = false;
-  const vuDataArray = new Float32Array(512);
+  let vuFastEnv = 0;
+  let vuAmbientFloor = 0.003;
+  let vuLastTransientMs = 0;
+  let vuLastCtxTime = 0;
+  let vuCh0Env = 0;
+  let vuCh1Env = 0;
+  const VU_FFT_SIZE = 2048;
+  const vuDataCh0 = new Float32Array(VU_FFT_SIZE);
+  const vuDataCh1 = new Float32Array(VU_FFT_SIZE);
+  const vuMonoScratch = new Float32Array(VU_FFT_SIZE);
 
   function setVUMeterGrayedOut(isGray) {
     const vuContainer = document.getElementById('recordVUMeterContainer');
@@ -2395,6 +2712,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // If stream is already healthy and analyser is running, keep it alive seamlessly
     if (!forceRestart && vuStream && vuStream.active && vuAnalyser && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
       setVUMeterGrayedOut(false);
+      updatePeakSensitivityUI();
       if (!vuAnimId) {
         vuAnimId = requestAnimationFrame(renderVU);
       }
@@ -2453,9 +2771,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         try { vuSource.disconnect(); } catch (_) {}
         vuSource = null;
       }
+      if (vuSplitter) {
+        try { vuSplitter.disconnect(); } catch (_) {}
+        vuSplitter = null;
+      }
       if (vuAnalyser) {
         try { vuAnalyser.disconnect(); } catch (_) {}
         vuAnalyser = null;
+      }
+      if (vuAnalyserCh1) {
+        try { vuAnalyserCh1.disconnect(); } catch (_) {}
+        vuAnalyserCh1 = null;
       }
       if (vuStream && vuStream !== stream) {
         try { vuStream.getTracks().forEach(t => t.stop()); } catch (_) {}
@@ -2485,15 +2811,29 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       vuSource = ctx.createMediaStreamSource(vuStream);
+      vuSplitter = ctx.createChannelSplitter(2);
       vuAnalyser = ctx.createAnalyser();
-      vuAnalyser.fftSize = 512;
-      vuAnalyser.smoothingTimeConstant = 0.2;
-      vuSource.connect(vuAnalyser);
+      vuAnalyser.fftSize = VU_FFT_SIZE;
+      vuAnalyser.smoothingTimeConstant = 0.0;
+      vuAnalyserCh1 = ctx.createAnalyser();
+      vuAnalyserCh1.fftSize = VU_FFT_SIZE;
+      vuAnalyserCh1.smoothingTimeConstant = 0.0;
+      vuSource.connect(vuSplitter);
+      vuSplitter.connect(vuAnalyser, 0);
+      vuSplitter.connect(vuAnalyserCh1, 1);
+
+      vuFastEnv = 0;
+      vuAmbientFloor = 0.003;
+      vuLastTransientMs = 0;
+      vuLastCtxTime = ctx.currentTime;
+      vuCh0Env = 0;
+      vuCh1Env = 0;
 
       const totalVuInitMs = Number((performance.now() - vuStartPerf).toFixed(2));
       recDiag('REC_VU_READY', {
         gumDurationMs: gumDur,
         totalInitMs: totalVuInitMs,
+        peakSensDb,
         stream: inspectMediaStream(vuStream),
         ctx: inspectAudioCtx(ctx)
       }, {
@@ -2503,8 +2843,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         forcePersist: true
       });
 
-      // Audio stack connected: ungray the VU meter
+      // Audio stack connected: ungray the VU meter & sync sensitivity UI
       setVUMeterGrayedOut(false);
+      updatePeakSensitivityUI();
 
       if (vuAnimId) {
         cancelAnimationFrame(vuAnimId);
@@ -2537,39 +2878,101 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (activeRecordModalTab === 'record') {
-      vuAnalyser.getFloatTimeDomainData(vuDataArray);
+      const ctx = audio.audioCtx;
+      const sr = (ctx && ctx.sampleRate) ? ctx.sampleRate : 44100;
+      const curCtxTime = ctx ? ctx.currentTime : (performance.now() / 1000);
+      const elapsedSec = vuLastCtxTime > 0 ? Math.max(0.003, curCtxTime - vuLastCtxTime) : 0.020;
+      vuLastCtxTime = curCtxTime;
+
+      // Scan every newly-arrived sample since the previous rAF tick (zero dropped transients between frames)
+      const inspectLen = Math.min(VU_FFT_SIZE, Math.max(256, Math.round(elapsedSec * sr)));
+      const startIdx = VU_FFT_SIZE - inspectLen;
+
+      vuAnalyser.getFloatTimeDomainData(vuDataCh0);
+      if (vuAnalyserCh1) {
+        vuAnalyserCh1.getFloatTimeDomainData(vuDataCh1);
+      }
+
+      for (let i = startIdx; i < VU_FFT_SIZE; i++) {
+        const a0 = Math.abs(vuDataCh0[i]);
+        vuCh0Env = a0 > vuCh0Env ? a0 : vuCh0Env * 0.9992;
+        if (vuAnalyserCh1) {
+          const a1 = Math.abs(vuDataCh1[i]);
+          vuCh1Env = a1 > vuCh1Env ? a1 : vuCh1Env * 0.9992;
+        }
+      }
+
+      let srcArr = vuDataCh0;
+      if (vuAnalyserCh1 && vuCh1Env > 0.0005) {
+        if (vuCh1Env > vuCh0Env * 2.8) {
+          srcArr = vuDataCh1;
+        } else if (vuCh0Env <= vuCh1Env * 2.8) {
+          for (let i = startIdx; i < VU_FFT_SIZE; i++) {
+            vuMonoScratch[i] = 0.5 * (vuDataCh0[i] + vuDataCh1[i]);
+          }
+          srcArr = vuMonoScratch;
+        }
+      }
 
       let peak = 0;
+      let maxDiff = 0;
       let sumSq = 0;
-      for (let i = 0; i < vuDataArray.length; i++) {
-        const val = vuDataArray[i];
+      for (let i = startIdx; i < VU_FFT_SIZE; i++) {
+        const val = srcArr[i];
         const abs = Math.abs(val);
         if (abs > peak) peak = abs;
         sumSq += val * val;
+        if (i > startIdx) {
+          const d = Math.abs(val - srcArr[i - 1]);
+          if (d > maxDiff) maxDiff = d;
+        }
       }
 
-      const rms = Math.sqrt(sumSq / vuDataArray.length);
+      const rms = Math.sqrt(sumSq / inspectLen);
       const now = performance.now();
 
-      if (peak > vuPeakHold || now - vuPeakHoldTime > 800) {
+      // Fast-attack / smooth-release peak-envelope bar so transient taps visibly cross the sensitivity line 1:1
+      if (peak >= vuFastEnv) {
+        vuFastEnv = peak;
+      } else {
+        vuFastEnv = Math.max(rms, vuFastEnv * 0.85);
+      }
+
+      if (peak > vuPeakHold || now - vuPeakHoldTime > 850) {
         vuPeakHold = peak;
         vuPeakHoldTime = now;
       } else {
-        vuPeakHold = Math.max(0, vuPeakHold - 0.015);
+        vuPeakHold = Math.max(0, vuPeakHold * 0.94 - 0.002);
       }
 
-      const minDb = -54;
-      const rmsDb = rms > 0.0001 ? 20 * Math.log10(rms) : -100;
+      // Live Pre-Recording Peak Detection Check (identical rule & threshold to NanodawRecorderProcessor)
+      if (isPeakSyncConfigured()) {
+        const thresh = getPeakThresholdLinear();
+        const onsetRatio = getPeakOnsetRatio();
+        if (peak < thresh) {
+          vuAmbientFloor = 0.92 * vuAmbientFloor + 0.08 * rms;
+        } else {
+          vuAmbientFloor = 0.985 * vuAmbientFloor + 0.015 * Math.min(rms, thresh * 0.5);
+        }
+        if (peak >= thresh && (peak >= vuAmbientFloor * onsetRatio || maxDiff >= thresh * 0.16)) {
+          if (now - vuLastTransientMs > 135) {
+            vuLastTransientMs = now;
+            flashPreRecPeakDetected(peak);
+          }
+        }
+      }
+
+      const envDb = vuFastEnv > 0.0001 ? 20 * Math.log10(vuFastEnv) : -100;
       let vuPct = 0;
-      if (rmsDb > minDb) {
-        vuPct = Math.min(100, Math.max(0, ((rmsDb - minDb) / -minDb) * 100));
+      if (envDb > VU_MIN_DB) {
+        vuPct = Math.min(100, Math.max(0, ((envDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
       }
 
       let peakPct = 0;
       if (vuPeakHold > 0.0001) {
         const holdDb = 20 * Math.log10(vuPeakHold);
-        if (holdDb > minDb) {
-          peakPct = Math.min(100, Math.max(0, ((holdDb - minDb) / -minDb) * 100));
+        if (holdDb > VU_MIN_DB) {
+          peakPct = Math.min(100, Math.max(0, ((holdDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
         }
       }
 
@@ -2604,10 +3007,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       if (dbEl) {
-        if (rmsDb <= -50) {
+        const displayDb = vuPeakHold > 0.0003 ? 20 * Math.log10(vuPeakHold) : envDb;
+        if (displayDb <= -50) {
           dbEl.textContent = '-∞';
         } else {
-          dbEl.textContent = `${Math.round(rmsDb)}`;
+          dbEl.textContent = `${Math.round(displayDb)}`;
         }
       }
     }
@@ -2625,9 +3029,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       try { vuSource.disconnect(); } catch (_) {}
       vuSource = null;
     }
+    if (vuSplitter) {
+      try { vuSplitter.disconnect(); } catch (_) {}
+      vuSplitter = null;
+    }
     if (vuAnalyser) {
       try { vuAnalyser.disconnect(); } catch (_) {}
       vuAnalyser = null;
+    }
+    if (vuAnalyserCh1) {
+      try { vuAnalyserCh1.disconnect(); } catch (_) {}
+      vuAnalyserCh1 = null;
     }
     if (!preserveStream && vuStream) {
       try {
@@ -2664,6 +3076,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         deviceIdPrefix: recordDeviceSelect.value ? String(recordDeviceSelect.value).slice(0, 12) : '',
         optionText: optText
       }, { forcePersist: true });
+      resetPreRecTapTest();
       startVUMonitor(true);
     });
   }
@@ -2707,7 +3120,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         peakAbs = amp;
       }
     }
-    const n = Math.max(1, validCount);
     const rms = Math.sqrt(sumSq / Math.max(1, s1 - s0)) || 1e-9;
     return {
       idx: bestIdx >= 0 ? bestIdx : s0,
@@ -2715,6 +3127,238 @@ document.addEventListener('DOMContentLoaded', async () => {
       crest: (bestIdx >= 0 && rms > 0) ? (peakAbs / rms) : 0,
       found: bestIdx >= 0
     };
+  }
+
+  /**
+   * Extracts prominent, refractory-separated transient candidates from raw PCM
+   * for global multi-beat rhythmic sequence locking.
+   */
+  function extractTapCandidates(pcm, sampleRate, s0, s1, minPeakLinear) {
+    const start = Math.max(0, Math.floor(s0));
+    const end = Math.min(pcm.length, Math.ceil(s1));
+    if (end - start < 32) return [];
+
+    const blockLen = Math.max(16, Math.round(0.008 * sampleRate)); // 8ms analysis blocks
+    const numBlocks = Math.ceil((end - start) / blockLen);
+    const bPeaks = new Float32Array(numBlocks);
+    const bPeakIdx = new Int32Array(numBlocks);
+    const bRms = new Float32Array(numBlocks);
+    const bDiff = new Float32Array(numBlocks);
+
+    for (let b = 0; b < numBlocks; b++) {
+      const bs = start + b * blockLen;
+      const be = Math.min(end, bs + blockLen);
+      let pk = 0;
+      let pkIdx = bs;
+      let sq = 0;
+      let md = 0;
+      for (let i = bs; i < be; i++) {
+        const v = pcm[i];
+        const a = Math.abs(v);
+        if (a > pk) { pk = a; pkIdx = i; }
+        sq += v * v;
+        if (i > start) {
+          const d = Math.abs(v - pcm[i - 1]);
+          if (d > md) md = d;
+        }
+      }
+      bPeaks[b] = pk;
+      bPeakIdx[b] = pkIdx;
+      bRms[b] = Math.sqrt(sq / Math.max(1, be - bs));
+      bDiff[b] = md;
+    }
+
+    // Estimate ambient noise floor from lower quartile of block RMS
+    const sortedRms = Array.from(bRms).sort((a, b) => a - b);
+    let ambient = sortedRms[Math.floor(sortedRms.length * 0.25)] || 0.001;
+    ambient = Math.max(0.0005, Math.min(ambient, minPeakLinear * 0.45));
+
+    const onsetRatio = getPeakOnsetRatio();
+    const rawHits = [];
+    for (let b = 0; b < numBlocks; b++) {
+      const pk = bPeaks[b];
+      const md = bDiff[b];
+      if (pk < minPeakLinear) {
+        ambient = 0.94 * ambient + 0.06 * bRms[b];
+        continue;
+      }
+      const prevPk = b > 0 ? bPeaks[b - 1] : 0;
+      const nextPk = b + 1 < numBlocks ? bPeaks[b + 1] : 0;
+      // Local maximum block or sharp rising edge above threshold
+      if (pk >= prevPk && pk >= nextPk * 0.92 && (pk >= ambient * onsetRatio || md >= minPeakLinear * 0.14)) {
+        const refineRadius = Math.round(0.018 * sampleRate);
+        const rs = Math.max(start, bPeakIdx[b] - refineRadius);
+        const re = Math.min(end, bPeakIdx[b] + refineRadius);
+        let bestSample = bPeakIdx[b];
+        let bestMetric = -1;
+        let bestAbs = pk;
+        for (let i = rs; i < re; i++) {
+          const a = Math.abs(pcm[i]);
+          const d = i > 0 ? Math.abs(pcm[i] - pcm[i - 1]) : 0;
+          const m = a * 0.70 + d * 0.30;
+          if (m > bestMetric) {
+            bestMetric = m;
+            bestSample = i;
+            bestAbs = a;
+          }
+        }
+        rawHits.push({
+          idx: bestSample,
+          sec: bestSample / sampleRate,
+          peakAbs: bestAbs,
+          metric: bestMetric,
+          prominence: bestAbs / Math.max(0.0005, ambient)
+        });
+      }
+    }
+
+    // Refractory merge (135ms): keep strongest transient within each tap's physical decay
+    const refractSamples = Math.round(0.135 * sampleRate);
+    const merged = [];
+    for (let i = 0; i < rawHits.length; i++) {
+      const h = rawHits[i];
+      if (merged.length === 0) {
+        merged.push(h);
+      } else {
+        const prev = merged[merged.length - 1];
+        if (h.idx - prev.idx < refractSamples) {
+          if (h.metric > prev.metric) {
+            merged[merged.length - 1] = h;
+          }
+        } else {
+          merged.push(h);
+        }
+      }
+    }
+
+    // Cap to top 32 candidates by amplitude, then restore chronological order
+    if (merged.length > 32) {
+      merged.sort((a, b) => b.peakAbs - a.peakAbs);
+      merged.length = 32;
+      merged.sort((a, b) => a.idx - b.idx);
+    }
+    return merged;
+  }
+
+  /**
+   * Finds the globally optimal rhythmic sequence of `numBeats` tap peaks near `expFirstSec` with beat spacing ~`dt`.
+   * Immune to early room/handling bumps and greedy first-beat mislocks.
+   */
+  function findBestTapSequence(pcm, sampleRate, expFirstSec, dt, numBeats, thresholdLinear) {
+    const winStartSec = Math.max(0, expFirstSec - 1.40 * dt);
+    const winEndSec = Math.min(pcm.length / sampleRate, expFirstSec + (numBeats + 1.85) * dt);
+    const s0 = Math.round(winStartSec * sampleRate);
+    const s1 = Math.round(winEndSec * sampleRate);
+    if (s1 - s0 < Math.round(0.1 * sampleRate)) return { peaksSec: [], peaksIdx: [], candidatesCount: 0 };
+
+    // Try user sensitivity threshold first, then a 0.60x soft-tap fallback (still well above noise floor)
+    const multipliers = [1.0, 0.60];
+    for (let mIdx = 0; mIdx < multipliers.length; mIdx++) {
+      const effThresh = Math.max(0.005, thresholdLinear * multipliers[mIdx]);
+      const cands = extractTapCandidates(pcm, sampleRate, s0, s1, effThresh);
+      if (cands.length < numBeats) continue;
+
+      if (numBeats === 1) {
+        let best = null;
+        let bestScore = -1e9;
+        for (const c of cands) {
+          const distBeats = Math.abs(c.sec - expFirstSec) / dt;
+          if (distBeats > 1.5) continue;
+          const sc = Math.log10(Math.max(1e-4, c.peakAbs)) * 2.0 - distBeats * 0.35;
+          if (sc > bestScore) { bestScore = sc; best = c; }
+        }
+        if (best) return { peaksSec: [best.sec], peaksIdx: [best.idx], candidatesCount: cands.length };
+        continue;
+      }
+
+      const minStep = 0.48 * dt;
+      const maxStep = 1.65 * dt;
+      const firstMinSec = Math.max(0, expFirstSec - 1.35 * dt);
+      const firstMaxSec = expFirstSec + 2.20 * dt;
+
+      let bestSeq = null;
+      let bestScore = -1e9;
+      const seq = new Array(numBeats);
+
+      function evaluateSeq() {
+        let sumAmpDb = 0;
+        let minAmp = 1e9;
+        let maxAmp = 0;
+        let sumStep = 0;
+        const steps = [];
+        for (let k = 0; k < numBeats; k++) {
+          const a = seq[k].peakAbs;
+          sumAmpDb += 20 * Math.log10(Math.max(1e-4, a));
+          if (a < minAmp) minAmp = a;
+          if (a > maxAmp) maxAmp = a;
+          if (k > 0) {
+            const st = seq[k].sec - seq[k - 1].sec;
+            steps.push(st);
+            sumStep += st;
+          }
+        }
+        const meanStep = sumStep / steps.length;
+        let stepVar = 0;
+        for (let i = 0; i < steps.length; i++) {
+          const diff = steps[i] - meanStep;
+          stepVar += diff * diff;
+        }
+        const relJitter = Math.sqrt(stepVar / steps.length) / Math.max(0.05, meanStep);
+        const tempoErr = Math.abs(meanStep - dt) / dt;
+        const ampSpreadDb = 20 * Math.log10(Math.max(1, maxAmp / Math.max(1e-4, minAmp)));
+        const meanAmpDb = sumAmpDb / numBeats; // e.g., -6 dB for strong taps vs -32 dB for handling noise
+        const anchorDist = Math.abs(seq[0].sec - expFirstSec) / dt;
+
+        // Higher amplitude, tight rhythm regularity, consistent tap strength, and proximity to expected Beat 5
+        const score =
+          (meanAmpDb * 0.35) -
+          (relJitter * 14.0) -
+          (tempoErr * 4.5) -
+          (Math.max(0, ampSpreadDb - 4.0) * 0.22) -
+          (anchorDist * 0.25);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestSeq = seq.slice();
+        }
+      }
+
+      function dfs(depth) {
+        if (depth === numBeats) {
+          evaluateSeq();
+          return;
+        }
+        const prev = seq[depth - 1];
+        const prevStep = depth >= 2 ? (seq[depth - 1].sec - seq[depth - 2].sec) : null;
+        for (let i = 0; i < cands.length; i++) {
+          const c = cands[i];
+          if (c.idx <= prev.idx) continue;
+          const step = c.sec - prev.sec;
+          if (step < minStep) continue;
+          if (step > maxStep) break;
+          if (prevStep !== null && Math.abs(step - prevStep) > 0.36 * Math.max(step, prevStep)) continue;
+          seq[depth] = c;
+          dfs(depth + 1);
+        }
+      }
+
+      for (let i = 0; i < cands.length; i++) {
+        const c0 = cands[i];
+        if (c0.sec < firstMinSec || c0.sec > firstMaxSec) continue;
+        seq[0] = c0;
+        dfs(1);
+      }
+
+      if (bestSeq && bestSeq.length === numBeats) {
+        return {
+          peaksSec: bestSeq.map(c => c.sec),
+          peaksIdx: bestSeq.map(c => c.idx),
+          candidatesCount: cands.length
+        };
+      }
+    }
+
+    return { peaksSec: [], peaksIdx: [], candidatesCount: 0 };
   }
 
   function playSynthBeep(time, freq = 900, dur = 0.08, destNode = null, volume = 0.8) {
@@ -2909,13 +3553,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (hudRecStatusText) hudRecStatusText.textContent = 'TRACK SYNC TAKE';
     if (hudInstruction) hudInstruction.textContent = `Sync with "${trackName}"! Tap beats ${firstBeat}–${firstBeat + numBeats - 1}...`;
     if (hudClickBeads) {
-      hudClickBeads.classList.add('hidden');
-      hudClickBeads.style.display = 'none';
+      hudClickBeads.classList.remove('hidden');
+      hudClickBeads.style.display = 'flex';
     }
 
+    const estTempo = (guideTrack && guideTrack.tempo) || state.project?.tracks?.[guideTrackIdx]?.tempo || state.project?.tempo || state.project?.bpm || parseInt(syncSynthTempo?.value, 10) || 90;
+    const estDt = 60 / Math.max(30, estTempo);
+    const minTapAcceptSec = Math.max(0, (firstBeat - 1) * estDt - 0.85 * estDt);
+
     await attachRecordingPipeline({
-      detectTransients: false,
-      targetStore: pass2AudioStore
+      detectTransients: true,
+      targetStore: pass2AudioStore,
+      onTransient: (now, samplePos) => {
+        if (recordingState !== 'recording_take' || !isTrackSyncTake) return;
+        const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+        const secInTake = samplePos / sr;
+        if (secInTake < minTapAcceptSec) return;
+        pass2ClickEvents.push({ ctxTime: now, samplePos });
+        const count = pass2ClickEvents.length;
+        const beadIdx = Math.min(3, count - 1);
+        const beadEl = [bead1, bead2, bead3, bead4][beadIdx];
+        if (beadEl) beadEl.classList.add('active');
+        recDiag('REC_TRACK_SYNC_LIVE_TAP', {
+          tapNum: count,
+          secInTake: Number(secInTake.toFixed(3)),
+          samplePos
+        });
+        if (count === numBeats) {
+          if (hudInstruction) hudInstruction.textContent = 'Sync taps captured! Sing or play along...';
+        } else if (count >= numBeats + 2 && recWorkletNode) {
+          try { recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false }); } catch (_) {}
+        }
+      }
     });
 
     window.__nanodaw_stream = recStream;
@@ -3365,14 +4034,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
     const dtSamples = Math.round(dt * sampleRate);
 
-    // Concatenate all Pass 1 recorded PCM in one batched operation
-    let p1Full = pass1AudioStore.toFlatArray();
-    if (recordInternalGain && recordInternalGain.checked) {
-      p1Full = processInternalGainAndNoiseSuppression(p1Full, sampleRate, 0.75);
-    }
-    const totalP1 = p1Full.length;
+    // Concatenate all Pass 1 recorded PCM in one batched operation (detect peaks on raw audio BEFORE gain/noise filtering)
+    const rawP1 = pass1AudioStore.toFlatArray();
+    const totalP1 = rawP1.length;
 
-    const searchWin = Math.round(0.20 * dtSamples);
+    const searchWin = Math.round(0.22 * dtSamples);
     const detectedTapPeaks = [];
 
     // Nominal arrival of Beep 5 in mic recording (assuming 0 latency from stream start)
@@ -3380,29 +4046,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     const nominalBeep5Sec = (pass1GuideStartTime - streamStart) + 4 * dt;
     const nominalBeep5Sample = Math.round(nominalBeep5Sec * sampleRate);
 
-    // 1. Locate User Tap 1 peak (on Beep 5)
-    let roughTap1 = nominalBeep5Sample;
-    if (pass1ClickEvents.length > 0) {
-      roughTap1 = pass1ClickEvents[0].samplePos;
-    }
-    let pk1 = findTransientPeak(p1Full, roughTap1 - searchWin, roughTap1 + searchWin);
-    if (pk1.peakAbs < 0.010 && pass1ClickEvents.length === 0) {
-      // If no click event registered, search wider forward window (accounting for hardware roundtrip latency)
-      pk1 = findTransientPeak(p1Full, nominalBeep5Sample - Math.round(0.05 * sampleRate), nominalBeep5Sample + Math.round(1.10 * dtSamples));
-    }
-    const tap1Peak = (pk1.peakAbs >= 0.008) ? pk1.idx : roughTap1;
-    detectedTapPeaks.push(tap1Peak);
-
-    // 2. Locate User Taps 2, 3, 4 peaks (on Beeps 6, 7, 8)
-    for (let k = 1; k < 4; k++) {
-      const expectedK = tap1Peak + k * dtSamples;
-      let roughK = expectedK;
-      if (pass1ClickEvents[k] && Math.abs(pass1ClickEvents[k].samplePos - expectedK) < 0.35 * dtSamples) {
-        roughK = pass1ClickEvents[k].samplePos;
+    // Prefer global 4-beat sequence lock on raw Pass 1 audio
+    const seqRes = findBestTapSequence(rawP1, sampleRate, nominalBeep5Sec, dt, 4, getPeakThresholdLinear());
+    if (seqRes.peaksIdx.length === 4) {
+      detectedTapPeaks.push(...seqRes.peaksIdx);
+    } else {
+      const minTapFloor = Math.min(0.008, getPeakThresholdLinear() * 0.5);
+      // 1. Locate User Tap 1 peak (on Beep 5)
+      let roughTap1 = nominalBeep5Sample;
+      if (pass1ClickEvents.length > 0) {
+        roughTap1 = pass1ClickEvents[0].samplePos;
       }
-      const pkK = findTransientPeak(p1Full, roughK - searchWin, roughK + searchWin);
-      const tapKPeak = (pkK.peakAbs >= 0.008) ? pkK.idx : roughK;
-      detectedTapPeaks.push(tapKPeak);
+      let pk1 = findTransientPeak(rawP1, roughTap1 - searchWin, roughTap1 + searchWin);
+      if (pk1.peakAbs < minTapFloor * 1.25 && pass1ClickEvents.length === 0) {
+        // If no click event registered, search wider forward window (accounting for hardware roundtrip latency)
+        pk1 = findTransientPeak(rawP1, nominalBeep5Sample - Math.round(0.05 * sampleRate), nominalBeep5Sample + Math.round(1.10 * dtSamples));
+      }
+      const tap1Peak = (pk1.peakAbs >= minTapFloor) ? pk1.idx : roughTap1;
+      detectedTapPeaks.push(tap1Peak);
+
+      // 2. Locate User Taps 2, 3, 4 peaks (on Beeps 6, 7, 8)
+      for (let k = 1; k < 4; k++) {
+        const expectedK = tap1Peak + k * dtSamples;
+        let roughK = expectedK;
+        if (pass1ClickEvents[k] && Math.abs(pass1ClickEvents[k].samplePos - expectedK) < 0.35 * dtSamples) {
+          roughK = pass1ClickEvents[k].samplePos;
+        }
+        const pkK = findTransientPeak(rawP1, roughK - searchWin, roughK + searchWin);
+        const tapKPeak = (pkK.peakAbs >= minTapFloor) ? pkK.idx : roughK;
+        detectedTapPeaks.push(tapKPeak);
+      }
+    }
+
+    const tap1Peak = detectedTapPeaks[0];
+    let p1Full = rawP1;
+    if (recordInternalGain && recordInternalGain.checked) {
+      p1Full = processInternalGainAndNoiseSuppression(rawP1, sampleRate, 0.75);
     }
 
     // Ensure strictly ascending peaks with valid intervals
@@ -3474,21 +4153,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!isRecording) return;
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
-    // 1. Gather all recorded PCM from Pass 1 in one batched operation
-    let p1Full = pass1AudioStore.toFlatArray();
-    if (recordInternalGain && recordInternalGain.checked) {
-      p1Full = processInternalGainAndNoiseSuppression(p1Full, sampleRate, 0.75);
-    }
-    const totalP1 = p1Full.length;
+    // 1. Gather all recorded PCM from Pass 1 in one batched operation (detect peaks on raw audio first)
+    const rawP1 = pass1AudioStore.toFlatArray();
+    const totalP1 = rawP1.length;
 
-    // 2. High-precision transient peak detection for all 4 taps in p1Full
+    // 2. High-precision transient peak detection for all 4 taps in rawP1
     const exactPeaks = [];
     const searchWindowSamples = Math.round(0.12 * sampleRate);
 
     for (let k = 0; k < 4; k++) {
       const roughPos = pass1ClickEvents[k]?.samplePos ?? Math.round(k * (totalP1 / 4));
-      const peakInfo = findTransientPeak(p1Full, roughPos - searchWindowSamples, roughPos + searchWindowSamples);
+      const peakInfo = findTransientPeak(rawP1, roughPos - searchWindowSamples, roughPos + searchWindowSamples);
       exactPeaks.push(peakInfo.idx);
+    }
+
+    let p1Full = rawP1;
+    if (recordInternalGain && recordInternalGain.checked) {
+      p1Full = processInternalGainAndNoiseSuppression(rawP1, sampleRate, 0.75);
     }
 
     // 3. Compute tempo using all 4 taps via linear regression & robust outlier-rejected median
@@ -3943,37 +4624,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     let takePCM = null;
 
     if (pass2AudioStore.totalSamples > 0) {
-      const ppStart = performance.now();
-      recDiag('REC_POST_PROCESS_START', {
-        source: 'pass2',
-        samples: pass2AudioStore.totalSamples,
-        sampleRate,
-        internalGain: Boolean(recordInternalGain && recordInternalGain.checked)
-      }, {
-        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
-        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
-        forcePersist: true
-      });
-      let fullPass2 = pass2AudioStore.toFlatArray();
-      fullPass2 = suppressAudioGlitches(fullPass2, sampleRate);
-      if (recordInternalGain && recordInternalGain.checked) {
-        fullPass2 = processInternalGainAndNoiseSuppression(fullPass2, sampleRate, 0.75);
-      }
-      const ppDur = Number((performance.now() - ppStart).toFixed(2));
-      recDiag('REC_POST_PROCESS_DONE', {
-        durationMs: ppDur,
-        samples: fullPass2.length
-      }, {
-        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
-        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
-        duration: ppDur,
-        forcePersist: true
-      });
-      const totalSamples = fullPass2.length;
+      // CRITICAL: Extract raw captured audio FIRST and run all sync tap peak detection BEFORE
+      // suppressAudioGlitches / processInternalGainAndNoiseSuppression, which otherwise shave sharp transients!
+      const rawPass2 = pass2AudioStore.toFlatArray();
+      const totalSamples = rawPass2.length;
 
-      // If this was a Track Sync take, process it using peak alignment
+      // If this was a Track Sync take, process it using raw-PCM peak alignment first
       if (wasTrackSync && syncGuideIdx !== null) {
-        await processTrackSyncTake(syncGuideIdx, fullPass2, sampleRate);
+        await processTrackSyncTake(syncGuideIdx, rawPass2, sampleRate);
         return;
       }
 
@@ -3998,41 +4656,43 @@ document.addEventListener('DOMContentLoaded', async () => {
           expectedUser1Sample = Math.round((0.150 + 4 * dt) * sampleRate);
         }
 
-        // Search for the 4 user calibration tap peaks (Beats 5, 6, 7, 8)
+        // Search for the 4 user calibration tap peaks (Beats 5, 6, 7, 8) on rawPass2
         const detectedPeaks = [];
-        const winSamples = Math.round(Math.min(0.200 * sampleRate, 0.40 * dtSamples));
+        const seqRes = findBestTapSequence(rawPass2, sampleRate, expectedUser1Sample / sampleRate, dt, 4, getPeakThresholdLinear());
+        if (seqRes.peaksIdx.length === 4) {
+          detectedPeaks.push(...seqRes.peaksIdx);
+        } else {
+          const winSamples = Math.round(Math.min(0.220 * sampleRate, 0.42 * dtSamples));
+          const preludeClicks = pass2ClickEvents.filter(ev => {
+            const s = ev.samplePos;
+            return s >= expectedUser1Sample - winSamples && s < expectedUser1Sample + 4.5 * dtSamples;
+          });
 
-        // Use pass2ClickEvents during the calibration window if available:
-        const preludeClicks = pass2ClickEvents.filter(ev => {
-          const s = ev.samplePos;
-          return s >= expectedUser1Sample - winSamples && s < expectedUser1Sample + 4.5 * dtSamples;
-        });
+          let rough1 = expectedUser1Sample;
+          if (preludeClicks.length > 0) {
+            rough1 = preludeClicks[0].samplePos;
+          }
+          const minFloor = Math.min(0.012, getPeakThresholdLinear() * 0.5);
+          const p1 = findTransientPeak(rawPass2, rough1 - winSamples, rough1 + winSamples);
 
-        let rough1 = expectedUser1Sample;
-        if (preludeClicks.length > 0) {
-          rough1 = preludeClicks[0].samplePos;
-        }
-        const p1 = findTransientPeak(fullPass2, rough1 - winSamples, rough1 + winSamples);
-
-        if (p1.peakAbs >= 0.015 && p1.crest >= 2.0) {
-          detectedPeaks.push(p1.idx);
-
-          // Track Taps 2, 3, 4 adaptively spaced by ~dtSamples from previous peak
-          for (let k = 1; k < 4; k++) {
-            const roughK = detectedPeaks[k - 1] + dtSamples;
-            const pk = findTransientPeak(fullPass2, roughK - winSamples, roughK + winSamples);
-            if (pk.peakAbs >= 0.012 && pk.crest >= 1.8) {
-              detectedPeaks.push(pk.idx);
-            } else {
-              detectedPeaks.push(roughK);
+          if (p1.peakAbs >= minFloor && p1.crest >= 1.6) {
+            detectedPeaks.push(p1.idx);
+            for (let k = 1; k < 4; k++) {
+              const roughK = detectedPeaks[k - 1] + dtSamples;
+              const pk = findTransientPeak(rawPass2, roughK - winSamples, roughK + winSamples);
+              if (pk.peakAbs >= minFloor * 0.85 && pk.crest >= 1.5) {
+                detectedPeaks.push(pk.idx);
+              } else {
+                detectedPeaks.push(roughK);
+              }
             }
-          }
-        } else if (preludeClicks.length >= 3) {
-          for (let k = 0; k < Math.min(4, preludeClicks.length); k++) {
-            detectedPeaks.push(preludeClicks[k].samplePos);
-          }
-          while (detectedPeaks.length < 4) {
-            detectedPeaks.push(detectedPeaks[detectedPeaks.length - 1] + dtSamples);
+          } else if (preludeClicks.length >= 3) {
+            for (let k = 0; k < Math.min(4, preludeClicks.length); k++) {
+              detectedPeaks.push(preludeClicks[k].samplePos);
+            }
+            while (detectedPeaks.length < 4) {
+              detectedPeaks.push(detectedPeaks[detectedPeaks.length - 1] + dtSamples);
+            }
           }
         }
 
@@ -4064,15 +4724,40 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log(`[Single-Pass] Downbeat trim with sysLatency ${(sysLatency * 1000).toFixed(1)}ms: sample ${projected5thTapSample}`);
       }
 
-      const trimSamples = projected5thTapSample;
+      const trimSamples = Math.max(0, projected5thTapSample);
       console.log(`[Recording Trim] total: ${totalSamples}, projected5thTapSample: ${projected5thTapSample}, trimSamples: ${trimSamples}`);
 
-      if (totalSamples > trimSamples + Math.round(sampleRate * 0.05)) {
-        // The projected 5th tap on the 2nd recording becomes the first sample of the newly-recorded track!
-        takePCM = fullPass2.subarray(trimSamples);
-      } else {
-        takePCM = fullPass2;
+      const ppStart = performance.now();
+      recDiag('REC_POST_PROCESS_START', {
+        source: 'pass2',
+        samples: totalSamples,
+        trimSamples,
+        sampleRate,
+        internalGain: Boolean(recordInternalGain && recordInternalGain.checked)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+        forcePersist: true
+      });
+
+      let trimmedRaw = (totalSamples > trimSamples + Math.round(sampleRate * 0.05))
+        ? rawPass2.slice(trimSamples)
+        : rawPass2.slice();
+      takePCM = suppressAudioGlitches(trimmedRaw, sampleRate);
+      if (recordInternalGain && recordInternalGain.checked) {
+        takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
       }
+
+      const ppDur = Number((performance.now() - ppStart).toFixed(2));
+      recDiag('REC_POST_PROCESS_DONE', {
+        durationMs: ppDur,
+        samples: takePCM.length
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+        duration: ppDur,
+        forcePersist: true
+      });
     } else if (pass1AudioStore.totalSamples > 0) {
       // Stopped during Pass 1: keep all audio captured in Pass 1
       takePCM = pass1AudioStore.toFlatArray();
@@ -4185,79 +4870,107 @@ document.addEventListener('DOMContentLoaded', async () => {
     let lastMetroPeakSample = null;
 
     if (guideIsMetro) {
-      // For generated metronome tracks, we generated the audio and know the exact tempo!
-      // The clicks are at mathematically exact timestamps - no transient searching needed!
+      // For generated metronome tracks, clicks occur at exact grid positions guideOffset + m * dt.
+      // Anchor relative to recordingStartPlayhead so syncing works from t=0 OR any later playhead position!
+      const startBeatIdx = Math.max(0, Math.ceil((recordingStartPlayhead - guideOffset - 0.02) / dt));
       for (let k = 0; k < numBeats; k++) {
-        const beatNum = firstBeat + k; // 1-based beat index
-        const beatTimeSec = guideOffset + ((beatNum - 1) * dt);
+        const beatIdx = startBeatIdx + (firstBeat - 1) + k;
+        const beatTimeSec = guideOffset + (beatIdx * dt);
         metroPeaksTimelineSec.push(beatTimeSec);
       }
     } else {
-      // For general audio/backing tracks: wide adaptive search anchored from previous peak
-      const searchWinSecGuide = 0.70 * dt;
+      // For general audio/backing tracks: try global rhythmic sequence lock first, then fallback to anchored window search
+      const expGuideFirstSec = Math.max(0, (recordingStartPlayhead + (firstBeat - 1) * dt) - guideOffset);
+      const guideSeq = findBestTapSequence(guidePCM, guideSR, expGuideFirstSec, dt, numBeats, Math.min(0.025, getPeakThresholdLinear() * 0.6));
+      if (guideSeq.peaksSec.length === numBeats) {
+        for (let k = 0; k < numBeats; k++) {
+          metroPeaksTimelineSec.push(guideOffset + guideSeq.peaksSec[k]);
+        }
+      } else {
+        const searchWinSecGuide = 0.70 * dt;
+        for (let k = 0; k < numBeats; k++) {
+          let s0, s1;
+          if (lastMetroPeakSample === null) {
+            const expTimelineSec = recordingStartPlayhead + (firstBeat - 1) * dt;
+            const expGuideRelSec = expTimelineSec - guideOffset;
+            if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) continue;
+            s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
+            s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
+          } else {
+            const center = lastMetroPeakSample + Math.round(dt * guideSR);
+            s0 = Math.max(lastMetroPeakSample + Math.round(0.35 * dt * guideSR), center - Math.round(0.45 * dt * guideSR));
+            s1 = Math.min(guidePCM.length, center + Math.round(0.45 * dt * guideSR));
+          }
+          if (s0 >= s1) continue;
+
+          const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
+          if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
+            metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
+            lastMetroPeakSample = pk.idx;
+            guideClaimedRanges.push({
+              start: Math.max(0, pk.idx - exclRadiusGuide),
+              end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
+            });
+          }
+        }
+      }
+    }
+
+    // 2. Detect N peaks in the newly-recorded take directly from raw captured system audio (BEFORE glitch/gain filtering)
+    const takePeaksSec = [];
+    const userThreshLinear = getPeakThresholdLinear();
+    const expFirstTakeSec = metroPeaksTimelineSec.length > 0
+      ? Math.max(0, metroPeaksTimelineSec[0] - recordingStartPlayhead)
+      : ((firstBeat - 1) * dt);
+
+    const takeSeq = findBestTapSequence(fullPass2, sampleRate, expFirstTakeSec, dt, numBeats, userThreshLinear);
+    if (takeSeq.peaksSec.length === numBeats) {
+      takePeaksSec.push(...takeSeq.peaksSec);
+    } else {
+      // Fallback: claimed-range anchored search respecting user sensitivity threshold
+      const takeClaimedRanges = [];
+      const exclRadiusTake = Math.round(0.25 * dt * sampleRate);
+      const fallbackMinPeak = Math.max(0.008, userThreshLinear * 0.50);
+      let lastTakePeakSample = null;
+
       for (let k = 0; k < numBeats; k++) {
         let s0, s1;
-        if (lastMetroPeakSample === null) {
-          const expTimelineSec = recordingStartPlayhead + (firstBeat - 1) * dt;
-          const expGuideRelSec = expTimelineSec - guideOffset;
-          if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) continue;
-          s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
-          s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
+        if (lastTakePeakSample === null) {
+          s0 = Math.max(0, Math.round((expFirstTakeSec - 0.85 * dt) * sampleRate));
+          s1 = Math.min(fullPass2.length, Math.round((expFirstTakeSec + 1.35 * dt) * sampleRate));
         } else {
-          const center = lastMetroPeakSample + Math.round(dt * guideSR);
-          s0 = Math.max(lastMetroPeakSample + Math.round(0.35 * dt * guideSR), center - Math.round(0.45 * dt * guideSR));
-          s1 = Math.min(guidePCM.length, center + Math.round(0.45 * dt * guideSR));
+          const center = lastTakePeakSample + Math.round(dt * sampleRate);
+          s0 = Math.max(lastTakePeakSample + Math.round(0.35 * dt * sampleRate), center - Math.round(0.48 * dt * sampleRate));
+          s1 = Math.min(fullPass2.length, center + Math.round(0.48 * dt * sampleRate));
         }
         if (s0 >= s1) continue;
 
-        const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
-        if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
-          metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
-          lastMetroPeakSample = pk.idx;
-          guideClaimedRanges.push({
-            start: Math.max(0, pk.idx - exclRadiusGuide),
-            end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
+        const pk = findTransientPeak(fullPass2, s0, s1, takeClaimedRanges);
+        if (pk.found && pk.peakAbs >= fallbackMinPeak && pk.crest >= 1.2) {
+          takePeaksSec.push(pk.idx / sampleRate);
+          lastTakePeakSample = pk.idx;
+          takeClaimedRanges.push({
+            start: Math.max(0, pk.idx - exclRadiusTake),
+            end: Math.min(fullPass2.length - 1, pk.idx + exclRadiusTake)
           });
         }
       }
     }
 
-    // 2. Detect N peaks in the newly-recorded take directly from raw captured system audio
-    // User instruction: "each time a beat pair is matched, mark them as 'claimed'. Already-matched beats shouldn't be matched with future beats."
-    const takePeaksSec = [];
-    const takeClaimedRanges = [];
-    const exclRadiusTake = Math.round(0.25 * dt * sampleRate);
-    let lastTakePeakSample = null;
-
-    for (let k = 0; k < numBeats; k++) {
-      let s0, s1;
-      if (lastTakePeakSample === null) {
-        // Wide search for the first anchor tap around expected time
-        const expTakeSec = (firstBeat - 1) * dt;
-        s0 = Math.max(0, Math.round((expTakeSec - 0.70 * dt) * sampleRate));
-        s1 = Math.min(fullPass2.length, Math.round((expTakeSec + 0.95 * dt) * sampleRate));
-      } else {
-        // Subsequent taps anchored from previous tap peak + dt
-        const center = lastTakePeakSample + Math.round(dt * sampleRate);
-        s0 = Math.max(lastTakePeakSample + Math.round(0.35 * dt * sampleRate), center - Math.round(0.45 * dt * sampleRate));
-        s1 = Math.min(fullPass2.length, center + Math.round(0.45 * dt * sampleRate));
-      }
-      if (s0 >= s1) continue;
-
-      const pk = findTransientPeak(fullPass2, s0, s1, takeClaimedRanges);
-      if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
-        takePeaksSec.push(pk.idx / sampleRate);
-        lastTakePeakSample = pk.idx;
-        // Mark as CLAIMED so it cannot be matched with future beats
-        takeClaimedRanges.push({
-          start: Math.max(0, pk.idx - exclRadiusTake),
-          end: Math.min(fullPass2.length - 1, pk.idx + exclRadiusTake)
-        });
-      }
-    }
-
     console.log(`[Track Sync] Guide peaks found (${metroPeaksTimelineSec.length}/${numBeats}):`, metroPeaksTimelineSec);
     console.log(`[Track Sync] Take peaks found (${takePeaksSec.length}/${numBeats}):`, takePeaksSec);
+    recDiag('REC_TRACK_SYNC_PEAKS', {
+      tempo,
+      dtSec: Number(dt.toFixed(4)),
+      firstBeat,
+      numBeats,
+      peakSensDb,
+      thresholdLinear: Number(userThreshLinear.toFixed(5)),
+      expFirstTakeSec: Number(expFirstTakeSec.toFixed(3)),
+      candidatesCount: takeSeq.candidatesCount,
+      metroPeaksSec: metroPeaksTimelineSec.map(v => Number(v.toFixed(4))),
+      takePeaksSec: takePeaksSec.map(v => Number(v.toFixed(4)))
+    }, { forcePersist: true });
 
     // 3. Failure Handling:
     // "If N distinct peaks are missing in the newly-recorded track, metronome track, or both, do not shift and show a specific popup message explaining the exact reason."
@@ -4271,7 +4984,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else if (!metroOk) {
         reason = `Could not detect all ${numBeats} distinct peaks in guide track "${guideTrack.name}" at beats ${firstBeat}–${firstBeat + numBeats - 1} (detected ${metroPeaksTimelineSec.length} of ${numBeats}). Make sure the guide track has clear beats at those positions.`;
       } else {
-        reason = `Could not detect all ${numBeats} distinct tap peaks in your recording (detected ${takePeaksSec.length} of ${numBeats} around beats ${firstBeat}–${firstBeat + numBeats - 1}). Please tap louder or closer to the microphone.`;
+        reason = `Could not detect all ${numBeats} distinct tap peaks in your recording (detected ${takePeaksSec.length} of ${numBeats} around beats ${firstBeat}–${firstBeat + numBeats - 1} at ${peakSensDb} dB threshold). Try lowering the sensitivity slider on the VU meter or tapping closer to the mic.`;
       }
 
       const alertMsg = `NANOdaw Track Sync Notice:\n\n${reason}\n\nThe track has been added directly below "${guideTrack.name}" at playhead (${recordingStartPlayhead.toFixed(2)}s) without alignment shift.`;
@@ -4300,14 +5013,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       trimSamples = Math.round(calibEndSec * sampleRate);
     }
     let trimmedSec = trimSamples / sampleRate;
-    let finalPCM = trimSamples > 0 ? fullPass2.subarray(trimSamples) : fullPass2;
+    let finalPCM = trimSamples > 0 ? fullPass2.slice(trimSamples) : fullPass2.slice();
     let finalOffset = targetOffset + trimmedSec;
 
     if (finalOffset < 0) {
       const extraTrim = Math.min(finalPCM.length, Math.round(-finalOffset * sampleRate));
-      finalPCM = finalPCM.subarray(extraTrim);
+      finalPCM = finalPCM.slice(extraTrim);
       trimmedSec += extraTrim / sampleRate;
       finalOffset = 0;
+    }
+
+    // Apply glitch suppression & optional internal gain ONLY after sync peaks have been detected & trimmed
+    finalPCM = suppressAudioGlitches(finalPCM, sampleRate);
+    if (recordInternalGain && recordInternalGain.checked) {
+      finalPCM = processInternalGainAndNoiseSuppression(finalPCM, sampleRate, 0.75);
     }
 
     // Soft 5ms cosine ramp
@@ -4365,7 +5084,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function fallbackAddTrack(rawTakePCM, sampleRate, guideIdx) {
-    let pcm = suppressAudioGlitches(rawTakePCM, sampleRate);
+    let pcm = suppressAudioGlitches(rawTakePCM.slice(), sampleRate);
+    if (recordInternalGain && recordInternalGain.checked) {
+      pcm = processInternalGainAndNoiseSuppression(pcm, sampleRate, 0.75);
+    }
     if (!pcm || pcm.length < Math.round(sampleRate * 0.1)) {
       pcm = new Float32Array(Math.round(sampleRate * 1.0));
     }
@@ -4424,6 +5146,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         audio.isRecordingMode = true;
         audio.setPlayAndRecordAudioSession();
         populateSyncGuideTracks();
+        resetPreRecTapTest();
         updateRecordModalToggles();
         initAutoGainDefault();
         switchRecordModalTab('record');

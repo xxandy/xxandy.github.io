@@ -1285,17 +1285,309 @@ body {
 }
 
 .record-vu-meter-strip {
-  width: 26px;
+  width: 30px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: space-between;
-  background: rgba(15, 23, 42, 0.6);
+  background: rgba(15, 23, 42, 0.65);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  padding: 8px 3px;
+  padding: 7px 3px;
   box-sizing: border-box;
+  transition: width 0.2s ease, opacity 0.25s ease, filter 0.25s ease, border-color 0.15s ease;
+}
+
+.record-vu-meter-strip.sync-active {
+  width: 40px;
+}
+
+.record-vu-meter-strip.peak-hit {
+  border-color: rgba(16, 185, 129, 0.75);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
+}
+
+.vu-top-indicators {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.vu-peak-badge {
+  font-size: 6.5px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  padding: 1.5px 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text-muted);
+  line-height: 1;
+  transition: background 0.08s ease, color 0.08s ease, box-shadow 0.08s ease, border-color 0.08s ease;
+  user-select: none;
+}
+
+.vu-peak-badge.detected {
+  background: #10b981;
+  border-color: #6ee7b7;
+  color: #022c22;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.9);
+}
+
+.vu-meter-stack-wrap {
+  flex: 1;
+  width: 100%;
+  min-block-size: 130px;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  margin: 2px 0;
+}
+
+.vu-meter-track-inner {
+  width: 12px;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.vu-sens-zone-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 55.6%;
+  background: linear-gradient(to bottom, rgba(56, 189, 248, 0.20), rgba(56, 189, 248, 0.07));
+  pointer-events: none;
+  z-index: 1;
+}
+
+.vu-sens-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: ns-resize;
+}
+
+.vu-sens-threshold-line {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 55.6%;
+  height: 2px;
+  transform: translateY(50%);
+  background: #38bdf8;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.85);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.08s ease, box-shadow 0.08s ease;
+}
+
+.vu-sens-threshold-line.detected {
+  background: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.95);
+}
+
+.vu-sens-thumb {
+  width: 24px;
+  height: 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1.5px solid #38bdf8;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.65), 0 0 6px rgba(56, 189, 248, 0.5);
+  flex-shrink: 0;
+  transition: transform 0.1s ease, border-color 0.08s ease, background 0.08s ease;
+}
+
+.vu-sens-threshold-line.detected .vu-sens-thumb {
+  border-color: #34d399;
+  background: #064e3b;
+  transform: scale(1.12);
+}
+
+.vu-sens-overlay:has(.vu-sens-range:focus-visible) .vu-sens-thumb {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+/* Native accessible vertical range input superimposed over VU meter */
+.vu-sens-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  inline-size: 36px;
+  block-size: 100%;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+  opacity: 0.001;
+}
+
+@media (pointer: coarse) {
+  .vu-sens-range {
+    inline-size: 44px;
+  }
+}
+
+.vu-sens-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  inline-size: 28px;
+  block-size: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.vu-sens-range::-moz-range-thumb {
+  inline-size: 28px;
+  block-size: 16px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.vu-sens-range:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.vu-sens-readout {
+  font-size: 7px;
+  font-family: var(--font-mono, monospace);
+  color: #38bdf8;
+  margin-top: 2px;
+  text-align: center;
+  line-height: 1;
+  font-weight: 600;
+  user-select: none;
+}
+
+/* Live Pre-Recording Tap Detection Check Bar */
+.sync-tap-test-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sync-tap-test-bar.detected {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(52, 211, 153, 0.6);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.18);
+}
+
+.sync-tap-test-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-inline-size: 0;
+  flex: 1 1 140px;
+}
+
+.sync-tap-test-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  flex-shrink: 0;
+  transition: background 0.08s ease, box-shadow 0.08s ease, transform 0.08s ease;
+}
+
+.sync-tap-test-bar.detected .sync-tap-test-dot {
+  background: #10b981;
+  border-color: #6ee7b7;
+  box-shadow: 0 0 8px #10b981;
+  transform: scale(1.2);
+}
+
+.sync-tap-test-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.25;
+}
+
+.sync-tap-test-bar.detected .sync-tap-test-label {
+  color: #6ee7b7;
+}
+
+.sync-tap-test-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sync-test-beads {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.test-bead {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 8.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--text-muted);
+  transition: all 0.12s ease;
+}
+
+.test-bead.active {
+  background: #10b981;
+  border-color: #6ee7b7;
+  color: #022c22;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.8);
+  transform: scale(1.1);
+}
+
+.sync-sens-badge {
+  font-family: var(--font-mono, monospace);
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  white-space: nowrap;
 }
 
 .modal-header {
