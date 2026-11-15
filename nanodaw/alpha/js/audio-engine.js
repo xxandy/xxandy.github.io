@@ -156,20 +156,56 @@ class AudioEngine {
       return;
     }
     if (typeof navigator !== 'undefined' && navigator.audioSession) {
+      const prevType = navigator.audioSession.type;
       try {
-        navigator.audioSession.type = 'playback';
+        if (prevType !== 'playback') {
+          navigator.audioSession.type = 'playback';
+          if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logDiag) {
+            window.zoomProfiler.logDiag('AUDIO_SESSION_TYPE_CHANGED', {
+              from: prevType || 'unset',
+              to: navigator.audioSession.type,
+              isRecording: this.isRecording,
+              isRecordingMode: this.isRecordingMode
+            }, { stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_SESSION_SET : undefined, extraData: 1 });
+          }
+        }
       } catch (e) {
         console.warn('Setting navigator.audioSession failed:', e);
+        if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logDiag) {
+          window.zoomProfiler.logDiag('AUDIO_SESSION_TYPE_ERROR', {
+            attempted: 'playback',
+            prevType: prevType || 'unset',
+            error: e && e.message ? e.message : String(e)
+          }, { level: 'warn' });
+        }
       }
     }
   }
 
   setPlayAndRecordAudioSession() {
     if (typeof navigator !== 'undefined' && navigator.audioSession) {
+      const prevType = navigator.audioSession.type;
       try {
-        navigator.audioSession.type = 'play-and-record';
+        if (prevType !== 'play-and-record') {
+          navigator.audioSession.type = 'play-and-record';
+          if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logDiag) {
+            window.zoomProfiler.logDiag('AUDIO_SESSION_TYPE_CHANGED', {
+              from: prevType || 'unset',
+              to: navigator.audioSession.type,
+              isRecording: this.isRecording,
+              isRecordingMode: this.isRecordingMode
+            }, { stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_SESSION_SET : undefined, extraData: 2 });
+          }
+        }
       } catch (e) {
         console.warn('Setting navigator.audioSession play-and-record failed:', e);
+        if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logDiag) {
+          window.zoomProfiler.logDiag('AUDIO_SESSION_TYPE_ERROR', {
+            attempted: 'play-and-record',
+            prevType: prevType || 'unset',
+            error: e && e.message ? e.message : String(e)
+          }, { level: 'warn' });
+        }
       }
     }
   }
@@ -222,6 +258,44 @@ class AudioEngine {
         } catch (__) {
           this.audioCtx = null;
         }
+      }
+
+      if (this.audioCtx) {
+        const ctxRef = this.audioCtx;
+        if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logDiag) {
+          window.zoomProfiler.logDiag('AUDIO_CTX_CREATED', {
+            state: ctxRef.state,
+            sampleRate: ctxRef.sampleRate,
+            baseLatency: typeof ctxRef.baseLatency === 'number' ? Number(ctxRef.baseLatency.toFixed(5)) : null,
+            outputLatency: typeof ctxRef.outputLatency === 'number' ? Number(ctxRef.outputLatency.toFixed(5)) : null,
+            destChannelCount: ctxRef.destination ? ctxRef.destination.channelCount : null,
+            destMaxChannelCount: ctxRef.destination ? ctxRef.destination.maxChannelCount : null,
+            destChannelCountMode: ctxRef.destination ? ctxRef.destination.channelCountMode : null
+          }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_CTX_INIT : undefined,
+            extraData: ctxRef.sampleRate || 0
+          });
+        }
+        ctxRef.addEventListener('statechange', () => {
+          if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logDiag) {
+            const stateCode = ctxRef.state === 'running' ? 1 : ctxRef.state === 'suspended' ? 2 : ctxRef.state === 'interrupted' ? 3 : 4;
+            window.zoomProfiler.logDiag('AUDIO_CTX_STATECHANGE', {
+              state: ctxRef.state,
+              currentTime: Number((ctxRef.currentTime || 0).toFixed(4)),
+              sampleRate: ctxRef.sampleRate,
+              destChannelCount: ctxRef.destination ? ctxRef.destination.channelCount : null,
+              destMaxChannelCount: ctxRef.destination ? ctxRef.destination.maxChannelCount : null,
+              isRecording: this.isRecording,
+              isRecordingMode: this.isRecordingMode,
+              isPlaying: this.isPlaying
+            }, {
+              level: ctxRef.state === 'interrupted' ? 'warn' : 'info',
+              stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_CTX_STATE : undefined,
+              extraData: stateCode,
+              forcePersist: this.isRecording || this.isRecordingMode
+            });
+          }
+        });
       }
 
       this.masterGain = this.audioCtx.createGain();

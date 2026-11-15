@@ -1163,7 +1163,7 @@ body {
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
-  z-index: 150;
+  z-index: 1200;
   padding-top: max(12px, calc(env(safe-area-inset-top, 0px) + 12px));
   padding-right: max(12px, env(safe-area-inset-right, 12px));
   padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
@@ -1428,7 +1428,7 @@ body {
   font-size: 12px;
   font-weight: 500;
   box-shadow: var(--shadow-main);
-  z-index: 400;
+  z-index: 1300;
   opacity: 0;
   transform: translateY(10px);
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -1780,7 +1780,28 @@ body.is-middle-panning * {
 .hud-right {
   display: flex;
   align-items: center;
+  gap: 5px;
   flex-shrink: 0; /* CRITICAL: Never shrink Stop & Save button or push off screen */
+}
+
+.btn-modal-log {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 6px;
+}
+
+.btn-hud-log {
+  padding: 5px 7px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  flex-shrink: 0;
 }
 
 .btn-stop-rec {

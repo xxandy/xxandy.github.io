@@ -276,12 +276,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   const overlayBtnGetProfile = document.getElementById('overlayBtnGetProfile');
   const profileEventCountEl = document.getElementById('profileEventCount');
 
+  function refreshProfileBadgeCount() {
+    if (!profileEventCountEl || !window.zoomProfiler) return;
+    const evCount = window.zoomProfiler.getEventCount ? window.zoomProfiler.getEventCount() : 0;
+    const diagCount = window.zoomProfiler.getDiagCount ? window.zoomProfiler.getDiagCount() : 0;
+    profileEventCountEl.textContent = diagCount > 0 ? `${evCount} ev + ${diagCount} rec` : `${evCount}`;
+  }
+
   if (btnToggleTools && toolsOverlay) {
     btnToggleTools.addEventListener('click', () => {
       toolsOverlay.classList.remove('hidden');
-      if (profileEventCountEl && window.zoomProfiler) {
-        profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
-      }
+      refreshProfileBadgeCount();
     });
   }
 
@@ -368,24 +373,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
   window.getPinchStretch = () => timeline.pinchStretchWaveform;
 
-  // Get Zoom Profile Download Action
+  function triggerProfileDownload(triggerSource = 'manual') {
+    if (!window.zoomProfiler) {
+      showToast('Profiler not initialized', 'error');
+      return;
+    }
+    const ctxRef = audio.audioCtx;
+    const res = window.zoomProfiler.downloadProfile({
+      triggerSource,
+      projectTitle: state.project ? state.project.title : 'untitled',
+      trackCount: audio.tracks ? audio.tracks.length : 0,
+      currentZoom: timeline.pixelsPerSecond,
+      audioCtxState: ctxRef ? ctxRef.state : 'none',
+      audioCtxSampleRate: ctxRef ? ctxRef.sampleRate : null,
+      audioCtxCurrentTime: ctxRef ? Number((ctxRef.currentTime || 0).toFixed(4)) : null
+    });
+    if (res && res.success) {
+      const diagSuffix = res.totalDiag ? `, ${res.totalDiag} rec logs` : '';
+      showToast(`Log saved: ${res.totalEvents} events${diagSuffix}`, 'success', 3500);
+      refreshProfileBadgeCount();
+    } else {
+      showToast(res ? res.message : 'No telemetry recorded yet.', 'info', 3000);
+    }
+  }
+
+  // Get Zoom & Recording Profile Download Action
   if (overlayBtnGetProfile) {
     overlayBtnGetProfile.addEventListener('click', () => {
-      if (!window.zoomProfiler) {
-        showToast('Profiler not initialized', 'error');
-        return;
-      }
-      const res = window.zoomProfiler.downloadProfile({
-        projectTitle: state.project ? state.project.title : 'untitled',
-        trackCount: audio.tracks ? audio.tracks.length : 0,
-        currentZoom: timeline.pixelsPerSecond
-      });
-      if (res && res.success) {
-        showToast(`Profile downloaded: ${res.totalOps} ops, ${res.totalEvents} events`, 'success', 3500);
-        if (profileEventCountEl) profileEventCountEl.textContent = window.zoomProfiler.getEventCount();
-      } else {
-        showToast(res ? res.message : 'No zoom operations recorded yet. Use Zoom +/- first!', 'info', 3000);
-      }
+      triggerProfileDownload('tools_overlay');
     });
   }
 
@@ -726,8 +741,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (recordAutoGainBadge) {
         recordAutoGainBadge.textContent = recordAutoGain.checked ? 'MANUAL (ON)' : 'MANUAL (OFF)';
       }
+      recDiag('REC_AUTOGAIN_TOGGLED', { autoGain: recordAutoGain.checked }, { forcePersist: true });
       if (activeRecordModalTab === 'record') {
-        startVUMonitor();
+        startVUMonitor(true);
       }
     });
   }
@@ -771,6 +787,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   const bead3 = document.getElementById('bead3');
   const bead4 = document.getElementById('bead4');
   const btnStopRecordingAction = document.getElementById('btnStopRecordingAction');
+  const btnRecModalGetLog = document.getElementById('btnRecModalGetLog');
+  const btnHudGetLog = document.getElementById('btnHudGetLog');
+
+  if (btnRecModalGetLog) {
+    btnRecModalGetLog.addEventListener('click', (e) => {
+      e.stopPropagation();
+      triggerProfileDownload('record_modal');
+    });
+  }
+  if (btnHudGetLog) {
+    btnHudGetLog.addEventListener('click', (e) => {
+      e.stopPropagation();
+      triggerProfileDownload('recording_hud');
+    });
+  }
 
   let isRecording = false;
   let recordingState = 'idle'; // 'idle', 'pass1', 'pass1_done', 'pass2_prelude', 'recording_take'
@@ -799,6 +830,238 @@ document.addEventListener('DOMContentLoaded', async () => {
   let pass2StreamStartTime = null;
   let pass2DownbeatScheduledTime = null;
   let recordingStartPlayhead = 0;
+
+  // --- Recording Stream & Pipeline Realtime Diagnostics ---
+  let recDiagCleanupTrackListeners = null;
+  let recDiagWatchdogId = null;
+  let recChunksReceivedTotal = 0;
+  let recFirstChunkLogged = false;
+  let recPipelineAttachPerfMs = 0;
+  let lastWorkletDiagReport = null;
+
+  function recDiag(stage, detail = {}, options = {}) {
+    if (window.zoomProfiler && typeof window.zoomProfiler.logDiag === 'function') {
+      window.zoomProfiler.logDiag(stage, detail, options);
+    }
+  }
+
+  function inspectAudioCtx(ctx) {
+    if (!ctx) return { exists: false };
+    return {
+      exists: true,
+      state: ctx.state,
+      sampleRate: ctx.sampleRate,
+      currentTime: Number((ctx.currentTime || 0).toFixed(4)),
+      baseLatency: typeof ctx.baseLatency === 'number' ? Number(ctx.baseLatency.toFixed(5)) : null,
+      outputLatency: typeof ctx.outputLatency === 'number' ? Number(ctx.outputLatency.toFixed(5)) : null,
+      destChannelCount: ctx.destination ? ctx.destination.channelCount : null,
+      destMaxChannelCount: ctx.destination ? ctx.destination.maxChannelCount : null,
+      destChannelCountMode: ctx.destination ? ctx.destination.channelCountMode : null,
+      audioSessionType: (typeof navigator !== 'undefined' && navigator.audioSession) ? (navigator.audioSession.type || 'unset') : 'unsupported'
+    };
+  }
+
+  function inspectMediaStream(stream) {
+    if (!stream) return { exists: false };
+    const tracks = stream.getAudioTracks ? stream.getAudioTracks() : [];
+    return {
+      exists: true,
+      id: stream.id ? String(stream.id).slice(0, 16) : null,
+      active: Boolean(stream.active),
+      trackCount: tracks.length,
+      tracks: tracks.map((t, idx) => {
+        let settings = null;
+        let capabilities = null;
+        let constraints = null;
+        try { if (typeof t.getSettings === 'function') settings = t.getSettings(); } catch (_) {}
+        try { if (typeof t.getCapabilities === 'function') capabilities = t.getCapabilities(); } catch (_) {}
+        try { if (typeof t.getConstraints === 'function') constraints = t.getConstraints(); } catch (_) {}
+        return {
+          idx,
+          label: t.label || '',
+          readyState: t.readyState,
+          enabled: t.enabled,
+          muted: t.muted,
+          settings: settings ? {
+            sampleRate: settings.sampleRate,
+            sampleSize: settings.sampleSize,
+            channelCount: settings.channelCount,
+            latency: settings.latency,
+            echoCancellation: settings.echoCancellation,
+            autoGainControl: settings.autoGainControl,
+            noiseSuppression: settings.noiseSuppression,
+            deviceIdPrefix: settings.deviceId ? String(settings.deviceId).slice(0, 12) : undefined
+          } : null,
+          capabilities: capabilities ? {
+            sampleRate: capabilities.sampleRate,
+            sampleSize: capabilities.sampleSize,
+            channelCount: capabilities.channelCount,
+            latency: capabilities.latency,
+            echoCancellation: capabilities.echoCancellation,
+            autoGainControl: capabilities.autoGainControl,
+            noiseSuppression: capabilities.noiseSuppression
+          } : null,
+          constraints
+        };
+      })
+    };
+  }
+
+  function attachStreamTrackListeners(stream, role = 'recording') {
+    if (!stream || !stream.getAudioTracks) return () => {};
+    const cleanups = [];
+    stream.getAudioTracks().forEach((track, idx) => {
+      const onMute = () => {
+        recDiag('REC_MIC_TRACK_MUTED', {
+          role,
+          idx,
+          label: track.label,
+          readyState: track.readyState,
+          muted: track.muted,
+          recordingState,
+          ctx: inspectAudioCtx(recAudioCtx || audio.audioCtx)
+        }, {
+          level: 'warn',
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TRACK_EVENT : undefined,
+          extraData: 1,
+          forcePersist: true
+        });
+      };
+      const onUnmute = () => {
+        recDiag('REC_MIC_TRACK_UNMUTED', {
+          role,
+          idx,
+          label: track.label,
+          readyState: track.readyState,
+          muted: track.muted,
+          recordingState
+        }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TRACK_EVENT : undefined,
+          extraData: 2,
+          forcePersist: true
+        });
+      };
+      const onEnded = () => {
+        recDiag('REC_MIC_TRACK_ENDED', {
+          role,
+          idx,
+          label: track.label,
+          readyState: track.readyState,
+          muted: track.muted,
+          recordingState,
+          ctx: inspectAudioCtx(recAudioCtx || audio.audioCtx)
+        }, {
+          level: 'error',
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TRACK_EVENT : undefined,
+          extraData: 3,
+          forcePersist: true
+        });
+      };
+      track.addEventListener('mute', onMute);
+      track.addEventListener('unmute', onUnmute);
+      track.addEventListener('ended', onEnded);
+      cleanups.push(() => {
+        track.removeEventListener('mute', onMute);
+        track.removeEventListener('unmute', onUnmute);
+        track.removeEventListener('ended', onEnded);
+      });
+    });
+    return () => cleanups.forEach(fn => { try { fn(); } catch (_) {} });
+  }
+
+  function stopRecordingWatchdog() {
+    if (recDiagWatchdogId) {
+      clearInterval(recDiagWatchdogId);
+      recDiagWatchdogId = null;
+    }
+  }
+
+  function startRecordingWatchdog() {
+    stopRecordingWatchdog();
+    let lastCtxTime = recAudioCtx ? recAudioCtx.currentTime : 0;
+    let lastChunks = recChunksReceivedTotal;
+    let tickIndex = 0;
+
+    recDiagWatchdogId = setInterval(() => {
+      if (!isRecording) {
+        stopRecordingWatchdog();
+        return;
+      }
+      tickIndex++;
+      if (recWorkletNode && recWorkletNode.port) {
+        try { recWorkletNode.port.postMessage({ type: 'ping_diag' }); } catch (_) {}
+      }
+
+      const curCtxTime = recAudioCtx ? recAudioCtx.currentTime : 0;
+      const ctxDelta = Number((curCtxTime - lastCtxTime).toFixed(4));
+      const chunksDelta = recChunksReceivedTotal - lastChunks;
+      lastCtxTime = curCtxTime;
+      lastChunks = recChunksReceivedTotal;
+
+      const trk = (recStream && recStream.getAudioTracks && recStream.getAudioTracks()[0]) || null;
+      const snapshot = {
+        tick: tickIndex,
+        recordingState,
+        ctxState: recAudioCtx ? recAudioCtx.state : 'none',
+        ctxTime: Number(curCtxTime.toFixed(4)),
+        ctxDeltaSec: ctxDelta,
+        chunksDelta,
+        chunksTotal: recChunksReceivedTotal,
+        pass1Samples: totalPass1Samples,
+        pass2Samples: totalPass2Samples,
+        streamActive: recStream ? Boolean(recStream.active) : false,
+        trackReadyState: trk ? trk.readyState : 'none',
+        trackMuted: trk ? trk.muted : null,
+        isPlaying: Boolean(audio.isPlaying),
+        playhead: Number((audio.playheadPosition || 0).toFixed(3)),
+        worklet: lastWorkletDiagReport
+      };
+
+      const isClockStalled = (recAudioCtx && recAudioCtx.state === 'running' && ctxDelta < 0.02);
+      const isChunkStalled = (tickIndex >= 2 && chunksDelta === 0 && (recordingState === 'pass1' || recordingState === 'pass2_prelude' || recordingState === 'recording_take'));
+
+      if (isClockStalled || isChunkStalled) {
+        recDiag('REC_STREAM_STALL_DETECTED', {
+          ...snapshot,
+          isClockStalled,
+          isChunkStalled
+        }, {
+          level: 'warn',
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STREAM_STALL : undefined,
+          extraData: isClockStalled ? 1 : 2,
+          forcePersist: true
+        });
+      } else {
+        recDiag('REC_HEARTBEAT', snapshot, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_HEARTBEAT : undefined,
+          extraData: chunksDelta
+        });
+      }
+    }, 1000);
+  }
+
+  if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+    navigator.mediaDevices.addEventListener('devicechange', async () => {
+      let summary = [];
+      try {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        summary = devs
+          .filter(d => d.kind === 'audioinput' || d.kind === 'audiooutput')
+          .map(d => ({ kind: d.kind, label: d.label || '(unlabeled)', idPrefix: d.deviceId ? d.deviceId.slice(0, 10) : '' }));
+      } catch (_) {}
+      recDiag('MEDIA_DEVICES_CHANGED', {
+        isRecording,
+        recordingState,
+        devices: summary,
+        ctx: inspectAudioCtx(recAudioCtx || audio.audioCtx)
+      }, {
+        level: isRecording ? 'warn' : 'info',
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TRACK_EVENT : undefined,
+        extraData: 9,
+        forcePersist: true
+      });
+    });
+  }
 
   // --- High-Performance Batched Zero-Allocation Recording Store ---
   class BatchedAudioStore {
@@ -1061,20 +1324,43 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   let workletInitPromise = null;
+  let workletInitCtx = null;
 
   async function ensureRecorderWorklet(ctx) {
     if (!ctx || !ctx.audioWorklet || typeof ctx.audioWorklet.addModule !== 'function') {
+      recDiag('REC_WORKLET_UNSUPPORTED', { ctx: inspectAudioCtx(ctx) }, {
+        level: 'warn',
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
+        extraData: 0
+      });
       return false;
     }
-    if (workletInitPromise) return await workletInitPromise;
+    if (workletInitPromise && workletInitCtx === ctx) return await workletInitPromise;
 
+    workletInitCtx = ctx;
     workletInitPromise = (async () => {
+      const t0 = performance.now();
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=71', ctx: inspectAudioCtx(ctx) }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+        forcePersist: true
+      });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js');
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=71');
+        const dur = Number((performance.now() - t0).toFixed(2));
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=71');
+        recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+          duration: dur,
+          extraData: 1
+        });
         return true;
       } catch (err1) {
         console.warn('[Recorder] External worklet file load failed, attempting Blob URL:', err1);
+        recDiag('REC_WORKLET_EXTERNAL_FAILED', {
+          error: err1 && err1.message ? err1.message : String(err1)
+        }, { level: 'warn', forcePersist: true });
         try {
           const inlineWorkletCode = `
             class NanodawRecorderProcessor extends AudioWorkletProcessor {
@@ -1091,6 +1377,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 this.lastTransientSample = -999999;
                 this.minRefractorySamples = 6000;
                 this.ambientFloor = 0.005;
+                this.processCalls = 0;
+                this.emptyInputCalls = 0;
+                this.lastInputChannels = 0;
+                this.chunksPosted = 0;
+                this.poolMisses = 0;
+                this.ch0Peak = 0;
+                this.ch1Peak = 0;
+                this.firstProcessReported = false;
 
                 this.port.onmessage = (e) => {
                   const data = e.data;
@@ -1106,9 +1400,33 @@ document.addEventListener('DOMContentLoaded', async () => {
                       this.totalSamplesProcessed = 0;
                       this.lastTransientSample = -999999;
                       this.writeIndex = 0;
+                      this.processCalls = 0;
+                      this.emptyInputCalls = 0;
+                      this.chunksPosted = 0;
+                      this.poolMisses = 0;
+                      this.ch0Peak = 0;
+                      this.ch1Peak = 0;
+                      this.firstProcessReported = false;
                     }
                   } else if (data.type === 'flush') {
                     this.flushPartial();
+                  } else if (data.type === 'ping_diag') {
+                    this.port.postMessage({
+                      type: 'worklet_diag',
+                      processCalls: this.processCalls,
+                      emptyInputCalls: this.emptyInputCalls,
+                      inputChannels: this.lastInputChannels,
+                      chunksPosted: this.chunksPosted,
+                      poolLen: this.bufferPool.length,
+                      poolMisses: this.poolMisses,
+                      totalSamples: this.totalSamplesProcessed,
+                      ch0Peak: this.ch0Peak,
+                      ch1Peak: this.ch1Peak,
+                      workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
+                      workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
+                    });
+                    this.ch0Peak = 0;
+                    this.ch1Peak = 0;
                   }
                 };
               }
@@ -1117,8 +1435,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (this.writeIndex > 0 && this.activeBuffer) {
                   const validSamples = this.writeIndex;
                   const toSend = this.activeBuffer;
-                  this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+                  const nextBuf = this.bufferPool.pop();
+                  if (!nextBuf) this.poolMisses++;
+                  this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
                   this.writeIndex = 0;
+                  this.chunksPosted++;
                   this.port.postMessage({
                     type: 'audio_chunk',
                     buffer: toSend,
@@ -1130,10 +1451,37 @@ document.addEventListener('DOMContentLoaded', async () => {
 
               process(inputs) {
                 if (!this.isRecording) return true;
-                const inputChannel = inputs[0] ? inputs[0][0] : null;
-                if (!inputChannel || inputChannel.length === 0) return true;
+                this.processCalls++;
+                const in0 = inputs[0];
+                const chCount = in0 ? in0.length : 0;
+                this.lastInputChannels = chCount;
+                const inputChannel = chCount > 0 ? in0[0] : null;
+                if (!this.firstProcessReported) {
+                  this.firstProcessReported = true;
+                  this.port.postMessage({
+                    type: 'worklet_first_process',
+                    inputCount: inputs.length,
+                    channelCount: chCount,
+                    frameLen: inputChannel ? inputChannel.length : 0,
+                    workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
+                    workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
+                  });
+                }
+                if (!inputChannel || inputChannel.length === 0) {
+                  this.emptyInputCalls++;
+                  return true;
+                }
 
                 const len = inputChannel.length;
+                const ch1 = chCount > 1 ? in0[1] : null;
+                for (let i = 0; i < len; i++) {
+                  const a0 = Math.abs(inputChannel[i]);
+                  if (a0 > this.ch0Peak) this.ch0Peak = a0;
+                  if (ch1) {
+                    const a1 = Math.abs(ch1[i]);
+                    if (a1 > this.ch1Peak) this.ch1Peak = a1;
+                  }
+                }
                 let readIdx = 0;
 
                 if (this.detectTransients) {
@@ -1166,7 +1514,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 while (readIdx < len) {
                   if (!this.activeBuffer) {
-                    this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+                    const nextBuf = this.bufferPool.pop();
+                    if (!nextBuf) this.poolMisses++;
+                    this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
                     this.writeIndex = 0;
                   }
                   const available = this.chunkSize - this.writeIndex;
@@ -1180,8 +1530,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                   if (this.writeIndex >= this.chunkSize) {
                     const fullBuf = this.activeBuffer;
-                    this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+                    const nextBuf = this.bufferPool.pop();
+                    if (!nextBuf) this.poolMisses++;
+                    this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
                     this.writeIndex = 0;
+                    this.chunksPosted++;
                     this.port.postMessage({
                       type: 'audio_chunk',
                       buffer: fullBuf,
@@ -1199,10 +1552,29 @@ document.addEventListener('DOMContentLoaded', async () => {
           const blobUrl = URL.createObjectURL(blob);
           await ctx.audioWorklet.addModule(blobUrl);
           URL.revokeObjectURL(blobUrl);
+          const dur = Number((performance.now() - t0).toFixed(2));
           console.log('[Recorder] AudioWorklet registered from inline Blob URL');
+          recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'inline_blob', durationMs: dur, ctxState: ctx.state }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
+            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+            duration: dur,
+            extraData: 2
+          });
           return true;
         } catch (err2) {
+          const dur = Number((performance.now() - t0).toFixed(2));
           console.warn('[Recorder] AudioWorklet unavailable, falling back to ScriptProcessor:', err2);
+          recDiag('REC_WORKLET_FALLBACK_SCRIPTPROCESSOR', {
+            durationMs: dur,
+            error: err2 && err2.message ? err2.message : String(err2)
+          }, {
+            level: 'warn',
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
+            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+            duration: dur,
+            extraData: 3,
+            forcePersist: true
+          });
           return false;
         }
       }
@@ -1217,9 +1589,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function attachRecordingPipeline({ detectTransients = false, targetStore = pass2AudioStore, onTransient = null }) {
     activeTargetStore = targetStore;
     activeTransientCallback = onTransient;
+    recPipelineAttachPerfMs = performance.now();
+    recFirstChunkLogged = false;
+
+    recDiag('REC_PIPELINE_ATTACH_START', {
+      recordingState,
+      detectTransients: Boolean(detectTransients),
+      hadMicSource: Boolean(recMicSource),
+      hadWorkletNode: Boolean(recWorkletNode),
+      ctx: inspectAudioCtx(recAudioCtx),
+      stream: inspectMediaStream(recStream)
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PIPELINE_ATTACH : undefined,
+      phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+      forcePersist: true
+    });
 
     if (!recMicSource && recStream && recAudioCtx) {
       recMicSource = recAudioCtx.createMediaStreamSource(recStream);
+      recDiag('REC_MEDIA_STREAM_SOURCE_CREATED', {
+        channelCount: recMicSource.channelCount,
+        channelCountMode: recMicSource.channelCountMode,
+        channelInterpretation: recMicSource.channelInterpretation,
+        numberOfOutputs: recMicSource.numberOfOutputs
+      });
     }
     if (!recSilentGain && recAudioCtx) {
       recSilentGain = recAudioCtx.createGain();
@@ -1230,6 +1623,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (workletOk) {
       if (!recWorkletNode) {
         recWorkletNode = new AudioWorkletNode(recAudioCtx, 'nanodaw-recorder-processor');
+        recWorkletNode.onprocessorerror = (errEvt) => {
+          recDiag('REC_WORKLET_PROCESSOR_ERROR', {
+            message: errEvt && errEvt.message ? errEvt.message : String(errEvt),
+            recordingState,
+            ctx: inspectAudioCtx(recAudioCtx)
+          }, {
+            level: 'error',
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ERROR : undefined,
+            forcePersist: true
+          });
+        };
         recMicSource.connect(recWorkletNode);
         recWorkletNode.connect(recSilentGain);
         recSilentGain.connect(recAudioCtx.destination);
@@ -1239,7 +1643,31 @@ document.addEventListener('DOMContentLoaded', async () => {
           const data = e.data;
           if (!data) return;
 
-          if (data.type === 'transient') {
+          if (data.type === 'worklet_first_process') {
+            recDiag('REC_WORKLET_FIRST_PROCESS', {
+              recordingState,
+              sinceAttachMs: Number((performance.now() - recPipelineAttachPerfMs).toFixed(2)),
+              inputCount: data.inputCount,
+              channelCount: data.channelCount,
+              frameLen: data.frameLen,
+              workletSampleRate: data.workletSampleRate,
+              workletCurrentTime: Number((data.workletCurrentTime || 0).toFixed(4))
+            }, { forcePersist: true });
+          } else if (data.type === 'worklet_diag') {
+            lastWorkletDiagReport = {
+              processCalls: data.processCalls,
+              emptyInputCalls: data.emptyInputCalls,
+              inputChannels: data.inputChannels,
+              chunksPosted: data.chunksPosted,
+              poolLen: data.poolLen,
+              poolMisses: data.poolMisses,
+              totalSamples: data.totalSamples,
+              ch0Peak: Number((data.ch0Peak || 0).toFixed(5)),
+              ch1Peak: Number((data.ch1Peak || 0).toFixed(5)),
+              workletSampleRate: data.workletSampleRate,
+              workletCurrentTime: Number((data.workletCurrentTime || 0).toFixed(4))
+            };
+          } else if (data.type === 'transient') {
             if (activeTransientCallback) {
               const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
               activeTransientCallback(now, data.samplePos);
@@ -1247,6 +1675,30 @@ document.addEventListener('DOMContentLoaded', async () => {
           } else if (data.type === 'audio_chunk') {
             const chunk = data.buffer;
             const len = data.length || chunk.length;
+            recChunksReceivedTotal++;
+
+            if (!recFirstChunkLogged) {
+              recFirstChunkLogged = true;
+              const sinceAttachMs = Number((performance.now() - recPipelineAttachPerfMs).toFixed(2));
+              let firstPeak = 0;
+              for (let i = 0; i < len; i += 8) {
+                const a = Math.abs(chunk[i]);
+                if (a > firstPeak) firstPeak = a;
+              }
+              recDiag('REC_WORKLET_FIRST_CHUNK', {
+                recordingState,
+                sinceAttachMs,
+                chunkLen: len,
+                sampleOffset: data.sampleOffset,
+                firstPeak: Number(firstPeak.toFixed(5)),
+                ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null
+              }, {
+                stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_FIRST_CHUNK : undefined,
+                duration: sinceAttachMs,
+                extraData: len,
+                forcePersist: true
+              });
+            }
 
             if (recordingState === 'pass1') {
               if (pass1StreamStartTime === null && recAudioCtx) {
@@ -1279,6 +1731,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         resetSampleCounter: true
       });
 
+      const attachDur = Number((performance.now() - recPipelineAttachPerfMs).toFixed(2));
+      recDiag('REC_PIPELINE_ATTACH_COMPLETE', {
+        mode: 'AudioWorkletNode',
+        recordingState,
+        durationMs: attachDur,
+        workletChannelCount: recWorkletNode.channelCount,
+        workletNumberOfInputs: recWorkletNode.numberOfInputs,
+        ctxState: recAudioCtx ? recAudioCtx.state : null
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PIPELINE_ATTACH : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+        duration: attachDur,
+        extraData: 1,
+        forcePersist: true
+      });
+
     } else {
       // Robust fallback to 4096-sample ScriptProcessorNode
       if (!recScriptProcessor) {
@@ -1292,6 +1760,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       recScriptProcessor.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
         const len = input.length;
+        recChunksReceivedTotal++;
+
+        if (!recFirstChunkLogged) {
+          recFirstChunkLogged = true;
+          const sinceAttachMs = Number((performance.now() - recPipelineAttachPerfMs).toFixed(2));
+          recDiag('REC_SCRIPTPROC_FIRST_CHUNK', {
+            recordingState,
+            sinceAttachMs,
+            chunkLen: len,
+            inputChannels: e.inputBuffer.numberOfChannels,
+            sampleRate: e.inputBuffer.sampleRate
+          }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_FIRST_CHUNK : undefined,
+            duration: sinceAttachMs,
+            extraData: len,
+            forcePersist: true
+          });
+        }
 
         if (recordingState === 'pass1') {
           if (pass1StreamStartTime === null && recAudioCtx) {
@@ -1321,13 +1807,27 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
       };
+
+      const attachDur = Number((performance.now() - recPipelineAttachPerfMs).toFixed(2));
+      recDiag('REC_PIPELINE_ATTACH_COMPLETE', {
+        mode: 'ScriptProcessorNode',
+        recordingState,
+        durationMs: attachDur,
+        ctxState: recAudioCtx ? recAudioCtx.state : null
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PIPELINE_ATTACH : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+        duration: attachDur,
+        extraData: 2,
+        forcePersist: true
+      });
     }
   }
 
   // Tap support: User can tap on HUD / beads on screen as an explicit click
   const onHudTap = (evt) => {
     if (recordingState !== 'pass1' && recordingState !== 'pass2_prelude') return;
-    if (evt.target.closest('#btnStopRecordingAction')) return;
+    if (evt.target.closest('#btnStopRecordingAction') || evt.target.closest('#btnHudGetLog')) return;
     evt.preventDefault();
     evt.stopPropagation();
     const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
@@ -1679,45 +2179,88 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function refreshAudioInputDevices() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      recDiag('REC_ENUMERATE_UNSUPPORTED', {}, { level: 'warn' });
+      return;
+    }
+    const enumStart = performance.now();
     try {
       // Ensure iOS audioSession is in play-and-record mode BEFORE enumerating/probing
       audio.isRecordingMode = true;
       audio.setPlayAndRecordAudioSession();
+
+      recDiag('REC_ENUMERATE_START', {
+        ctx: inspectAudioCtx(audio.audioCtx)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ENUMERATE_DEVICES : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0
+      });
 
       let devices = await navigator.mediaDevices.enumerateDevices();
       let audioInputs = devices.filter(d => d.kind === 'audioinput');
 
       // If device labels are blank, prompt briefly for mic permission
       if (audioInputs.length > 0 && !audioInputs[0].label) {
+        const probeStart = performance.now();
+        const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+        const targetSampleRate = audio.audioCtx ? audio.audioCtx.sampleRate : undefined;
+        const probeConstraints = {
+          audio: {
+            sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
+            echoCancellation: false,
+            autoGainControl: useAutoGain,
+            noiseSuppression: false
+          }
+        };
+        recDiag('REC_PERMISSION_PROBE_START', { constraints: probeConstraints }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PERMISSION_PROBE : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+          forcePersist: true
+        });
         try {
           if (typeof navigator !== 'undefined' && navigator.audioSession) {
             try { navigator.audioSession.type = 'play-and-record'; } catch (_) {}
           }
-          const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
-          const targetSampleRate = audio.audioCtx ? audio.audioCtx.sampleRate : undefined;
-          const tempStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
-              echoCancellation: false,
-              autoGainControl: useAutoGain,
-              noiseSuppression: false
-            }
-          });
+          const tempStream = await navigator.mediaDevices.getUserMedia(probeConstraints);
+          const probeSpec = inspectMediaStream(tempStream);
           tempStream.getTracks().forEach(t => t.stop());
+          const probeDur = Number((performance.now() - probeStart).toFixed(2));
+          recDiag('REC_PERMISSION_PROBE_OK', { durationMs: probeDur, stream: probeSpec }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PERMISSION_PROBE : undefined,
+            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+            duration: probeDur
+          });
           devices = await navigator.mediaDevices.enumerateDevices();
           audioInputs = devices.filter(d => d.kind === 'audioinput');
-        } catch (_) {
+        } catch (e1) {
+          recDiag('REC_PERMISSION_PROBE_RETRY_BASIC', {
+            error: e1 && e1.message ? e1.message : String(e1),
+            name: e1 && e1.name ? e1.name : undefined,
+            constraint: e1 && e1.constraint ? e1.constraint : undefined
+          }, { level: 'warn', forcePersist: true });
           try {
             const fallbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const fbSpec = inspectMediaStream(fallbackStream);
             fallbackStream.getTracks().forEach(t => t.stop());
+            const probeDur = Number((performance.now() - probeStart).toFixed(2));
+            recDiag('REC_PERMISSION_PROBE_FALLBACK_OK', { durationMs: probeDur, stream: fbSpec }, {
+              stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PERMISSION_PROBE : undefined,
+              phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+              duration: probeDur
+            });
             devices = await navigator.mediaDevices.enumerateDevices();
             audioInputs = devices.filter(d => d.kind === 'audioinput');
           } catch (e2) {
             console.warn('Mic permission probe failed:', e2);
+            recDiag('REC_PERMISSION_PROBE_FAILED', {
+              error: e2 && e2.message ? e2.message : String(e2),
+              name: e2 && e2.name ? e2.name : undefined
+            }, { level: 'error', forcePersist: true });
           }
         }
       }
+
+      const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
 
       if (recordDeviceSelect) {
         recordDeviceSelect.innerHTML = '';
@@ -1726,6 +2269,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           opt.value = '';
           opt.textContent = '📱 Built-in Phone Mic (44.1kHz CD Quality)';
           recordDeviceSelect.appendChild(opt);
+          recDiag('REC_ENUMERATE_COMPLETE', {
+            durationMs: Number((performance.now() - enumStart).toFixed(2)),
+            inputCount: 0,
+            outputCount: audioOutputs.length
+          }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ENUMERATE_DEVICES : undefined,
+            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+            extraData: 0
+          });
         } else {
           // Identify devices:
           // Distinguish Bluetooth headset vs Built-in phone mic
@@ -1764,10 +2316,39 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (preferredDeviceId) {
             recordDeviceSelect.value = preferredDeviceId;
           }
+
+          const enumDur = Number((performance.now() - enumStart).toFixed(2));
+          recDiag('REC_ENUMERATE_COMPLETE', {
+            durationMs: enumDur,
+            inputCount: classified.length,
+            outputCount: audioOutputs.length,
+            inputs: classified.map(c => ({
+              label: c.label,
+              idPrefix: c.dev.deviceId ? String(c.dev.deviceId).slice(0, 12) : '',
+              groupPrefix: c.dev.groupId ? String(c.dev.groupId).slice(0, 10) : '',
+              isBt: c.isBt,
+              isInternal: c.isInternal
+            })),
+            outputs: audioOutputs.map(o => ({
+              label: o.label || '(unlabeled)',
+              idPrefix: o.deviceId ? String(o.deviceId).slice(0, 12) : ''
+            })),
+            autoSelectedLabel: builtIn ? builtIn.label : null,
+            autoSelectedIdPrefix: preferredDeviceId ? String(preferredDeviceId).slice(0, 12) : null
+          }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ENUMERATE_DEVICES : undefined,
+            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+            duration: enumDur,
+            extraData: classified.length,
+            forcePersist: true
+          });
         }
       }
     } catch (err) {
       console.warn('Failed to enumerate audio devices:', err);
+      recDiag('REC_ENUMERATE_ERROR', {
+        error: err && err.message ? err.message : String(err)
+      }, { level: 'error', forcePersist: true });
     }
   }
 
@@ -1802,13 +2383,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  async function startVUMonitor() {
+  async function startVUMonitor(forceRestart = false) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
     const modal = document.getElementById('recordSetupModal');
     if (!modal || modal.classList.contains('hidden') || modal.style.display === 'none') return;
 
+    if (forceRestart) {
+      stopVUMonitor(false);
+    }
+
     // If stream is already healthy and analyser is running, keep it alive seamlessly
-    if (vuStream && vuStream.active && vuAnalyser && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
+    if (!forceRestart && vuStream && vuStream.active && vuAnalyser && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
       setVUMeterGrayedOut(false);
       if (!vuAnimId) {
         vuAnimId = requestAnimationFrame(renderVU);
@@ -1819,9 +2404,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (vuIsStarting) return;
     vuIsStarting = true;
     setVUMeterGrayedOut(true);
+    const vuStartPerf = performance.now();
 
     try {
       const selectedDeviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
+      const selectedOptionText = (recordDeviceSelect && recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
+        ? recordDeviceSelect.selectedOptions[0].textContent
+        : '';
       const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
       const vuCtx = audio.getOrCreateAudioContext();
       const targetSampleRate = vuCtx ? vuCtx.sampleRate : undefined;
@@ -1838,11 +2427,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         constraints.audio.deviceId = { exact: selectedDeviceId };
       }
 
+      recDiag('REC_VU_GUM_START', {
+        forceRestart,
+        selectedOptionText,
+        selectedDeviceIdPrefix: selectedDeviceId ? String(selectedDeviceId).slice(0, 12) : '',
+        constraints,
+        ctx: inspectAudioCtx(vuCtx)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_VU_START : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+        forcePersist: true
+      });
+
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const gumDur = Number((performance.now() - vuStartPerf).toFixed(2));
       const currentModal = document.getElementById('recordSetupModal');
       if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none') {
         stream.getTracks().forEach(t => t.stop());
         vuIsStarting = false;
+        recDiag('REC_VU_ABORTED_MODAL_CLOSED', { gumDur });
         return;
       }
 
@@ -1862,10 +2465,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       const ctx = audio.getOrCreateAudioContext();
       if (!ctx) {
         vuIsStarting = false;
+        recDiag('REC_VU_NO_AUDIO_CTX', {}, { level: 'error', forcePersist: true });
         return;
       }
       if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
-        try { await ctx.resume(); } catch (_) {}
+        const resStart = performance.now();
+        recDiag('REC_VU_CTX_RESUME_START', { stateBefore: ctx.state }, { forcePersist: true });
+        try { await ctx.resume(); } catch (reErr) {
+          recDiag('REC_VU_CTX_RESUME_ERROR', { error: reErr && reErr.message ? reErr.message : String(reErr) }, { level: 'warn', forcePersist: true });
+        }
+        recDiag('REC_VU_CTX_RESUME_DONE', { stateAfter: ctx.state, durationMs: Number((performance.now() - resStart).toFixed(2)) });
       }
 
       if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none') {
@@ -1881,6 +2490,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       vuAnalyser.smoothingTimeConstant = 0.2;
       vuSource.connect(vuAnalyser);
 
+      const totalVuInitMs = Number((performance.now() - vuStartPerf).toFixed(2));
+      recDiag('REC_VU_READY', {
+        gumDurationMs: gumDur,
+        totalInitMs: totalVuInitMs,
+        stream: inspectMediaStream(vuStream),
+        ctx: inspectAudioCtx(ctx)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_VU_START : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+        duration: totalVuInitMs,
+        forcePersist: true
+      });
+
       // Audio stack connected: ungray the VU meter
       setVUMeterGrayedOut(false);
 
@@ -1891,6 +2513,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       vuAnimId = requestAnimationFrame(renderVU);
     } catch (err) {
       console.warn('VU meter monitoring stream not available:', err);
+      recDiag('REC_VU_ERROR', {
+        name: err && err.name ? err.name : undefined,
+        message: err && err.message ? err.message : String(err),
+        constraint: err && err.constraint ? err.constraint : undefined,
+        durationMs: Number((performance.now() - vuStartPerf).toFixed(2))
+      }, {
+        level: 'error',
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ERROR : undefined,
+        forcePersist: true
+      });
       setVUMeterGrayedOut(true);
     } finally {
       vuIsStarting = false;
@@ -1984,6 +2616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function stopVUMonitor(preserveStream = false) {
+    const hadStream = Boolean(vuStream);
     if (vuAnimId) {
       cancelAnimationFrame(vuAnimId);
       vuAnimId = null;
@@ -2002,6 +2635,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       } catch (_) {}
       vuStream = null;
     }
+    if (hadStream || preserveStream) {
+      recDiag('REC_VU_STOP', { preserveStream, hadStream }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_VU_STOP : undefined,
+        extraData: preserveStream ? 1 : 0
+      });
+    }
     const barEl = document.getElementById('recordVUMeterBar');
     const peakEl = document.getElementById('recordVUMeterPeak');
     const clipEl = document.getElementById('recordVUClipIndicator');
@@ -2018,12 +2657,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (recordDeviceSelect) {
     recordDeviceSelect.addEventListener('change', () => {
-      startVUMonitor();
-    });
-  }
-  if (recordAutoGain) {
-    recordAutoGain.addEventListener('change', () => {
-      startVUMonitor();
+      const optText = (recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
+        ? recordDeviceSelect.selectedOptions[0].textContent
+        : '';
+      recDiag('REC_DEVICE_SELECT_CHANGED', {
+        deviceIdPrefix: recordDeviceSelect.value ? String(recordDeviceSelect.value).slice(0, 12) : '',
+        optionText: optText
+      }, { forcePersist: true });
+      startVUMonitor(true);
     });
   }
 
@@ -2127,7 +2768,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function cleanupRecordingNodes() {
+    stopRecordingWatchdog();
     stopLiveMetronome();
+    if (recDiagCleanupTrackListeners) {
+      try { recDiagCleanupTrackListeners(); } catch (_) {}
+      recDiagCleanupTrackListeners = null;
+    }
     if (hudLatencyText) {
       hudLatencyText.textContent = '';
       hudLatencyText.style.display = 'none';
@@ -2207,7 +2853,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.setPlaybackAudioSession();
   }
 
-  function cancelRecording() {
+  function cancelRecording(reason = 'user_cancelled') {
+    recDiag('REC_CANCELLED', {
+      reason,
+      recordingState,
+      pass1Samples: totalPass1Samples,
+      pass2Samples: totalPass2Samples,
+      chunksTotal: recChunksReceivedTotal
+    }, { level: 'warn', forcePersist: true });
+    if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+      window.zoomProfiler.endRecSession('cancelled', { reason, pass1Samples: totalPass1Samples, pass2Samples: totalPass2Samples });
+    }
     audio.isRecording = false;
     audio.isRecordingMode = false;
     audio.setPlaybackAudioSession();
@@ -2237,6 +2893,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const firstBeat = Math.max(1, parseInt(syncTrackFirstBeat?.value, 10) || 5);
     const numBeats = Math.max(1, parseInt(syncTrackNumBeats?.value, 10) || 4);
 
+    recDiag('REC_TRACK_SYNC_TAKE_BEGIN', {
+      guideTrackIdx,
+      guideTrackName: trackName,
+      firstBeat,
+      numBeats,
+      playhead: recordingStartPlayhead,
+      ctx: inspectAudioCtx(recAudioCtx)
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
+      extraData: guideTrackIdx,
+      forcePersist: true
+    });
+
     if (hudRecStatusText) hudRecStatusText.textContent = 'TRACK SYNC TAKE';
     if (hudInstruction) hudInstruction.textContent = `Sync with "${trackName}"! Tap beats ${firstBeat}–${firstBeat + numBeats - 1}...`;
     if (hudClickBeads) {
@@ -2256,10 +2925,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
       audio.seek(recordingStartPlayhead);
     }
+    recDiag('REC_BACKING_PLAY_CALL', {
+      mode: 'track_sync',
+      playhead: audio.playheadPosition,
+      ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null
+    }, { forcePersist: true });
     audio.play();
 
     takeStartTime = performance.now();
     startHudTimer();
+    startRecordingWatchdog();
   }
 
   async function startRecordingFlow() {
@@ -2269,7 +2944,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     const deviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
+    const selectedOptionText = (recordDeviceSelect && recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
+      ? recordDeviceSelect.selectedOptions[0].textContent
+      : '';
     const use2PassSync = record2PassSync ? record2PassSync.checked : true;
+    const isTrackGuide = guideModeTrack ? guideModeTrack.checked : false;
+    const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
+    const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+    const useInternalGain = Boolean(recordInternalGain && recordInternalGain.checked);
+
+    recChunksReceivedTotal = 0;
+    recFirstChunkLogged = false;
+    lastWorkletDiagReport = null;
+
+    if (window.zoomProfiler && typeof window.zoomProfiler.beginRecSession === 'function') {
+      window.zoomProfiler.beginRecSession({
+        selectedDeviceIdPrefix: deviceId ? String(deviceId).slice(0, 12) : '',
+        selectedDeviceLabel: selectedOptionText,
+        useAutoGain,
+        useInternalGain,
+        use2PassSync,
+        guideMode: use2PassSync ? (isTrackGuide ? 'track_sync' : 'synth_beeps') : 'single_pass',
+        selectedGuideTrackIdx,
+        startPlayhead: Number((audio.playheadPosition || 0).toFixed(3)),
+        hadPrewarmedStream: Boolean(recStream && recStream.active)
+      });
+    }
 
     try {
       // 1. Enter recording mode and switch iOS AudioSession to play-and-record
@@ -2285,15 +2985,48 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // 2. Obtain master AudioContext and ensure it is active
       recAudioCtx = audio.getOrCreateAudioContext();
+      recDiag('REC_FLOW_CTX_OBTAINED', inspectAudioCtx(recAudioCtx), {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_CTX_INIT : undefined,
+        extraData: recAudioCtx ? recAudioCtx.sampleRate : 0,
+        forcePersist: true
+      });
+
       if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
+        const resumeStart = performance.now();
+        recDiag('REC_FLOW_CTX_RESUME_START', { stateBefore: recAudioCtx.state }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_CTX_RESUME : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+          forcePersist: true
+        });
         await recAudioCtx.resume();
+        const resumeDur = Number((performance.now() - resumeStart).toFixed(2));
+        recDiag('REC_FLOW_CTX_RESUME_DONE', {
+          durationMs: resumeDur,
+          ctx: inspectAudioCtx(recAudioCtx)
+        }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_AUDIO_CTX_RESUME : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+          duration: resumeDur,
+          forcePersist: true
+        });
       }
       const targetSampleRate = recAudioCtx ? recAudioCtx.sampleRate : undefined;
 
       // 3. Acquire mic stream: reuse pre-warmed stream transferred from VU meter monitor if active!
       const isStreamActive = recStream && recStream.active && recStream.getAudioTracks().length > 0 && recStream.getAudioTracks()[0].readyState === 'live';
-      if (!isStreamActive) {
-        const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+      if (isStreamActive) {
+        const streamSpec = inspectMediaStream(recStream);
+        const actualSR = streamSpec.tracks?.[0]?.settings?.sampleRate || 0;
+        recDiag('REC_FLOW_STREAM_REUSED', {
+          stream: streamSpec,
+          ctxSampleRate: targetSampleRate,
+          sampleRateMismatch: Boolean(actualSR && targetSampleRate && actualSR !== targetSampleRate)
+        }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STREAM_REUSED : undefined,
+          extraData: actualSR,
+          forcePersist: true
+        });
+      } else {
         const audioConstraints = {
           sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
           channelCount: { ideal: 1 },
@@ -2305,25 +3038,97 @@ document.addEventListener('DOMContentLoaded', async () => {
           audioConstraints.deviceId = { ideal: deviceId };
         }
 
+        const gumStart = performance.now();
+        recDiag('REC_FLOW_GUM_ATTEMPT_1_START', { constraints: audioConstraints }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+          forcePersist: true
+        });
+
         try {
           recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+          const gumDur = Number((performance.now() - gumStart).toFixed(2));
+          const streamSpec = inspectMediaStream(recStream);
+          const actualSR = streamSpec.tracks?.[0]?.settings?.sampleRate || 0;
+          recDiag('REC_FLOW_GUM_ATTEMPT_1_OK', {
+            durationMs: gumDur,
+            stream: streamSpec,
+            ctxSampleRate: targetSampleRate,
+            sampleRateMismatch: Boolean(actualSR && targetSampleRate && actualSR !== targetSampleRate)
+          }, {
+            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+            duration: gumDur,
+            extraData: actualSR,
+            forcePersist: true
+          });
         } catch (e1) {
           console.warn('Initial constraints with deviceId failed, retrying ideal sample rate:', e1);
+          recDiag('REC_FLOW_GUM_ATTEMPT_1_FAILED', {
+            name: e1 && e1.name ? e1.name : undefined,
+            message: e1 && e1.message ? e1.message : String(e1),
+            constraint: e1 && e1.constraint ? e1.constraint : undefined
+          }, { level: 'warn', forcePersist: true });
           try {
-            recStream = await navigator.mediaDevices.getUserMedia({
+            const fbConstraints = {
               audio: {
                 sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
                 echoCancellation: false,
                 autoGainControl: useAutoGain,
                 noiseSuppression: false
               }
+            };
+            recDiag('REC_FLOW_GUM_ATTEMPT_2_START', { constraints: fbConstraints }, { forcePersist: true });
+            recStream = await navigator.mediaDevices.getUserMedia(fbConstraints);
+            const gumDur = Number((performance.now() - gumStart).toFixed(2));
+            recDiag('REC_FLOW_GUM_ATTEMPT_2_OK', {
+              durationMs: gumDur,
+              stream: inspectMediaStream(recStream)
+            }, {
+              stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+              phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+              duration: gumDur,
+              forcePersist: true
             });
           } catch (e2) {
             console.warn('Retrying basic audio getUserMedia:', e2);
+            recDiag('REC_FLOW_GUM_ATTEMPT_2_FAILED', {
+              name: e2 && e2.name ? e2.name : undefined,
+              message: e2 && e2.message ? e2.message : String(e2),
+              constraint: e2 && e2.constraint ? e2.constraint : undefined
+            }, { level: 'warn', forcePersist: true });
+            recDiag('REC_FLOW_GUM_ATTEMPT_3_START', { constraints: { audio: true } }, { forcePersist: true });
             recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const gumDur = Number((performance.now() - gumStart).toFixed(2));
+            recDiag('REC_FLOW_GUM_ATTEMPT_3_OK', {
+              durationMs: gumDur,
+              stream: inspectMediaStream(recStream)
+            }, {
+              stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+              phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+              duration: gumDur,
+              forcePersist: true
+            });
           }
         }
       }
+
+      // Attach track-level mute / unmute / ended listeners for live USB disconnect / route-change tracking
+      if (recDiagCleanupTrackListeners) {
+        try { recDiagCleanupTrackListeners(); } catch (_) {}
+      }
+      recDiagCleanupTrackListeners = attachStreamTrackListeners(recStream, 'recording');
+
+      const activeStreamSpec = inspectMediaStream(recStream);
+      const firstTrackSettings = activeStreamSpec.tracks?.[0]?.settings || {};
+      recDiag('REC_TRACK_SETTINGS_SNAPSHOT', {
+        trackSettings: firstTrackSettings,
+        ctx: inspectAudioCtx(recAudioCtx)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TRACK_SETTINGS : undefined,
+        extraData: firstTrackSettings.sampleRate || 0,
+        forcePersist: true
+      });
 
       isRecording = true;
       if (btnRecord) btnRecord.classList.add('recording');
@@ -2332,13 +3137,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         recordingHUD.style.display = 'flex';
       }
 
-      const isTrackGuide = guideModeTrack ? guideModeTrack.checked : false;
-      const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
-
       if (use2PassSync && isTrackGuide) {
         if (selectedGuideTrackIdx !== '') {
           await startTrackSyncRecording(parseInt(selectedGuideTrackIdx, 10));
         } else {
+          recDiag('REC_ABORT_NO_GUIDE_TRACK', {}, { level: 'warn', forcePersist: true });
+          if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+            window.zoomProfiler.endRecSession('aborted', { reason: 'no_guide_track_selected' });
+          }
           audio.isRecording = false;
           audio.isRecordingMode = false;
           audio.setPlaybackAudioSession();
@@ -2358,6 +3164,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } catch (err) {
       console.error('Failed to start recording:', err);
+      recDiag('REC_FLOW_FATAL_ERROR', {
+        name: err && err.name ? err.name : undefined,
+        message: err && err.message ? err.message : String(err),
+        stack: err && err.stack ? String(err.stack).slice(0, 500) : undefined,
+        ctx: inspectAudioCtx(recAudioCtx)
+      }, {
+        level: 'error',
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ERROR : undefined,
+        forcePersist: true
+      });
+      if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+        window.zoomProfiler.endRecSession('error', { error: err && err.message ? err.message : String(err) });
+      }
       if (btnStartRecordingAction) {
         btnStartRecordingAction.textContent = 'Start Recording';
         btnStartRecordingAction.disabled = false;
@@ -2398,6 +3217,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       pass1ClickEvents.push({ ctxTime: now, samplePos: samplePos });
 
       const count = pass1ClickEvents.length;
+      recDiag('REC_PASS1_CLICK_REGISTERED', {
+        clickNum: count,
+        ctxTime: Number(now.toFixed(4)),
+        samplePos
+      });
       if (count >= 1 && bead1) bead1.classList.add('active');
       if (count >= 2 && bead2) bead2.classList.add('active');
       if (count >= 3 && bead3) bead3.classList.add('active');
@@ -2433,6 +3257,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (pass1StreamStartTime === null) {
       pass1StreamStartTime = recAudioCtx.currentTime;
     }
+
+    startRecordingWatchdog();
+
+    recDiag('REC_PASS1_START', {
+      isSynthGuide,
+      streamStartTime: pass1StreamStartTime,
+      ctx: inspectAudioCtx(recAudioCtx)
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS1_START : undefined,
+      forcePersist: true
+    });
 
     if (isSynthGuide) {
       // --- Option 1: Metronome Synth Beeps Mode ---
@@ -2512,6 +3347,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       // 15-second safety timeout
       pass1TimeoutId = setTimeout(() => {
         if (recordingState === 'pass1' && pass1ClickEvents.length < 4) {
+          recDiag('REC_PASS1_TIMEOUT_15S', {
+            clicksDetected: pass1ClickEvents.length,
+            totalSamples: pass1AudioStore.totalSamples,
+            ctx: inspectAudioCtx(recAudioCtx)
+          }, { level: 'warn', forcePersist: true });
           cancelRecording();
           showToast('4 clicks were not detected within 15 seconds. You can tap screen or tap louder.', 'error', 4500);
         }
@@ -2579,6 +3419,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudLatencyText.style.display = 'block';
     }
     console.log(`[Pass 1 Synth Guide] Authoritative tempo: ${dt.toFixed(4)}s (${Math.round(60 / dt)} BPM), Est. Latency: ${estLatencyMs}ms, Tap peaks: [${detectedTapPeaks.join(', ')}]`);
+    recDiag('REC_PASS1_SYNTH_FINISH', {
+      totalSamples: totalP1,
+      tempoBpm: Math.round(60 / dt),
+      dtSec: Number(dt.toFixed(4)),
+      estLatencyMs,
+      detectedTapPeaks,
+      clickEventsCount: pass1ClickEvents.length
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS1_FINISH : undefined,
+      extraData: estLatencyMs,
+      forcePersist: true
+    });
 
     // 3. Extract continuous waveform recorded from Phase 1 exactly as the user tapped them:
     // User Tap 1 peak is positioned at preLeadSamples so it sounds exactly 1 beat after the 4th beep.
@@ -2662,6 +3514,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     detectedIntervalSec = dt;
     console.log(`[Pass 1 Track Guide] Detected tempo: ${dt.toFixed(4)}s (${(60 / dt).toFixed(1)} BPM), Tap intervals: ${intervals.map(v => v.toFixed(3)).join(', ')}s`);
+    recDiag('REC_PASS1_TRACK_FINISH', {
+      totalSamples: totalP1,
+      tempoBpm: Number((60 / dt).toFixed(1)),
+      dtSec: Number(dt.toFixed(4)),
+      exactPeaks,
+      intervals: intervals.map(v => Number(v.toFixed(4)))
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS1_FINISH : undefined,
+      forcePersist: true
+    });
 
     // Latency readout if guide track is selected and not "None"
     const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
@@ -2774,8 +3636,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
+    startRecordingWatchdog();
+
     // Schedule the 8-beat prelude in Web Audio
     const startPreludeTime = recAudioCtx.currentTime + 0.15;
+    recDiag('REC_PASS2_PRELUDE_START', {
+      dtSec: Number(dt.toFixed(4)),
+      tempoBpm: Math.round(60 / dt),
+      startPreludeTime: Number(startPreludeTime.toFixed(4)),
+      calibFrames: calibBuffer ? calibBuffer.length : 0,
+      ctx: inspectAudioCtx(recAudioCtx)
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS2_START : undefined,
+      forcePersist: true
+    });
 
     // Beats 1 to 4: Synthesized beeps
     for (let i = 0; i < 4; i++) {
@@ -2861,6 +3735,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
+      recDiag('REC_TAKE_LIVE_DOWNBEAT', {
+        mode: '2pass',
+        ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null,
+        scheduledDownbeatTime: Number(downbeatTime.toFixed(4)),
+        preludeSamplesCaptured: pass2AudioStore.totalSamples
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
+        forcePersist: true
+      });
       if (recWorkletNode) {
         recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false });
       }
@@ -2919,7 +3802,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.__nanodaw_stream = recStream;
     window.__nanodaw_mic = recMicSource;
 
+    startRecordingWatchdog();
+
     const startPreludeTime = recAudioCtx.currentTime + 0.15;
+    recDiag('REC_STD_PRELUDE_START', {
+      tempoBpm: tempo,
+      dtSec: Number(dt.toFixed(4)),
+      startPreludeTime: Number(startPreludeTime.toFixed(4)),
+      ctx: inspectAudioCtx(recAudioCtx)
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS2_START : undefined,
+      forcePersist: true
+    });
     for (let i = 0; i < 4; i++) {
       const beatTime = startPreludeTime + i * dt;
       playSynthBeep(beatTime, i === 3 ? 1800 : 900, 0.08);
@@ -2955,6 +3849,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
+      recDiag('REC_TAKE_LIVE_DOWNBEAT', {
+        mode: 'single_pass',
+        ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null,
+        scheduledDownbeatTime: Number(downbeatTime.toFixed(4)),
+        preludeSamplesCaptured: pass2AudioStore.totalSamples
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
+        forcePersist: true
+      });
       if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
       if (hudInstruction) hudInstruction.textContent = 'Recording live to new track...';
       if (hudClickBeads) {
@@ -2974,6 +3877,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   // --- Stop Recording & Add New Track ---
   async function stopRecording() {
     if (!isRecording) return;
+    const stopStartPerf = performance.now();
+    const stateAtStop = recordingState;
+    recDiag('REC_STOP_BEGIN', {
+      stateAtStop,
+      pass1Samples: pass1AudioStore.totalSamples,
+      pass2Samples: pass2AudioStore.totalSamples,
+      chunksReceived: recChunksReceivedTotal,
+      lastWorkletDiag: lastWorkletDiagReport,
+      ctx: inspectAudioCtx(recAudioCtx)
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_BEGIN : undefined,
+      phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+      forcePersist: true
+    });
+
     isRecording = false; // Immediately disable to prevent re-entrant calls
     audio.isRecording = false;
     audio.isRecordingMode = false;
@@ -3000,9 +3918,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Flush any pending trailing audio from worklet
     if (recWorkletNode) {
-      try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
+      try {
+        recWorkletNode.port.postMessage({ type: 'ping_diag' });
+        recWorkletNode.port.postMessage({ type: 'flush' });
+      } catch (_) {}
     }
     await new Promise(r => setTimeout(r, 20));
+    recDiag('REC_STOP_FLUSHED', {
+      pass1SamplesAfterFlush: pass1AudioStore.totalSamples,
+      pass2SamplesAfterFlush: pass2AudioStore.totalSamples,
+      chunksReceived: recChunksReceivedTotal,
+      lastWorkletDiag: lastWorkletDiagReport
+    }, { forcePersist: true });
 
     // 3. Stop mic stream and processing nodes cleanly
     cleanupRecordingNodes();
@@ -3016,11 +3943,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     let takePCM = null;
 
     if (pass2AudioStore.totalSamples > 0) {
+      const ppStart = performance.now();
+      recDiag('REC_POST_PROCESS_START', {
+        source: 'pass2',
+        samples: pass2AudioStore.totalSamples,
+        sampleRate,
+        internalGain: Boolean(recordInternalGain && recordInternalGain.checked)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+        forcePersist: true
+      });
       let fullPass2 = pass2AudioStore.toFlatArray();
       fullPass2 = suppressAudioGlitches(fullPass2, sampleRate);
       if (recordInternalGain && recordInternalGain.checked) {
         fullPass2 = processInternalGainAndNoiseSuppression(fullPass2, sampleRate, 0.75);
       }
+      const ppDur = Number((performance.now() - ppStart).toFixed(2));
+      recDiag('REC_POST_PROCESS_DONE', {
+        durationMs: ppDur,
+        samples: fullPass2.length
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+        duration: ppDur,
+        forcePersist: true
+      });
       const totalSamples = fullPass2.length;
 
       // If this was a Track Sync take, process it using peak alignment
@@ -3155,6 +4103,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     // which coincides exactly with the playhead at the start of recording!
     audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444');
 
+    const totalStopDur = Number((performance.now() - stopStartPerf).toFixed(2));
+    const takeDurationSec = Number((takePCM.length / sampleRate).toFixed(3));
+    recDiag('REC_STOP_COMPLETE', {
+      takeName,
+      takeDurationSec,
+      sampleRate,
+      offsetSec: recordingStartPlayhead,
+      stopProcessingMs: totalStopDur
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_COMPLETE : undefined,
+      duration: totalStopDur,
+      forcePersist: true
+    });
+    if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+      window.zoomProfiler.endRecSession('completed', {
+        takeName,
+        takeDurationSec,
+        sampleRate,
+        stopProcessingMs: totalStopDur
+      });
+    }
+
     showToast(`Added "${takeName}" (${(takePCM.length / sampleRate).toFixed(1)}s) to project!`, 'success', 4000);
     audio.seek(recordingStartPlayhead);
     timeline.render();
@@ -3172,10 +4142,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     let guideBuffer = null;
+    const guideLoadStart = performance.now();
+    recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_START', {
+      guideIdx,
+      guideName: guideTrack.name,
+      takeSamples: fullPass2.length,
+      sampleRate
+    }, { forcePersist: true });
     try {
       guideBuffer = await audio.getTrackAudioBuffer(guideIdx);
+      recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_OK', {
+        durationMs: Number((performance.now() - guideLoadStart).toFixed(2)),
+        guideSR: guideBuffer ? guideBuffer.sampleRate : null,
+        guideDurationSec: guideBuffer ? Number(guideBuffer.duration.toFixed(3)) : null
+      }, { forcePersist: true });
     } catch (e) {
       console.warn('Could not load guide track audio buffer for sync:', e);
+      recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_FAILED', {
+        error: e && e.message ? e.message : String(e)
+      }, { level: 'error', forcePersist: true });
     }
 
     if (!guideBuffer) {
@@ -3357,6 +4342,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (timeline.scrollToStart) timeline.scrollToStart();
 
     showToast(`Sync locked! "${takeName}" placed below "${guideTrack.name}" with Peak 1 anchor aligned!`, 'success', 5000);
+    const takeDurationSec = Number((finalPCM.length / sampleRate).toFixed(3));
+    recDiag('REC_TRACK_SYNC_COMPLETE', {
+      takeName,
+      takeDurationSec,
+      sampleRate,
+      finalOffset: Number(finalOffset.toFixed(4)),
+      metroPeaksCount: metroPeaksTimelineSec.length,
+      takePeaksCount: takePeaksSec.length
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_COMPLETE : undefined,
+      forcePersist: true
+    });
+    if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+      window.zoomProfiler.endRecSession('completed_track_sync', {
+        takeName,
+        takeDurationSec,
+        sampleRate,
+        finalOffset: Number(finalOffset.toFixed(4))
+      });
+    }
   }
 
   function fallbackAddTrack(rawTakePCM, sampleRate, guideIdx) {
@@ -3377,6 +4382,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     const insertIdx = (guideIdx !== null && guideIdx !== undefined) ? guideIdx + 1 : audio.tracks.length;
     audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444', insertIdx);
 
+    const takeDurationSec = Number((pcm.length / sampleRate).toFixed(3));
+    recDiag('REC_TRACK_SYNC_FALLBACK_ADDED', {
+      takeName,
+      takeDurationSec,
+      sampleRate,
+      guideIdx
+    }, {
+      level: 'warn',
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_COMPLETE : undefined,
+      forcePersist: true
+    });
+    if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+      window.zoomProfiler.endRecSession('completed_fallback_unshifted', {
+        takeName,
+        takeDurationSec,
+        sampleRate
+      });
+    }
+
     timeline.clearSyncLines();
     audio.seek(recordingStartPlayhead);
     timeline.render();
@@ -3389,6 +4413,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (isRecording) {
         stopRecording();
       } else {
+        recDiag('REC_MODAL_OPEN', {
+          playhead: Number((audio.playheadPosition || 0).toFixed(3)),
+          trackCount: audio.tracks ? audio.tracks.length : 0,
+          ctx: inspectAudioCtx(audio.audioCtx)
+        }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_MODAL_OPEN : undefined,
+          forcePersist: true
+        });
         audio.isRecordingMode = true;
         audio.setPlayAndRecordAudioSession();
         populateSyncGuideTracks();
@@ -3428,6 +4460,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnCloseRecordSetupModal && recordSetupModal) {
     btnCloseRecordSetupModal.addEventListener('click', () => {
+      recDiag('REC_MODAL_CLOSED', { via: 'close_btn' });
       stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
@@ -3437,6 +4470,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnCancelRecordSetup && recordSetupModal) {
     btnCancelRecordSetup.addEventListener('click', () => {
+      recDiag('REC_MODAL_CLOSED', { via: 'cancel_btn' });
       stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
@@ -3451,7 +4485,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       btnStartRecordingAction.disabled = true;
 
       // 2. Transfer active VU stream to recStream to eliminate secondary getUserMedia spinup delay!
-      if (vuStream && vuStream.active && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
+      const canTransferVuStream = Boolean(vuStream && vuStream.active && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live');
+      recDiag('REC_START_BTN_CLICK', {
+        transferredVuStream: canTransferVuStream,
+        vuStreamSpec: canTransferVuStream ? inspectMediaStream(vuStream) : null,
+        ctx: inspectAudioCtx(audio.audioCtx)
+      }, { forcePersist: true });
+
+      if (canTransferVuStream) {
         recStream = vuStream;
         vuStream = null;
       }

@@ -58,6 +58,35 @@
     MARKER_UPDATE: 51,
     MARKER_DELETE: 52,
 
+    // Recording Stream & Pipeline Diagnostics
+    REC_MODAL_OPEN: 60,
+    REC_AUDIO_SESSION_SET: 61,
+    REC_ENUMERATE_DEVICES: 62,
+    REC_PERMISSION_PROBE: 63,
+    REC_VU_START: 64,
+    REC_VU_STOP: 65,
+    REC_FLOW_START: 66,
+    REC_AUDIO_CTX_INIT: 67,
+    REC_AUDIO_CTX_RESUME: 68,
+    REC_AUDIO_CTX_STATE: 69,
+    REC_GUM_REQUEST: 70,
+    REC_STREAM_REUSED: 71,
+    REC_TRACK_SETTINGS: 72,
+    REC_TRACK_EVENT: 73,
+    REC_WORKLET_LOAD: 74,
+    REC_PIPELINE_ATTACH: 75,
+    REC_WORKLET_FIRST_CHUNK: 76,
+    REC_WORKLET_HEARTBEAT: 77,
+    REC_STREAM_STALL: 78,
+    REC_PASS1_START: 79,
+    REC_PASS1_FINISH: 80,
+    REC_PASS2_START: 81,
+    REC_TAKE_START: 82,
+    REC_STOP_BEGIN: 83,
+    REC_POST_PROCESS: 84,
+    REC_STOP_COMPLETE: 85,
+    REC_ERROR: 86,
+
     // System Telemetry & Errors
     SYSTEM_ERROR: 90
   };
@@ -103,6 +132,34 @@
     51: 'MARKER_UPDATE',
     52: 'MARKER_DELETE',
 
+    60: 'REC_MODAL_OPEN',
+    61: 'REC_AUDIO_SESSION_SET',
+    62: 'REC_ENUMERATE_DEVICES',
+    63: 'REC_PERMISSION_PROBE',
+    64: 'REC_VU_START',
+    65: 'REC_VU_STOP',
+    66: 'REC_FLOW_START',
+    67: 'REC_AUDIO_CTX_INIT',
+    68: 'REC_AUDIO_CTX_RESUME',
+    69: 'REC_AUDIO_CTX_STATE',
+    70: 'REC_GUM_REQUEST',
+    71: 'REC_STREAM_REUSED',
+    72: 'REC_TRACK_SETTINGS',
+    73: 'REC_TRACK_EVENT',
+    74: 'REC_WORKLET_LOAD',
+    75: 'REC_PIPELINE_ATTACH',
+    76: 'REC_WORKLET_FIRST_CHUNK',
+    77: 'REC_WORKLET_HEARTBEAT',
+    78: 'REC_STREAM_STALL',
+    79: 'REC_PASS1_START',
+    80: 'REC_PASS1_FINISH',
+    81: 'REC_PASS2_START',
+    82: 'REC_TAKE_START',
+    83: 'REC_STOP_BEGIN',
+    84: 'REC_POST_PROCESS',
+    85: 'REC_STOP_COMPLETE',
+    86: 'REC_ERROR',
+
     90: 'SYSTEM_ERROR'
   };
 
@@ -116,7 +173,8 @@
     PROJECT: 7,
     MARKER: 8,
     SCROLL: 9,
-    SYSTEM: 10
+    SYSTEM: 10,
+    RECORD: 11
   };
 
   const OP_NAMES = {
@@ -129,7 +187,8 @@
     7: 'PROJECT',
     8: 'MARKER',
     9: 'SCROLL',
-    10: 'SYSTEM'
+    10: 'SYSTEM',
+    11: 'RECORD'
   };
 
   const PHASE = {
@@ -137,6 +196,9 @@
     END: 1,
     POINT: 2
   };
+
+  const STORAGE_KEY_ACTIVE = 'nanodaw_rec_diag_v1';
+  const STORAGE_KEY_PREV_HANG = 'nanodaw_rec_prev_hang_v1';
 
   class ZoomProfiler {
     constructor() {
@@ -148,7 +210,153 @@
       this.activeStepStarts = new Map(); // key -> start timestamp
       this.opStartTime = 0;
 
+      // Structured diagnostic ring buffer for rich recording / device / WebAudio telemetry
+      this.diagLogs = [];
+      this.maxDiagLogs = 600;
+      this.diagSeq = 0;
+      this.recordingSession = null;
+      this._lastPersistMs = 0;
+
+      this._recoverUnfinishedSession();
       this.initWasm();
+    }
+
+    _recoverUnfinishedSession() {
+      if (typeof localStorage === 'undefined') return;
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY_ACTIVE);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.session && parsed.session.status === 'in_progress') {
+          parsed.recoveredAt = new Date().toISOString();
+          parsed.recoveryNote = 'Previous recording session did not reach completion (possible hang, crash, or page reload during recording).';
+          localStorage.setItem(STORAGE_KEY_PREV_HANG, JSON.stringify(parsed));
+          console.warn('[Profiler] Preserved unfinished recording diagnostic session from previous run:', parsed.session.sessionId);
+        }
+      } catch (e) {}
+    }
+
+    _persistDiagSnapshot(force = false) {
+      if (typeof localStorage === 'undefined') return;
+      const now = performance.now();
+      if (!force && now - this._lastPersistMs < 750) return;
+      this._lastPersistMs = now;
+      try {
+        const recentEntries = this.diagLogs.slice(-220);
+        const payload = {
+          savedAt: new Date().toISOString(),
+          session: this.recordingSession,
+          totalDiagSeq: this.diagSeq,
+          entries: recentEntries
+        };
+        localStorage.setItem(STORAGE_KEY_ACTIVE, JSON.stringify(payload));
+      } catch (e) {}
+    }
+
+    /**
+     * Begin a tracked recording diagnostic session (persisted immediately to survive hangs/reloads)
+     */
+    beginRecSession(meta = {}) {
+      // If a previous session in this tab was somehow still marked in_progress, preserve it first
+      if (this.recordingSession && this.recordingSession.status === 'in_progress') {
+        this._recoverUnfinishedSession();
+      }
+      const sessionId = `rec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      this.recordingSession = {
+        sessionId,
+        startedAt: new Date().toISOString(),
+        startedPerfMs: Number(performance.now().toFixed(2)),
+        updatedAt: new Date().toISOString(),
+        status: 'in_progress',
+        meta
+      };
+      this.logDiag('REC_SESSION_BEGIN', meta, {
+        stepId: STEP.REC_FLOW_START,
+        phase: PHASE.START,
+        forcePersist: true
+      });
+      return sessionId;
+    }
+
+    /**
+     * Update metadata or current stage on the active recording diagnostic session
+     */
+    updateRecSession(patch = {}, forcePersist = false) {
+      if (!this.recordingSession) return;
+      Object.assign(this.recordingSession, patch, {
+        updatedAt: new Date().toISOString()
+      });
+      this._persistDiagSnapshot(forcePersist);
+    }
+
+    /**
+     * Finalize a tracked recording diagnostic session
+     */
+    endRecSession(status = 'completed', detail = {}) {
+      if (this.recordingSession) {
+        this.recordingSession.status = status;
+        this.recordingSession.endedAt = new Date().toISOString();
+        this.recordingSession.endedPerfMs = Number(performance.now().toFixed(2));
+        this.recordingSession.summary = detail;
+      }
+      this.logDiag(`REC_SESSION_${String(status).toUpperCase()}`, detail, {
+        stepId: status === 'error' ? STEP.REC_ERROR : STEP.REC_STOP_COMPLETE,
+        phase: PHASE.END,
+        forcePersist: true
+      });
+    }
+
+    /**
+     * Log a rich structured diagnostic event (device labels, getUserMedia constraints, AudioContext state, etc.)
+     */
+    logDiag(stage, detail = {}, options = {}) {
+      const now = performance.now();
+      const level = options.level || 'info';
+      const entry = {
+        seq: this.diagSeq++,
+        t_ms: Number(now.toFixed(3)),
+        iso: new Date().toISOString(),
+        level,
+        stage,
+        recSessionId: this.recordingSession ? this.recordingSession.sessionId : null,
+        detail
+      };
+
+      this.diagLogs.push(entry);
+      if (this.diagLogs.length > this.maxDiagLogs) {
+        this.diagLogs.splice(0, this.diagLogs.length - this.maxDiagLogs);
+      }
+
+      if (this.recordingSession) {
+        this.recordingSession.lastStage = stage;
+        this.recordingSession.updatedAt = entry.iso;
+      }
+
+      if (typeof options.stepId === 'number') {
+        this.logEvent(options.stepId, {
+          opType: typeof options.opType === 'number' ? options.opType : OP.RECORD,
+          phase: typeof options.phase === 'number' ? options.phase : PHASE.POINT,
+          trackIndex: typeof options.trackIndex === 'number' ? options.trackIndex : 255,
+          duration: typeof options.duration === 'number' ? options.duration : 0,
+          extraData: typeof options.extraData === 'number' ? options.extraData : 0
+        });
+      }
+
+      const forcePersist = Boolean(options.forcePersist || level === 'error' || level === 'warn');
+      this._persistDiagSnapshot(forcePersist);
+
+      if (typeof console !== 'undefined') {
+        const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+        try {
+          fn.call(console, `[RecDiag +${entry.t_ms.toFixed(1)}ms] ${stage}`, detail);
+        } catch (e) {}
+      }
+
+      return entry;
+    }
+
+    getDiagCount() {
+      return this.diagLogs.length;
     }
 
     initWasm() {
@@ -323,50 +531,55 @@
       this.currentOpId = 0;
       this.currentOpType = 0;
       this.activeStepStarts.clear();
+      this.diagLogs = [];
+      this.diagSeq = 0;
+      this.recordingSession = null;
     }
 
     /**
      * Export recorded profile events in chronological order from circular ring buffer
      */
     exportProfile(extraMeta = {}) {
-      if (!this.wasmExports) return null;
-
-      const totalCount = this.wasmExports.get_event_count();
-      const capacity = typeof this.wasmExports.get_capacity === 'function' ? this.wasmExports.get_capacity() : 16384;
-      const ptr = this.wasmExports.get_buffer_ptr();
-      const memory = this.wasmExports.memory.buffer;
-      const view = new DataView(memory, ptr);
-
+      let totalCount = 0;
+      let capacity = 16384;
       const events = [];
-      const STRIDE = 32;
 
-      // Extract events in chronological order from circular ring buffer
-      const startSeq = totalCount > capacity ? totalCount - capacity : 0;
+      if (this.wasmExports) {
+        totalCount = this.wasmExports.get_event_count();
+        capacity = typeof this.wasmExports.get_capacity === 'function' ? this.wasmExports.get_capacity() : 16384;
+        const ptr = this.wasmExports.get_buffer_ptr();
+        const memory = this.wasmExports.memory.buffer;
+        const view = new DataView(memory, ptr);
+        const STRIDE = 32;
 
-      for (let s = startSeq; s < totalCount; s++) {
-        const slot = s & (capacity - 1);
-        const offset = slot * STRIDE;
-        const op_id = view.getUint32(offset + 0, true);
-        const op_type = view.getUint16(offset + 4, true);
-        const step_id = view.getUint16(offset + 6, true);
-        const phase = view.getUint8(offset + 8);
-        const track_index = view.getUint8(offset + 9);
-        const extra_data = view.getUint32(offset + 12, true);
-        const timestamp_ms = view.getFloat64(offset + 16, true);
-        const duration_ms = view.getFloat64(offset + 24, true);
+        // Extract events in chronological order from circular ring buffer
+        const startSeq = totalCount > capacity ? totalCount - capacity : 0;
 
-        events.push({
-          seq: s,
-          op_id,
-          op_type: OP_NAMES[op_type] || `OP_${op_type}`,
-          step_id,
-          step_name: STEP_NAMES[step_id] || `STEP_${step_id}`,
-          phase: phase === PHASE.START ? 'START' : phase === PHASE.END ? 'END' : 'POINT',
-          track_index: track_index === 255 ? null : track_index,
-          extra_data,
-          timestamp_ms: Number(timestamp_ms.toFixed(4)),
-          duration_ms: Number(duration_ms.toFixed(4))
-        });
+        for (let s = startSeq; s < totalCount; s++) {
+          const slot = s & (capacity - 1);
+          const offset = slot * STRIDE;
+          const op_id = view.getUint32(offset + 0, true);
+          const op_type = view.getUint16(offset + 4, true);
+          const step_id = view.getUint16(offset + 6, true);
+          const phase = view.getUint8(offset + 8);
+          const track_index = view.getUint8(offset + 9);
+          const extra_data = view.getUint32(offset + 12, true);
+          const timestamp_ms = view.getFloat64(offset + 16, true);
+          const duration_ms = view.getFloat64(offset + 24, true);
+
+          events.push({
+            seq: s,
+            op_id,
+            op_type: OP_NAMES[op_type] || `OP_${op_type}`,
+            step_id,
+            step_name: STEP_NAMES[step_id] || `STEP_${step_id}`,
+            phase: phase === PHASE.START ? 'START' : phase === PHASE.END ? 'END' : 'POINT',
+            track_index: track_index === 255 ? null : track_index,
+            extra_data,
+            timestamp_ms: Number(timestamp_ms.toFixed(4)),
+            duration_ms: Number(duration_ms.toFixed(4))
+          });
+        }
       }
 
       // Compute initial summary metrics per step for quick human review
@@ -404,6 +617,28 @@
       const isIOS = /iPad|iPhone|iPod/.test(userAgent) || (typeof navigator !== 'undefined' && navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
       const isAndroid = /Android/.test(userAgent);
       const detectedDevice = isIOS ? 'ios' : isAndroid ? 'android' : 'desktop';
+      const audioSessionType = (typeof navigator !== 'undefined' && navigator.audioSession)
+        ? (navigator.audioSession.type || 'supported_unset')
+        : 'unsupported';
+
+      let recoveredUnfinishedSession = null;
+      let persistedLastSession = null;
+      if (typeof localStorage !== 'undefined') {
+        try {
+          const prevHangRaw = localStorage.getItem(STORAGE_KEY_PREV_HANG);
+          if (prevHangRaw) recoveredUnfinishedSession = JSON.parse(prevHangRaw);
+        } catch (e) {}
+        try {
+          const activeRaw = localStorage.getItem(STORAGE_KEY_ACTIVE);
+          if (activeRaw) {
+            const parsed = JSON.parse(activeRaw);
+            const curId = this.recordingSession ? this.recordingSession.sessionId : null;
+            if (!curId || !parsed?.session || parsed.session.sessionId !== curId) {
+              persistedLastSession = parsed;
+            }
+          }
+        } catch (e) {}
+      }
 
       return {
         format: 'nanodaw_telemetry_profile_v2',
@@ -414,6 +649,7 @@
           userAgent,
           isIOS,
           isAndroid,
+          audioSessionType,
           devicePixelRatio: typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1,
           screen: {
             width: typeof window !== 'undefined' && window.screen ? window.screen.width : 0,
@@ -429,8 +665,16 @@
           bufferCapacity: capacity,
           bufferWrapped: totalCount > capacity,
           eventsExported: events.length,
+          diagEntriesExported: this.diagLogs.length,
           totalOps: this.currentOpId,
           ...extraMeta
+        },
+        recordingDiagnostics: {
+          activeSession: this.recordingSession,
+          diagCount: this.diagLogs.length,
+          entries: this.diagLogs,
+          recoveredUnfinishedSession,
+          persistedLastSession
         },
         stepDictionary: STEP_NAMES,
         stepStats,
@@ -443,7 +687,12 @@
      */
     downloadProfile(extraMeta = {}) {
       const data = this.exportProfile(extraMeta);
-      if (!data || data.events.length === 0) {
+      const hasDiag = data && data.recordingDiagnostics && (
+        data.recordingDiagnostics.diagCount > 0 ||
+        data.recordingDiagnostics.recoveredUnfinishedSession ||
+        data.recordingDiagnostics.persistedLastSession
+      );
+      if (!data || (data.events.length === 0 && !hasDiag)) {
         return { success: false, message: 'No activity recorded yet.' };
       }
 
@@ -461,15 +710,16 @@
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
-        document.body.removeChild(a);
+        if (a.parentNode) document.body.removeChild(a);
         URL.revokeObjectURL(url);
-      }, 1000);
+      }, 2000);
 
       return {
         success: true,
         filename,
         totalOps: data.meta.totalOps,
-        totalEvents: data.meta.eventsExported
+        totalEvents: data.meta.eventsExported,
+        totalDiag: data.meta.diagEntriesExported
       };
     }
   }
@@ -492,6 +742,13 @@
           opType: OP.SYSTEM,
           extraData: e.lineno || 0
         });
+        zoomProfiler.logDiag('WINDOW_ERROR', {
+          message: e.message || String(e),
+          filename: e.filename || '',
+          lineno: e.lineno || 0,
+          colno: e.colno || 0,
+          stack: e.error && e.error.stack ? String(e.error.stack).slice(0, 600) : undefined
+        }, { level: 'error', forcePersist: true });
       } catch (err) {}
     });
     window.addEventListener('unhandledrejection', (e) => {
@@ -500,6 +757,12 @@
           opType: OP.SYSTEM,
           extraData: 999
         });
+        const reason = e.reason;
+        zoomProfiler.logDiag('UNHANDLED_PROMISE_REJECTION', {
+          name: reason && reason.name ? reason.name : undefined,
+          message: reason && reason.message ? reason.message : String(reason),
+          stack: reason && reason.stack ? String(reason.stack).slice(0, 600) : undefined
+        }, { level: 'error', forcePersist: true });
       } catch (err) {}
     });
     window.dumpLog = (extraMeta) => zoomProfiler.exportProfile(extraMeta);

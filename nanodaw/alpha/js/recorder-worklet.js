@@ -25,6 +25,16 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
     this.minRefractorySamples = 6000; // ~136ms refractory window at 44.1kHz
     this.ambientFloor = 0.005;
 
+    // Zero-overhead audio-thread telemetry counters (read only on ping_diag or first quantum)
+    this.processCalls = 0;
+    this.emptyInputCalls = 0;
+    this.lastInputChannels = 0;
+    this.chunksPosted = 0;
+    this.poolMisses = 0;
+    this.ch0Peak = 0;
+    this.ch1Peak = 0;
+    this.firstProcessReported = false;
+
     this.port.onmessage = (e) => {
       const data = e.data;
       if (!data) return;
@@ -45,9 +55,33 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
           this.totalSamplesProcessed = 0;
           this.lastTransientSample = -999999;
           this.writeIndex = 0;
+          this.processCalls = 0;
+          this.emptyInputCalls = 0;
+          this.chunksPosted = 0;
+          this.poolMisses = 0;
+          this.ch0Peak = 0;
+          this.ch1Peak = 0;
+          this.firstProcessReported = false;
         }
       } else if (data.type === 'flush') {
         this.flushPartial();
+      } else if (data.type === 'ping_diag') {
+        this.port.postMessage({
+          type: 'worklet_diag',
+          processCalls: this.processCalls,
+          emptyInputCalls: this.emptyInputCalls,
+          inputChannels: this.lastInputChannels,
+          chunksPosted: this.chunksPosted,
+          poolLen: this.bufferPool.length,
+          poolMisses: this.poolMisses,
+          totalSamples: this.totalSamplesProcessed,
+          ch0Peak: this.ch0Peak,
+          ch1Peak: this.ch1Peak,
+          workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
+          workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
+        });
+        this.ch0Peak = 0;
+        this.ch1Peak = 0;
       }
     };
   }
@@ -56,8 +90,11 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
     if (this.writeIndex > 0 && this.activeBuffer) {
       const validSamples = this.writeIndex;
       const toSend = this.activeBuffer;
-      this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+      const nextBuf = this.bufferPool.pop();
+      if (!nextBuf) this.poolMisses++;
+      this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
       this.writeIndex = 0;
+      this.chunksPosted++;
       this.port.postMessage({
         type: 'audio_chunk',
         buffer: toSend,
@@ -69,10 +106,40 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
 
   process(inputs, outputs, parameters) {
     if (!this.isRecording) return true;
-    const inputChannel = inputs[0] ? inputs[0][0] : null;
-    if (!inputChannel || inputChannel.length === 0) return true;
+    this.processCalls++;
+    const in0 = inputs[0];
+    const chCount = in0 ? in0.length : 0;
+    this.lastInputChannels = chCount;
+    const inputChannel = chCount > 0 ? in0[0] : null;
+
+    if (!this.firstProcessReported) {
+      this.firstProcessReported = true;
+      this.port.postMessage({
+        type: 'worklet_first_process',
+        inputCount: inputs.length,
+        channelCount: chCount,
+        frameLen: inputChannel ? inputChannel.length : 0,
+        workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
+        workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
+      });
+    }
+
+    if (!inputChannel || inputChannel.length === 0) {
+      this.emptyInputCalls++;
+      return true;
+    }
 
     const len = inputChannel.length; // Always 128 frames in standard Web Audio
+    const ch1 = chCount > 1 ? in0[1] : null;
+    for (let i = 0; i < len; i++) {
+      const a0 = Math.abs(inputChannel[i]);
+      if (a0 > this.ch0Peak) this.ch0Peak = a0;
+      if (ch1) {
+        const a1 = Math.abs(ch1[i]);
+        if (a1 > this.ch1Peak) this.ch1Peak = a1;
+      }
+    }
+
     let readIdx = 0;
 
     // Low-overhead transient detection during calibration
@@ -106,7 +173,9 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
 
     while (readIdx < len) {
       if (!this.activeBuffer) {
-        this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+        const nextBuf = this.bufferPool.pop();
+        if (!nextBuf) this.poolMisses++;
+        this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
         this.writeIndex = 0;
       }
       const available = this.chunkSize - this.writeIndex;
@@ -122,8 +191,11 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
       if (this.writeIndex >= this.chunkSize) {
         // Buffer full! Post to main thread via zero-copy Transferable ArrayBuffer
         const fullBuf = this.activeBuffer;
-        this.activeBuffer = this.bufferPool.pop() || new Float32Array(this.chunkSize);
+        const nextBuf = this.bufferPool.pop();
+        if (!nextBuf) this.poolMisses++;
+        this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
         this.writeIndex = 0;
+        this.chunksPosted++;
         this.port.postMessage({
           type: 'audio_chunk',
           buffer: fullBuf,
