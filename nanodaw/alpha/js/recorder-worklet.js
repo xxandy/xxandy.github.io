@@ -2,6 +2,7 @@
  * Nanodaw High-Performance Zero-Allocation AudioWorklet Recorder
  * Runs on the dedicated high-priority Audio Rendering Thread.
  * Completely decoupled from the browser main UI thread.
+ * Supports arbitrary discrete mono input channels (1..16) and paired stereo streams (1/2, 3/4, ...).
  */
 
 class NanodawRecorderProcessor extends AudioWorkletProcessor {
@@ -9,16 +10,25 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
     super();
     this.chunkSize = 4096; // 4096 frames @ 44.1kHz = ~92.8ms per transfer
     this.bufferPool = [];
+    this.bufferPoolR = [];
 
-    // Pre-allocate 8 standby chunk buffers in the audio thread
+    // Pre-allocate 8 standby chunk buffers per channel in the audio thread
     for (let i = 0; i < 8; i++) {
       this.bufferPool.push(new Float32Array(this.chunkSize));
+      this.bufferPoolR.push(new Float32Array(this.chunkSize));
     }
     this.activeBuffer = this.bufferPool.pop();
+    this.activeBufferR = this.bufferPoolR.pop();
     this.monoScratch = new Float32Array(512);
     this.writeIndex = 0;
     this.isRecording = true;
     this.totalSamplesProcessed = 0;
+
+    // Input channel / stereo pair routing configuration
+    this.channelMode = 'mono'; // 'mono' | 'stereo' | 'auto'
+    this.selectedChannel = 0;
+    this.stereoLeftChannel = 0;
+    this.stereoRightChannel = 1;
 
     // Real-time transient tracking for count-in & sync calibration clicks
     this.detectTransients = false;
@@ -27,9 +37,10 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
     this.lastTransientSample = -999999;
     this.ambientFloor = 0.003;
 
-    // Multi-channel smart mono envelope followers (supports Ch1, Ch2 on USB interfaces like AIR 192|8, or stereo mics)
-    this.ch0Env = 0;
-    this.ch1Env = 0;
+    // Multi-channel envelope followers & peak telemetry (up to 16 discrete USB channels, e.g. AIR 192|8 & AIR 192|14)
+    this.maxTrackedChannels = 16;
+    this.channelEnvs = new Float32Array(this.maxTrackedChannels);
+    this.channelPeaks = new Float32Array(this.maxTrackedChannels);
 
     // Zero-overhead audio-thread telemetry counters (read only on ping_diag or first quantum)
     this.processCalls = 0;
@@ -45,12 +56,30 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
       const data = e.data;
       if (!data) return;
 
-      if (data.type === 'recycle_buffer' && data.buffer) {
-        // Recycle returned buffer back into standby pool with zero GC allocation
-        if (data.buffer.byteLength === this.chunkSize * 4 && this.bufferPool.length < 16) {
+      if (data.type === 'recycle_buffer') {
+        // Recycle returned buffers back into standby pools with zero GC allocation
+        if (data.buffer && data.buffer.byteLength === this.chunkSize * 4 && this.bufferPool.length < 16) {
           this.bufferPool.push(new Float32Array(data.buffer));
         }
+        if (data.bufferR && data.bufferR.byteLength === this.chunkSize * 4 && this.bufferPoolR.length < 16) {
+          this.bufferPoolR.push(new Float32Array(data.bufferR));
+        }
       } else if (data.type === 'set_config') {
+        if (typeof data.channelMode === 'string' && (data.channelMode === 'mono' || data.channelMode === 'stereo' || data.channelMode === 'auto')) {
+          if (data.channelMode !== this.channelMode && this.writeIndex > 0) {
+            this.flushPartial();
+          }
+          this.channelMode = data.channelMode;
+        }
+        if (typeof data.selectedChannel === 'number' && data.selectedChannel >= 0) {
+          this.selectedChannel = data.selectedChannel | 0;
+        }
+        if (typeof data.stereoLeftChannel === 'number' && data.stereoLeftChannel >= 0) {
+          this.stereoLeftChannel = data.stereoLeftChannel | 0;
+        }
+        if (typeof data.stereoRightChannel === 'number' && data.stereoRightChannel >= 0) {
+          this.stereoRightChannel = data.stereoRightChannel | 0;
+        }
         if (typeof data.detectTransients === 'boolean') {
           this.detectTransients = data.detectTransients;
         }
@@ -74,30 +103,41 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
           this.poolMisses = 0;
           this.ch0Peak = 0;
           this.ch1Peak = 0;
-          this.ch0Env = 0;
-          this.ch1Env = 0;
+          this.channelEnvs.fill(0);
+          this.channelPeaks.fill(0);
           this.firstProcessReported = false;
         }
       } else if (data.type === 'flush') {
         this.flushPartial();
       } else if (data.type === 'ping_diag') {
+        const reportedCh = Math.min(this.maxTrackedChannels, Math.max(2, this.lastInputChannels));
+        const peaksSnap = [];
+        for (let c = 0; c < reportedCh; c++) {
+          peaksSnap.push(this.channelPeaks[c]);
+        }
         this.port.postMessage({
           type: 'worklet_diag',
           processCalls: this.processCalls,
           emptyInputCalls: this.emptyInputCalls,
           inputChannels: this.lastInputChannels,
+          channelMode: this.channelMode,
+          selectedChannel: this.selectedChannel,
+          stereoPair: this.channelMode === 'stereo' ? [this.stereoLeftChannel, this.stereoRightChannel] : null,
           chunksPosted: this.chunksPosted,
           poolLen: this.bufferPool.length,
+          poolRLen: this.bufferPoolR.length,
           poolMisses: this.poolMisses,
           totalSamples: this.totalSamplesProcessed,
           ch0Peak: this.ch0Peak,
           ch1Peak: this.ch1Peak,
+          channelPeaks: peaksSnap,
           transientThreshold: this.transientThreshold,
           workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
           workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
         });
         this.ch0Peak = 0;
         this.ch1Peak = 0;
+        this.channelPeaks.fill(0);
       }
     };
   }
@@ -109,14 +149,33 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
       const nextBuf = this.bufferPool.pop();
       if (!nextBuf) this.poolMisses++;
       this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
-      this.writeIndex = 0;
-      this.chunksPosted++;
-      this.port.postMessage({
-        type: 'audio_chunk',
-        buffer: toSend,
-        length: validSamples,
-        sampleOffset: this.totalSamplesProcessed - validSamples
-      }, [toSend.buffer]);
+
+      if (this.channelMode === 'stereo') {
+        const toSendR = this.activeBufferR || new Float32Array(this.chunkSize);
+        const nextBufR = this.bufferPoolR.pop();
+        if (!nextBufR) this.poolMisses++;
+        this.activeBufferR = nextBufR || new Float32Array(this.chunkSize);
+        this.writeIndex = 0;
+        this.chunksPosted++;
+        this.port.postMessage({
+          type: 'audio_chunk',
+          buffer: toSend,
+          bufferR: toSendR,
+          channels: 2,
+          length: validSamples,
+          sampleOffset: this.totalSamplesProcessed - validSamples
+        }, [toSend.buffer, toSendR.buffer]);
+      } else {
+        this.writeIndex = 0;
+        this.chunksPosted++;
+        this.port.postMessage({
+          type: 'audio_chunk',
+          buffer: toSend,
+          channels: 1,
+          length: validSamples,
+          sampleOffset: this.totalSamplesProcessed - validSamples
+        }, [toSend.buffer]);
+      }
     }
   }
 
@@ -134,6 +193,9 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
         type: 'worklet_first_process',
         inputCount: inputs.length,
         channelCount: chCount,
+        channelMode: this.channelMode,
+        selectedChannel: this.selectedChannel,
+        stereoPair: this.channelMode === 'stereo' ? [this.stereoLeftChannel, this.stereoRightChannel] : null,
         frameLen: ch0 ? ch0.length : 0,
         workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
         workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
@@ -146,35 +208,86 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
     }
 
     const len = ch0.length; // Typically 128 frames in standard Web Audio
-    const ch1 = (chCount > 1 && in0[1] && in0[1].length === len) ? in0[1] : null;
+    const trackedCh = Math.min(this.maxTrackedChannels, chCount);
 
-    for (let i = 0; i < len; i++) {
-      const a0 = Math.abs(ch0[i]);
-      if (a0 > this.ch0Peak) this.ch0Peak = a0;
-      this.ch0Env = a0 > this.ch0Env ? a0 : this.ch0Env * 0.9992;
-      if (ch1) {
-        const a1 = Math.abs(ch1[i]);
-        if (a1 > this.ch1Peak) this.ch1Peak = a1;
-        this.ch1Env = a1 > this.ch1Env ? a1 : this.ch1Env * 0.9992;
+    for (let c = 0; c < trackedCh; c++) {
+      const chArr = in0[c];
+      if (!chArr || chArr.length < len) continue;
+      let pk = this.channelPeaks[c];
+      let env = this.channelEnvs[c];
+      for (let i = 0; i < len; i++) {
+        const a = Math.abs(chArr[i]);
+        if (a > pk) pk = a;
+        env = a > env ? a : env * 0.9992;
       }
+      this.channelPeaks[c] = pk;
+      this.channelEnvs[c] = env;
     }
+    this.ch0Peak = this.channelPeaks[0];
+    this.ch1Peak = trackedCh > 1 ? this.channelPeaks[1] : 0;
 
-    // Select active USB channel at unity gain (Ch1 or Ch2), or 50/50 sum when true stereo
-    let monoSrc = ch0;
-    if (ch1) {
-      if (this.ch1Env > this.ch0Env * 2.8 && this.ch1Env > 0.001) {
-        monoSrc = ch1;
-      } else if (this.ch0Env > this.ch1Env * 2.8) {
-        monoSrc = ch0;
-      } else {
+    let srcL = ch0;
+    let srcR = null;
+    let detectSrc = ch0;
+
+    if (this.channelMode === 'stereo') {
+      const idxL = Math.max(0, Math.min(this.stereoLeftChannel, chCount - 1));
+      const idxR = Math.max(0, Math.min(this.stereoRightChannel, chCount - 1));
+      srcL = (in0[idxL] && in0[idxL].length === len) ? in0[idxL] : ch0;
+      srcR = (in0[idxR] && in0[idxR].length === len) ? in0[idxR] : srcL;
+
+      if (this.detectTransients) {
         if (this.monoScratch.length < len) {
           this.monoScratch = new Float32Array(len);
         }
+        // Max-magnitude signed composite across L & R: tapping either mic triggers at full 1.0x gain without phase cancellation
         for (let i = 0; i < len; i++) {
-          this.monoScratch[i] = 0.5 * (ch0[i] + ch1[i]);
+          const sL = srcL[i];
+          const sR = srcR[i];
+          this.monoScratch[i] = Math.abs(sL) >= Math.abs(sR) ? sL : sR;
         }
-        monoSrc = this.monoScratch;
+        detectSrc = this.monoScratch;
       }
+    } else if (this.channelMode === 'mono') {
+      const idxM = Math.max(0, Math.min(this.selectedChannel, chCount - 1));
+      srcL = (in0[idxM] && in0[idxM].length === len) ? in0[idxM] : ch0;
+      detectSrc = srcL;
+    } else {
+      // 'auto' mode: pick strongest active channel at unity gain, or 50/50 sum of top 2 balanced channels
+      if (trackedCh > 1) {
+        let bestIdx = 0;
+        let secondIdx = 1;
+        if (this.channelEnvs[1] > this.channelEnvs[0]) {
+          bestIdx = 1;
+          secondIdx = 0;
+        }
+        for (let c = 2; c < trackedCh; c++) {
+          const envC = this.channelEnvs[c];
+          if (envC > this.channelEnvs[bestIdx]) {
+            secondIdx = bestIdx;
+            bestIdx = c;
+          } else if (envC > this.channelEnvs[secondIdx]) {
+            secondIdx = c;
+          }
+        }
+        const bestEnv = this.channelEnvs[bestIdx];
+        const secondEnv = this.channelEnvs[secondIdx];
+        const chBest = (in0[bestIdx] && in0[bestIdx].length === len) ? in0[bestIdx] : ch0;
+        const chSec = (in0[secondIdx] && in0[secondIdx].length === len) ? in0[secondIdx] : ch0;
+
+        if (bestEnv > secondEnv * 2.4 && bestEnv > 0.0008) {
+          srcL = chBest;
+        } else {
+          if (this.monoScratch.length < len) {
+            this.monoScratch = new Float32Array(len);
+          }
+          for (let i = 0; i < len; i++) {
+            this.monoScratch[i] = 0.5 * (chBest[i] + chSec[i]);
+          }
+          srcL = this.monoScratch;
+        }
+      }
+      detectSrc = srcL;
     }
 
     // Low-overhead sample-accurate transient detection using user sensitivity threshold
@@ -184,7 +297,7 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
       let maxDiff = 0;
       let sumSq = 0;
       for (let i = 0; i < len; i++) {
-        const val = monoSrc[i];
+        const val = detectSrc[i];
         const absVal = Math.abs(val);
         if (absVal > peak) {
           peak = absVal;
@@ -192,7 +305,7 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
         }
         sumSq += val * val;
         if (i > 0) {
-          const d = Math.abs(val - monoSrc[i - 1]);
+          const d = Math.abs(val - detectSrc[i - 1]);
           if (d > maxDiff) maxDiff = d;
         }
       }
@@ -221,6 +334,8 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
     }
 
     let readIdx = 0;
+    const isStereo = (this.channelMode === 'stereo' && srcR !== null);
+
     while (readIdx < len) {
       if (!this.activeBuffer) {
         const nextBuf = this.bufferPool.pop();
@@ -228,30 +343,63 @@ class NanodawRecorderProcessor extends AudioWorkletProcessor {
         this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
         this.writeIndex = 0;
       }
+      if (isStereo && !this.activeBufferR) {
+        const nextBufR = this.bufferPoolR.pop();
+        if (!nextBufR) this.poolMisses++;
+        this.activeBufferR = nextBufR || new Float32Array(this.chunkSize);
+      }
+
       const available = this.chunkSize - this.writeIndex;
       const toCopy = Math.min(len - readIdx, available);
 
-      for (let i = 0; i < toCopy; i++) {
-        this.activeBuffer[this.writeIndex + i] = monoSrc[readIdx + i];
+      if (isStereo) {
+        for (let i = 0; i < toCopy; i++) {
+          this.activeBuffer[this.writeIndex + i] = srcL[readIdx + i];
+          this.activeBufferR[this.writeIndex + i] = srcR[readIdx + i];
+        }
+      } else {
+        for (let i = 0; i < toCopy; i++) {
+          this.activeBuffer[this.writeIndex + i] = srcL[readIdx + i];
+        }
       }
+
       this.writeIndex += toCopy;
       readIdx += toCopy;
       this.totalSamplesProcessed += toCopy;
 
       if (this.writeIndex >= this.chunkSize) {
-        // Buffer full! Post to main thread via zero-copy Transferable ArrayBuffer
+        // Buffer full! Post to main thread via zero-copy Transferable ArrayBuffer(s)
         const fullBuf = this.activeBuffer;
         const nextBuf = this.bufferPool.pop();
         if (!nextBuf) this.poolMisses++;
         this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
-        this.writeIndex = 0;
-        this.chunksPosted++;
-        this.port.postMessage({
-          type: 'audio_chunk',
-          buffer: fullBuf,
-          length: this.chunkSize,
-          sampleOffset: this.totalSamplesProcessed - this.chunkSize
-        }, [fullBuf.buffer]);
+
+        if (isStereo) {
+          const fullBufR = this.activeBufferR;
+          const nextBufR = this.bufferPoolR.pop();
+          if (!nextBufR) this.poolMisses++;
+          this.activeBufferR = nextBufR || new Float32Array(this.chunkSize);
+          this.writeIndex = 0;
+          this.chunksPosted++;
+          this.port.postMessage({
+            type: 'audio_chunk',
+            buffer: fullBuf,
+            bufferR: fullBufR,
+            channels: 2,
+            length: this.chunkSize,
+            sampleOffset: this.totalSamplesProcessed - this.chunkSize
+          }, [fullBuf.buffer, fullBufR.buffer]);
+        } else {
+          this.writeIndex = 0;
+          this.chunksPosted++;
+          this.port.postMessage({
+            type: 'audio_chunk',
+            buffer: fullBuf,
+            channels: 1,
+            length: this.chunkSize,
+            sampleOffset: this.totalSamplesProcessed - this.chunkSize
+          }, [fullBuf.buffer]);
+        }
       }
     }
 

@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=72">
+  <link rel="stylesheet" href="styles.css?v=73">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -25,7 +25,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v72</span>
+        <span class="version-badge" id="appVersionBadge">v73</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -458,11 +458,21 @@
       </div>
       <div class="modal-body" style="display:flex; flex-direction:column; gap:16px;">
         <!-- Tab 1: Audio Record Content -->
-        <div id="tabContentRecord" style="display:flex; flex-direction:column; gap:16px;">
-          <div>
-            <label style="display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Input Device:</label>
-            <select class="input-styled" id="recordDeviceSelect" style="width:100%; cursor:pointer;">
+        <div id="tabContentRecord" style="display:flex; flex-direction:column; gap:14px;">
+          <div class="record-device-group">
+            <label for="recordDeviceSelect" class="record-field-label">Input Device:</label>
+            <select class="input-styled record-select-control" id="recordDeviceSelect" name="recordDeviceSelect">
               <option value="">Default Microphone</option>
+            </select>
+          </div>
+
+          <div class="record-channel-row" id="recordChannelRow">
+            <div class="record-channel-label-row">
+              <label for="recordChannelSelect" class="record-field-label" style="margin-bottom:0;">Input Channel / Pair:</label>
+              <span id="recordChannelStatusBadge" class="record-channel-badge" role="status" aria-live="polite">1 ch active</span>
+            </div>
+            <select class="input-styled record-select-control" id="recordChannelSelect" name="recordChannelSelect">
+              <option value="mono:0">Input 1 (Mono)</option>
             </select>
           </div>
 
@@ -602,18 +612,29 @@
                 <div id="recordVUPeakBadge" class="vu-peak-badge" title="Flashes when a sync tap peak is detected">PEAK</div>
               </div>
 
-              <!-- VU Label -->
-              <div style="font-size:8px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; margin:2px 0;">VU</div>
+              <!-- VU Label (VU in Mono, L · R in Stereo) -->
+              <div id="recordVUModeLabel" class="vu-mode-label">VU</div>
 
-              <!-- Meter Bar + Superimposed Vertical Sensitivity Slider Stack -->
+              <!-- Meter Bar(s) + Superimposed Vertical Sensitivity Slider Stack -->
               <div class="vu-meter-stack-wrap" id="vuMeterStackWrap">
-                <div id="recordVUMeterTrack" class="vu-meter-track-inner">
-                  <!-- Active Detection Zone Tint Above Threshold -->
-                  <div id="vuSensZoneFill" class="vu-sens-zone-fill"></div>
-                  <!-- Live Level Fill -->
-                  <div id="recordVUMeterBar" style="width:100%; height:0%; background:linear-gradient(to top, #10b981 0%, #10b981 65%, #f59e0b 82%, #ef4444 100%); border-radius:3px; transition:height 0.03s ease-out; position:relative; z-index:2;"></div>
-                  <!-- Peak Hold Line -->
-                  <div id="recordVUMeterPeak" style="position:absolute; left:0; right:0; bottom:0%; height:2px; background:#fff; box-shadow:0 0 3px #fff; display:none; pointer-events:none; z-index:3;"></div>
+                <div class="vu-bars-pair" id="vuBarsPair">
+                  <div id="recordVUMeterTrack" class="vu-meter-track-inner">
+                    <!-- Active Detection Zone Tint Above Threshold -->
+                    <div id="vuSensZoneFill" class="vu-sens-zone-fill"></div>
+                    <!-- Live Level Fill (Mono or Left) -->
+                    <div id="recordVUMeterBar" style="width:100%; height:0%; background:linear-gradient(to top, #10b981 0%, #10b981 65%, #f59e0b 82%, #ef4444 100%); border-radius:3px; transition:height 0.03s ease-out; position:relative; z-index:2;"></div>
+                    <!-- Peak Hold Line -->
+                    <div id="recordVUMeterPeak" style="position:absolute; left:0; right:0; bottom:0%; height:2px; background:#fff; box-shadow:0 0 3px #fff; display:none; pointer-events:none; z-index:3;"></div>
+                  </div>
+
+                  <div id="recordVUMeterTrackR" class="vu-meter-track-inner vu-meter-track-right" style="display:none;">
+                    <!-- Active Detection Zone Tint Above Threshold -->
+                    <div id="vuSensZoneFillR" class="vu-sens-zone-fill"></div>
+                    <!-- Live Level Fill (Right) -->
+                    <div id="recordVUMeterBarR" style="width:100%; height:0%; background:linear-gradient(to top, #10b981 0%, #10b981 65%, #f59e0b 82%, #ef4444 100%); border-radius:3px; transition:height 0.03s ease-out; position:relative; z-index:2;"></div>
+                    <!-- Peak Hold Line (Right) -->
+                    <div id="recordVUMeterPeakR" style="position:absolute; left:0; right:0; bottom:0%; height:2px; background:#fff; box-shadow:0 0 3px #fff; display:none; pointer-events:none; z-index:3;"></div>
+                  </div>
                 </div>
 
                 <!-- Superimposed Peak Detection Sensitivity Slider (visible ONLY when NANOdaw sync uses peak detection) -->
@@ -743,12 +764,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=72"></script>
-  <script src="js/mp3-decoder.js?v=72"></script>
-  <script src="js/state-manager.js?v=72"></script>
-  <script src="js/waveform-cache.js?v=72"></script>
-  <script src="js/audio-engine.js?v=72"></script>
-  <script src="js/timeline-ui.js?v=72"></script>
-  <script src="js/app.js?v=72"></script>
+  <script src="js/profiler.js?v=73"></script>
+  <script src="js/mp3-decoder.js?v=73"></script>
+  <script src="js/state-manager.js?v=73"></script>
+  <script src="js/waveform-cache.js?v=73"></script>
+  <script src="js/audio-engine.js?v=73"></script>
+  <script src="js/timeline-ui.js?v=73"></script>
+  <script src="js/app.js?v=73"></script>
 </body>
 </html>

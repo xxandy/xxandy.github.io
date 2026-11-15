@@ -48,8 +48,13 @@ class WaveformCache {
 
     const duration = audioBuffer.duration;
     const totalPoints = Math.max(100, Math.floor(duration * pointsPerSec));
-    const channelData = audioBuffer.getChannelData(0);
-    const samplesPerPoint = Math.max(1, Math.floor(channelData.length / totalPoints));
+    const numChannels = Math.max(1, audioBuffer.numberOfChannels || 1);
+    const channels = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      channels.push(audioBuffer.getChannelData(ch));
+    }
+    const frameCount = channels[0].length;
+    const samplesPerPoint = Math.max(1, Math.floor(frameCount / totalPoints));
 
     const minPeaks = new Float32Array(totalPoints);
     const maxPeaks = new Float32Array(totalPoints);
@@ -58,12 +63,15 @@ class WaveformCache {
       let min = 1.0;
       let max = -1.0;
       const start = p * samplesPerPoint;
-      const end = Math.min(start + samplesPerPoint, channelData.length);
+      const end = Math.min(start + samplesPerPoint, frameCount);
 
-      for (let s = start; s < end; s++) {
-        const val = channelData[s];
-        if (val < min) min = val;
-        if (val > max) max = val;
+      for (let ch = 0; ch < numChannels; ch++) {
+        const chData = channels[ch];
+        for (let s = start; s < end; s++) {
+          const val = chData[s];
+          if (val < min) min = val;
+          if (val > max) max = val;
+        }
       }
 
       minPeaks[p] = min === 1.0 ? 0 : min;

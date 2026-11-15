@@ -663,6 +663,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const btnCloseRecordSetupModal = document.getElementById('btnCloseRecordSetupModal');
   const btnCancelRecordSetup = document.getElementById('btnCancelRecordSetup');
   const recordDeviceSelect = document.getElementById('recordDeviceSelect');
+  const recordChannelSelect = document.getElementById('recordChannelSelect');
+  const recordChannelStatusBadge = document.getElementById('recordChannelStatusBadge');
   const record2PassSync = document.getElementById('record2PassSync');
   const container2PassSync = document.getElementById('container2PassSync');
   const containerSinglePass = document.getElementById('containerSinglePass');
@@ -722,14 +724,177 @@ document.addEventListener('DOMContentLoaded', async () => {
     return isIOSPlatform || isIPadOS;
   }
 
+  // Classify input device labels across Android (where Chromium names USB interfaces "USB headset"),
+  // iOS/macOS CoreAudio, Windows WDM/WASAPI, and Linux ALSA/PipeWire.
+  function classifyInputDeviceLabel(rawLabel) {
+    const label = String(rawLabel || '').trim();
+    const isUsb = /\busb\b|m-audio|\bair\s*192|scarlett|focusrite|behringer|\bumc\d|steinberg|\bur\d|motu|presonus|audient|\bssl\b|volt\s*\d|rubix|zoom\s+[hlu]\d|tascam|line\s*6|helix|irig|apogee|rode|shure|yeti|analogue\s*\d|analog\s*\d|external\s*audio/i.test(label);
+    const isWiredHeadset = !isUsb && /\bwired\s*headset\b|\bheadset\s*microphone\b|\bearpods\b/i.test(label);
+    const isBt = !isUsb && !isWiredHeadset && !/\busb\b|\bwired\b/i.test(label) && /bluetooth|hands-free|\bhfp\b|\bsco\b|powerbeat|airpod|galaxy\s*buds|pixel\s*buds|wh-|wf-|bose|wireless|headset/i.test(label);
+    const isInternal = !isUsb && !isBt && !isWiredHeadset && /built-in|internal|phone|iphone|ipad|speakerphone|camcorder|front|back|^default\b|microphone$/i.test(label);
+    return { isUsb, isBt, isWiredHeadset, isInternal };
+  }
+
+  // Detect 1-based hardware pair numbering in WDM endpoint names such as "Analogue 3 + 4 (M-Audio AIR 192|14)" or "Line 5/6"
+  function getHardwarePairBaseChannel(deviceLabel) {
+    const clean = String(deviceLabel || '').replace(/^[^\w(]+/, '');
+    const m = clean.match(/\b(?:in(?:put)?s?|line|analog(?:ue)?|mic|ch(?:annel)?s?)\s*(\d{1,2})\s*(?:\+|\/|-|&|and)\s*(\d{1,2})\b/i)
+      || clean.match(/^(\d{1,2})\s*(?:\+|\/|-|&)\s*(\d{1,2})\b/);
+    if (m) {
+      const n1 = parseInt(m[1], 10);
+      const n2 = parseInt(m[2], 10);
+      if (n1 >= 1 && n1 <= 31 && n2 === n1 + 1) {
+        return n1;
+      }
+    }
+    return 1;
+  }
+
+  const CHANNEL_PREF_STORAGE_KEY = 'nanodaw_channel_sel_v1';
+  const deviceRawLabelById = new Map();
+  let userManuallySelectedDeviceId = null;
+
+  function getSelectedDeviceRawLabel() {
+    if (!recordDeviceSelect) return '';
+    const id = recordDeviceSelect.value || '';
+    if (deviceRawLabelById.has(id)) return deviceRawLabelById.get(id) || '';
+    const opt = recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0];
+    return opt ? opt.textContent : '';
+  }
+
+  function normalizeDevicePrefKey(deviceLabel) {
+    const clean = String(deviceLabel || 'default').toLowerCase().replace(/\s+/g, ' ').trim();
+    return clean.slice(0, 80) || 'default';
+  }
+
+  function saveChannelSelectionPref(deviceLabel, selValue) {
+    try {
+      const raw = localStorage.getItem(CHANNEL_PREF_STORAGE_KEY);
+      const map = raw ? JSON.parse(raw) : {};
+      map[normalizeDevicePrefKey(deviceLabel)] = String(selValue);
+      localStorage.setItem(CHANNEL_PREF_STORAGE_KEY, JSON.stringify(map));
+    } catch (_) {}
+  }
+
+  function loadChannelSelectionPref(deviceLabel) {
+    try {
+      const raw = localStorage.getItem(CHANNEL_PREF_STORAGE_KEY);
+      if (!raw) return null;
+      const map = JSON.parse(raw);
+      return map[normalizeDevicePrefKey(deviceLabel)] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseChannelSelection(val) {
+    const s = String(val || 'mono:0').trim();
+    if (s === 'auto') {
+      return { raw: 'auto', mode: 'auto', ch: 0, left: 0, right: 1, neededChannels: 2 };
+    }
+    if (s.startsWith('stereo:')) {
+      const parts = s.split(':');
+      const left = Math.max(0, parseInt(parts[1], 10) || 0);
+      const right = Math.max(0, parseInt(parts[2], 10) || (left + 1));
+      return {
+        raw: `stereo:${left}:${right}`,
+        mode: 'stereo',
+        ch: left,
+        left,
+        right,
+        neededChannels: Math.max(left, right) + 1
+      };
+    }
+    if (s.startsWith('mono:')) {
+      const ch = Math.max(0, parseInt(s.split(':')[1], 10) || 0);
+      return { raw: `mono:${ch}`, mode: 'mono', ch, left: ch, right: ch, neededChannels: ch + 1 };
+    }
+    return { raw: 'mono:0', mode: 'mono', ch: 0, left: 0, right: 0, neededChannels: 1 };
+  }
+
+  let vuStreamTotalCh = 1;
+  let vuStreamMaxCapCh = 1;
+
+  function updateChannelStatusBadge(hintText = null) {
+    if (!recordChannelStatusBadge) return;
+    if (hintText) {
+      recordChannelStatusBadge.textContent = hintText;
+      recordChannelStatusBadge.classList.add('signal-hint');
+      return;
+    }
+    recordChannelStatusBadge.classList.remove('signal-hint');
+    const sel = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
+    const modeTag = sel.mode === 'stereo' ? 'Stereo L/R' : (sel.mode === 'auto' ? 'Auto Mono' : 'Mono');
+    if (vuStreamMaxCapCh > vuStreamTotalCh) {
+      recordChannelStatusBadge.textContent = `${vuStreamTotalCh}/${vuStreamMaxCapCh} ch · ${modeTag}`;
+    } else {
+      recordChannelStatusBadge.textContent = `${vuStreamTotalCh} ch active · ${modeTag}`;
+    }
+  }
+
+  function populateChannelSelectOptions({ streamChannels = 1, maxCapChannels = 1, deviceLabel = '', preserveValue = true } = {}) {
+    if (!recordChannelSelect) return;
+    const prevValue = preserveValue ? recordChannelSelect.value : null;
+    const savedPref = loadChannelSelectionPref(deviceLabel);
+    const totalCh = Math.min(16, Math.max(1, streamChannels | 0, maxCapChannels | 0));
+    const baseNum = getHardwarePairBaseChannel(deviceLabel);
+
+    vuStreamTotalCh = Math.max(1, streamChannels | 0);
+    vuStreamMaxCapCh = totalCh;
+
+    recordChannelSelect.innerHTML = '';
+
+    // 1. Individual discrete mono streams: Input 1 (Mono), Input 2 (Mono), ..., Input N (Mono)
+    for (let c = 0; c < totalCh; c++) {
+      const opt = document.createElement('option');
+      opt.value = `mono:${c}`;
+      const hwNum = baseNum + c;
+      opt.textContent = `Input ${hwNum} (Mono)`;
+      recordChannelSelect.appendChild(opt);
+    }
+
+    // 2. Paired stereo streams: Stereo 1/2 (1 = L, 2 = R), Stereo 3/4 (3 = L, 4 = R), ...
+    if (totalCh >= 2) {
+      for (let c = 0; c + 1 < totalCh; c += 2) {
+        const opt = document.createElement('option');
+        opt.value = `stereo:${c}:${c + 1}`;
+        const hwL = baseNum + c;
+        const hwR = baseNum + c + 1;
+        opt.textContent = `Stereo ${hwL}/${hwR} (${hwL} = L, ${hwR} = R)`;
+        recordChannelSelect.appendChild(opt);
+      }
+
+      // 3. Smart auto-detect option for quick plug-and-play mono capture
+      const autoOpt = document.createElement('option');
+      autoOpt.value = 'auto';
+      autoOpt.textContent = 'Auto-Detect Active Input (Mono)';
+      recordChannelSelect.appendChild(autoOpt);
+    }
+
+    const validValues = new Set(Array.from(recordChannelSelect.options).map(o => o.value));
+    if (prevValue && validValues.has(prevValue)) {
+      recordChannelSelect.value = prevValue;
+    } else if (savedPref && validValues.has(savedPref)) {
+      recordChannelSelect.value = savedPref;
+    } else {
+      recordChannelSelect.value = 'mono:0';
+    }
+
+    updateChannelStatusBadge();
+  }
+
   let autoGainUserOverridden = false;
   function initAutoGainDefault() {
     if (!recordAutoGain) return;
     if (!autoGainUserOverridden) {
-      const isAppleMobile = isIOSorIPad();
-      recordAutoGain.checked = isAppleMobile;
+      const devInfo = classifyInputDeviceLabel(getSelectedDeviceRawLabel());
+      // Always disable OS Auto Gain by default for external USB audio interfaces (preserves hardware preamp gain & multi-channel streams)
+      const shouldEnable = isIOSorIPad() && !devInfo.isUsb;
+      recordAutoGain.checked = shouldEnable;
       if (recordAutoGainBadge) {
-        recordAutoGainBadge.textContent = isAppleMobile ? 'AUTO (iPad ON)' : 'AUTO (Android OFF)';
+        recordAutoGainBadge.textContent = devInfo.isUsb
+          ? 'AUTO (USB OFF)'
+          : (shouldEnable ? 'AUTO (iPad ON)' : 'AUTO (Android OFF)');
       }
     }
   }
@@ -738,6 +903,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     initAutoGainDefault();
     recordAutoGain.addEventListener('change', () => {
       autoGainUserOverridden = true;
+      if (recordAutoGain.checked && recordChannelSelect) {
+        const sel = parseChannelSelection(recordChannelSelect.value);
+        if (sel.neededChannels > 1) {
+          recordChannelSelect.value = 'mono:0';
+          showToast('Auto Gain uses mono voice processing — switched input to Input 1 (Mono).', 'info', 3500);
+        }
+      }
       if (recordAutoGainBadge) {
         recordAutoGainBadge.textContent = recordAutoGain.checked ? 'MANUAL (ON)' : 'MANUAL (OFF)';
       }
@@ -1060,6 +1232,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         extraData: 9,
         forcePersist: true
       });
+      // Hot-plug support (e.g. USB-C OTG audio interface plugged in while Record Setup modal is open)
+      if (!isRecording && recordSetupModal && !recordSetupModal.classList.contains('hidden') && recordSetupModal.style.display !== 'none') {
+        await refreshAudioInputDevices();
+        if (activeRecordModalTab === 'record') {
+          startVUMonitor(true);
+        }
+      }
     });
   }
 
@@ -1161,7 +1340,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const pass1AudioStore = new BatchedAudioStore();
+  const pass1AudioStoreR = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
+  const pass2AudioStoreR = new BatchedAudioStore();
+  let activeRecordingChannelConfig = { raw: 'mono:0', mode: 'mono', ch: 0, left: 0, right: 0, neededChannels: 1 };
+
+  // Combine Left & Right PCM using max-signed-amplitude for sync tap detection (zero -6 dB loss, zero phase cancellation)
+  function combineStereoForPeakDetection(pcmL, pcmR) {
+    if (!pcmR || pcmR.length === 0) return pcmL;
+    const len = Math.min(pcmL.length, pcmR.length);
+    const out = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      const a = pcmL[i];
+      const b = pcmR[i];
+      out[i] = Math.abs(a) >= Math.abs(b) ? a : b;
+    }
+    return out;
+  }
 
   // NANOdaw Intelligent Transient Pop & Glitch Suppressor
   // Automatically detects and seamlessly repairs micro-glitches, CoreAudio resampler slips, chassis taps, and electrical pops
@@ -1323,6 +1518,129 @@ document.addEventListener('DOMContentLoaded', async () => {
     return out;
   }
 
+  // Stereo-linked Internal Gain & Noise Suppression (preserves exact L/R stereo balance without image shifting)
+  function processStereoInternalGainAndNoiseSuppression(pcmL, pcmR, sampleRate = 44100, targetPeak = 0.75) {
+    if (!pcmR || pcmR.length === 0) {
+      return { left: processInternalGainAndNoiseSuppression(pcmL, sampleRate, targetPeak), right: null };
+    }
+    const cleanL = suppressAudioGlitches(pcmL, sampleRate);
+    const cleanR = suppressAudioGlitches(pcmR, sampleRate);
+    const len = Math.min(cleanL.length, cleanR.length);
+    const outL = new Float32Array(len);
+    const outR = new Float32Array(len);
+
+    const f_hp = 80, q_hp = 0.7071;
+    const w0_hp = 2 * Math.PI * f_hp / sampleRate;
+    const cos_hp = Math.cos(w0_hp);
+    const alpha_hp = Math.sin(w0_hp) / (2 * q_hp);
+    const a0_hp = 1 + alpha_hp;
+    const b0_hp = ((1 + cos_hp) / 2) / a0_hp;
+    const b1_hp = (-(1 + cos_hp)) / a0_hp;
+    const b2_hp = ((1 + cos_hp) / 2) / a0_hp;
+    const a1_hp = (-2 * cos_hp) / a0_hp;
+    const a2_hp = (1 - alpha_hp) / a0_hp;
+
+    const f_lp = 10500, q_lp = 0.7071;
+    const w0_lp = 2 * Math.PI * f_lp / sampleRate;
+    const cos_lp = Math.cos(w0_lp);
+    const alpha_lp = Math.sin(w0_lp) / (2 * q_lp);
+    const a0_lp = 1 + alpha_lp;
+    const b0_lp = ((1 - cos_lp) / 2) / a0_lp;
+    const b1_lp = (1 - cos_lp) / a0_lp;
+    const b2_lp = ((1 - cos_lp) / 2) / a0_lp;
+    const a1_lp = (-2 * cos_lp) / a0_lp;
+    const a2_lp = (1 - alpha_lp) / a0_lp;
+
+    function filterBiquads(src, dst) {
+      let x1_h = 0, x2_h = 0, y1_h = 0, y2_h = 0;
+      let x1_l = 0, x2_l = 0, y1_l = 0, y2_l = 0;
+      for (let i = 0; i < len; i++) {
+        const s = src[i];
+        const hp = b0_hp * s + b1_hp * x1_h + b2_hp * x2_h - a1_hp * y1_h - a2_hp * y2_h;
+        x2_h = x1_h; x1_h = s; y2_h = y1_h; y1_h = hp;
+        const lp = b0_lp * hp + b1_lp * x1_l + b2_lp * x2_l - a1_lp * y1_l - a2_lp * y2_l;
+        x2_l = x1_l; x1_l = hp; y2_l = y1_l; y2_l = lp;
+        dst[i] = lp;
+      }
+    }
+    filterBiquads(cleanL, outL);
+    filterBiquads(cleanR, outR);
+
+    let sumSq = 0;
+    const sampleLimit = Math.min(len, sampleRate);
+    for (let i = 0; i < sampleLimit; i++) {
+      const m = Math.max(Math.abs(outL[i]), Math.abs(outR[i]));
+      sumSq += m * m;
+    }
+    const estRms = sampleLimit > 0 ? Math.sqrt(sumSq / sampleLimit) : 0;
+    const gateThreshold = Math.max(0.003, estRms * 1.4);
+
+    let currentGain = 1.0;
+    const attackCoeff = Math.exp(-1 / (0.002 * sampleRate));
+    const releaseCoeff = Math.exp(-1 / (0.080 * sampleRate));
+    let maxAmp = 0;
+
+    for (let i = 0; i < len; i++) {
+      const linkedAbs = Math.max(Math.abs(outL[i]), Math.abs(outR[i]));
+      const targetGain = linkedAbs > gateThreshold ? 1.0 : 0.20;
+      if (targetGain > currentGain) {
+        currentGain = attackCoeff * currentGain + (1 - attackCoeff) * targetGain;
+      } else {
+        currentGain = releaseCoeff * currentGain + (1 - releaseCoeff) * targetGain;
+      }
+      outL[i] *= currentGain;
+      outR[i] *= currentGain;
+      const postMax = Math.max(Math.abs(outL[i]), Math.abs(outR[i]));
+      if (postMax > maxAmp) maxAmp = postMax;
+    }
+
+    if (maxAmp >= 0.003 && maxAmp < targetPeak) {
+      const gain = Math.min(25.0, targetPeak / maxAmp);
+      for (let i = 0; i < len; i++) {
+        outL[i] = Math.max(-1.0, Math.min(1.0, outL[i] * gain));
+        outR[i] = Math.max(-1.0, Math.min(1.0, outR[i] * gain));
+      }
+    } else if (maxAmp > 0.98) {
+      const gain = 0.95 / maxAmp;
+      for (let i = 0; i < len; i++) {
+        outL[i] *= gain;
+        outR[i] *= gain;
+      }
+    }
+
+    return { left: outL, right: outR };
+  }
+
+  function buildRecordedTakeAudioBuffer(ctx, pcmL, pcmR, isStereoTake, sampleRate) {
+    const minSamples = Math.round(sampleRate * 0.1);
+    let finalL = (!pcmL || pcmL.length < minSamples) ? new Float32Array(Math.round(sampleRate * 1.0)) : pcmL;
+    let finalR = null;
+    if (isStereoTake) {
+      if (!pcmR || pcmR.length < minSamples) {
+        finalR = new Float32Array(finalL.length);
+      } else if (pcmR.length !== finalL.length) {
+        const commonLen = Math.min(finalL.length, pcmR.length);
+        finalL = finalL.subarray(0, commonLen);
+        finalR = pcmR.subarray(0, commonLen);
+      } else {
+        finalR = pcmR;
+      }
+    }
+    const rampSamples = Math.min(finalL.length, Math.round(sampleRate * 0.005));
+    for (let i = 0; i < rampSamples; i++) {
+      const g = 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
+      finalL[i] *= g;
+      if (finalR) finalR[i] *= g;
+    }
+    const channels = (isStereoTake && finalR) ? 2 : 1;
+    const buf = ctx.createBuffer(channels, finalL.length, sampleRate);
+    buf.getChannelData(0).set(finalL);
+    if (channels === 2 && finalR) {
+      buf.getChannelData(1).set(finalR);
+    }
+    return buf;
+  }
+
   let workletInitPromise = null;
   let workletInitCtx = null;
 
@@ -1340,15 +1658,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=72', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=73', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=72');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=73');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=72');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=73');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -1368,19 +1686,29 @@ document.addEventListener('DOMContentLoaded', async () => {
                 super();
                 this.chunkSize = 4096;
                 this.bufferPool = [];
-                for (let i = 0; i < 8; i++) this.bufferPool.push(new Float32Array(this.chunkSize));
+                this.bufferPoolR = [];
+                for (let i = 0; i < 8; i++) {
+                  this.bufferPool.push(new Float32Array(this.chunkSize));
+                  this.bufferPoolR.push(new Float32Array(this.chunkSize));
+                }
                 this.activeBuffer = this.bufferPool.pop();
+                this.activeBufferR = this.bufferPoolR.pop();
                 this.monoScratch = new Float32Array(512);
                 this.writeIndex = 0;
                 this.isRecording = true;
                 this.totalSamplesProcessed = 0;
+                this.channelMode = 'mono';
+                this.selectedChannel = 0;
+                this.stereoLeftChannel = 0;
+                this.stereoRightChannel = 1;
                 this.detectTransients = false;
                 this.transientThreshold = 0.0631;
                 this.onsetRatio = 1.65;
                 this.lastTransientSample = -999999;
                 this.ambientFloor = 0.003;
-                this.ch0Env = 0;
-                this.ch1Env = 0;
+                this.maxTrackedChannels = 16;
+                this.channelEnvs = new Float32Array(this.maxTrackedChannels);
+                this.channelPeaks = new Float32Array(this.maxTrackedChannels);
                 this.processCalls = 0;
                 this.emptyInputCalls = 0;
                 this.lastInputChannels = 0;
@@ -1393,11 +1721,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                 this.port.onmessage = (e) => {
                   const data = e.data;
                   if (!data) return;
-                  if (data.type === 'recycle_buffer' && data.buffer) {
-                    if (data.buffer.byteLength === this.chunkSize * 4 && this.bufferPool.length < 16) {
+                  if (data.type === 'recycle_buffer') {
+                    if (data.buffer && data.buffer.byteLength === this.chunkSize * 4 && this.bufferPool.length < 16) {
                       this.bufferPool.push(new Float32Array(data.buffer));
                     }
+                    if (data.bufferR && data.bufferR.byteLength === this.chunkSize * 4 && this.bufferPoolR.length < 16) {
+                      this.bufferPoolR.push(new Float32Array(data.bufferR));
+                    }
                   } else if (data.type === 'set_config') {
+                    if (typeof data.channelMode === 'string' && (data.channelMode === 'mono' || data.channelMode === 'stereo' || data.channelMode === 'auto')) {
+                      if (data.channelMode !== this.channelMode && this.writeIndex > 0) this.flushPartial();
+                      this.channelMode = data.channelMode;
+                    }
+                    if (typeof data.selectedChannel === 'number' && data.selectedChannel >= 0) this.selectedChannel = data.selectedChannel | 0;
+                    if (typeof data.stereoLeftChannel === 'number' && data.stereoLeftChannel >= 0) this.stereoLeftChannel = data.stereoLeftChannel | 0;
+                    if (typeof data.stereoRightChannel === 'number' && data.stereoRightChannel >= 0) this.stereoRightChannel = data.stereoRightChannel | 0;
                     if (typeof data.detectTransients === 'boolean') this.detectTransients = data.detectTransients;
                     if (typeof data.transientThreshold === 'number' && data.transientThreshold > 0) this.transientThreshold = data.transientThreshold;
                     if (typeof data.onsetRatio === 'number' && data.onsetRatio > 1.0) this.onsetRatio = data.onsetRatio;
@@ -1413,30 +1751,39 @@ document.addEventListener('DOMContentLoaded', async () => {
                       this.poolMisses = 0;
                       this.ch0Peak = 0;
                       this.ch1Peak = 0;
-                      this.ch0Env = 0;
-                      this.ch1Env = 0;
+                      this.channelEnvs.fill(0);
+                      this.channelPeaks.fill(0);
                       this.firstProcessReported = false;
                     }
                   } else if (data.type === 'flush') {
                     this.flushPartial();
                   } else if (data.type === 'ping_diag') {
+                    const reportedCh = Math.min(this.maxTrackedChannels, Math.max(2, this.lastInputChannels));
+                    const peaksSnap = [];
+                    for (let c = 0; c < reportedCh; c++) peaksSnap.push(this.channelPeaks[c]);
                     this.port.postMessage({
                       type: 'worklet_diag',
                       processCalls: this.processCalls,
                       emptyInputCalls: this.emptyInputCalls,
                       inputChannels: this.lastInputChannels,
+                      channelMode: this.channelMode,
+                      selectedChannel: this.selectedChannel,
+                      stereoPair: this.channelMode === 'stereo' ? [this.stereoLeftChannel, this.stereoRightChannel] : null,
                       chunksPosted: this.chunksPosted,
                       poolLen: this.bufferPool.length,
+                      poolRLen: this.bufferPoolR.length,
                       poolMisses: this.poolMisses,
                       totalSamples: this.totalSamplesProcessed,
                       ch0Peak: this.ch0Peak,
                       ch1Peak: this.ch1Peak,
+                      channelPeaks: peaksSnap,
                       transientThreshold: this.transientThreshold,
                       workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
                       workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
                     });
                     this.ch0Peak = 0;
                     this.ch1Peak = 0;
+                    this.channelPeaks.fill(0);
                   }
                 };
               }
@@ -1448,14 +1795,32 @@ document.addEventListener('DOMContentLoaded', async () => {
                   const nextBuf = this.bufferPool.pop();
                   if (!nextBuf) this.poolMisses++;
                   this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
-                  this.writeIndex = 0;
-                  this.chunksPosted++;
-                  this.port.postMessage({
-                    type: 'audio_chunk',
-                    buffer: toSend,
-                    length: validSamples,
-                    sampleOffset: this.totalSamplesProcessed - validSamples
-                  }, [toSend.buffer]);
+                  if (this.channelMode === 'stereo') {
+                    const toSendR = this.activeBufferR || new Float32Array(this.chunkSize);
+                    const nextBufR = this.bufferPoolR.pop();
+                    if (!nextBufR) this.poolMisses++;
+                    this.activeBufferR = nextBufR || new Float32Array(this.chunkSize);
+                    this.writeIndex = 0;
+                    this.chunksPosted++;
+                    this.port.postMessage({
+                      type: 'audio_chunk',
+                      buffer: toSend,
+                      bufferR: toSendR,
+                      channels: 2,
+                      length: validSamples,
+                      sampleOffset: this.totalSamplesProcessed - validSamples
+                    }, [toSend.buffer, toSendR.buffer]);
+                  } else {
+                    this.writeIndex = 0;
+                    this.chunksPosted++;
+                    this.port.postMessage({
+                      type: 'audio_chunk',
+                      buffer: toSend,
+                      channels: 1,
+                      length: validSamples,
+                      sampleOffset: this.totalSamplesProcessed - validSamples
+                    }, [toSend.buffer]);
+                  }
                 }
               }
 
@@ -1472,6 +1837,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                     type: 'worklet_first_process',
                     inputCount: inputs.length,
                     channelCount: chCount,
+                    channelMode: this.channelMode,
+                    selectedChannel: this.selectedChannel,
+                    stereoPair: this.channelMode === 'stereo' ? [this.stereoLeftChannel, this.stereoRightChannel] : null,
                     frameLen: ch0 ? ch0.length : 0,
                     workletSampleRate: typeof sampleRate === 'number' ? sampleRate : 0,
                     workletCurrentTime: typeof currentTime === 'number' ? currentTime : 0
@@ -1483,29 +1851,68 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 const len = ch0.length;
-                const ch1 = (chCount > 1 && in0[1] && in0[1].length === len) ? in0[1] : null;
-                for (let i = 0; i < len; i++) {
-                  const a0 = Math.abs(ch0[i]);
-                  if (a0 > this.ch0Peak) this.ch0Peak = a0;
-                  this.ch0Env = a0 > this.ch0Env ? a0 : this.ch0Env * 0.9992;
-                  if (ch1) {
-                    const a1 = Math.abs(ch1[i]);
-                    if (a1 > this.ch1Peak) this.ch1Peak = a1;
-                    this.ch1Env = a1 > this.ch1Env ? a1 : this.ch1Env * 0.9992;
+                const trackedCh = Math.min(this.maxTrackedChannels, chCount);
+                for (let c = 0; c < trackedCh; c++) {
+                  const chArr = in0[c];
+                  if (!chArr || chArr.length < len) continue;
+                  let pk = this.channelPeaks[c];
+                  let env = this.channelEnvs[c];
+                  for (let i = 0; i < len; i++) {
+                    const a = Math.abs(chArr[i]);
+                    if (a > pk) pk = a;
+                    env = a > env ? a : env * 0.9992;
                   }
+                  this.channelPeaks[c] = pk;
+                  this.channelEnvs[c] = env;
                 }
+                this.ch0Peak = this.channelPeaks[0];
+                this.ch1Peak = trackedCh > 1 ? this.channelPeaks[1] : 0;
 
-                let monoSrc = ch0;
-                if (ch1) {
-                  if (this.ch1Env > this.ch0Env * 2.8 && this.ch1Env > 0.001) {
-                    monoSrc = ch1;
-                  } else if (this.ch0Env > this.ch1Env * 2.8) {
-                    monoSrc = ch0;
-                  } else {
+                let srcL = ch0;
+                let srcR = null;
+                let detectSrc = ch0;
+
+                if (this.channelMode === 'stereo') {
+                  const idxL = Math.max(0, Math.min(this.stereoLeftChannel, chCount - 1));
+                  const idxR = Math.max(0, Math.min(this.stereoRightChannel, chCount - 1));
+                  srcL = (in0[idxL] && in0[idxL].length === len) ? in0[idxL] : ch0;
+                  srcR = (in0[idxR] && in0[idxR].length === len) ? in0[idxR] : srcL;
+                  if (this.detectTransients) {
                     if (this.monoScratch.length < len) this.monoScratch = new Float32Array(len);
-                    for (let i = 0; i < len; i++) this.monoScratch[i] = 0.5 * (ch0[i] + ch1[i]);
-                    monoSrc = this.monoScratch;
+                    for (let i = 0; i < len; i++) {
+                      const sL = srcL[i];
+                      const sR = srcR[i];
+                      this.monoScratch[i] = Math.abs(sL) >= Math.abs(sR) ? sL : sR;
+                    }
+                    detectSrc = this.monoScratch;
                   }
+                } else if (this.channelMode === 'mono') {
+                  const idxM = Math.max(0, Math.min(this.selectedChannel, chCount - 1));
+                  srcL = (in0[idxM] && in0[idxM].length === len) ? in0[idxM] : ch0;
+                  detectSrc = srcL;
+                } else {
+                  if (trackedCh > 1) {
+                    let bestIdx = 0;
+                    let secondIdx = 1;
+                    if (this.channelEnvs[1] > this.channelEnvs[0]) { bestIdx = 1; secondIdx = 0; }
+                    for (let c = 2; c < trackedCh; c++) {
+                      const envC = this.channelEnvs[c];
+                      if (envC > this.channelEnvs[bestIdx]) { secondIdx = bestIdx; bestIdx = c; }
+                      else if (envC > this.channelEnvs[secondIdx]) { secondIdx = c; }
+                    }
+                    const bestEnv = this.channelEnvs[bestIdx];
+                    const secondEnv = this.channelEnvs[secondIdx];
+                    const chBest = (in0[bestIdx] && in0[bestIdx].length === len) ? in0[bestIdx] : ch0;
+                    const chSec = (in0[secondIdx] && in0[secondIdx].length === len) ? in0[secondIdx] : ch0;
+                    if (bestEnv > secondEnv * 2.4 && bestEnv > 0.0008) {
+                      srcL = chBest;
+                    } else {
+                      if (this.monoScratch.length < len) this.monoScratch = new Float32Array(len);
+                      for (let i = 0; i < len; i++) this.monoScratch[i] = 0.5 * (chBest[i] + chSec[i]);
+                      srcL = this.monoScratch;
+                    }
+                  }
+                  detectSrc = srcL;
                 }
 
                 if (this.detectTransients) {
@@ -1514,12 +1921,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                   let maxDiff = 0;
                   let sumSq = 0;
                   for (let i = 0; i < len; i++) {
-                    const val = monoSrc[i];
+                    const val = detectSrc[i];
                     const absVal = Math.abs(val);
                     if (absVal > peak) { peak = absVal; peakOffset = i; }
                     sumSq += val * val;
                     if (i > 0) {
-                      const d = Math.abs(val - monoSrc[i - 1]);
+                      const d = Math.abs(val - detectSrc[i - 1]);
                       if (d > maxDiff) maxDiff = d;
                     }
                   }
@@ -1542,6 +1949,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 let readIdx = 0;
+                const isStereo = (this.channelMode === 'stereo' && srcR !== null);
                 while (readIdx < len) {
                   if (!this.activeBuffer) {
                     const nextBuf = this.bufferPool.pop();
@@ -1549,10 +1957,22 @@ document.addEventListener('DOMContentLoaded', async () => {
                     this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
                     this.writeIndex = 0;
                   }
+                  if (isStereo && !this.activeBufferR) {
+                    const nextBufR = this.bufferPoolR.pop();
+                    if (!nextBufR) this.poolMisses++;
+                    this.activeBufferR = nextBufR || new Float32Array(this.chunkSize);
+                  }
                   const available = this.chunkSize - this.writeIndex;
                   const toCopy = Math.min(len - readIdx, available);
-                  for (let i = 0; i < toCopy; i++) {
-                    this.activeBuffer[this.writeIndex + i] = monoSrc[readIdx + i];
+                  if (isStereo) {
+                    for (let i = 0; i < toCopy; i++) {
+                      this.activeBuffer[this.writeIndex + i] = srcL[readIdx + i];
+                      this.activeBufferR[this.writeIndex + i] = srcR[readIdx + i];
+                    }
+                  } else {
+                    for (let i = 0; i < toCopy; i++) {
+                      this.activeBuffer[this.writeIndex + i] = srcL[readIdx + i];
+                    }
                   }
                   this.writeIndex += toCopy;
                   readIdx += toCopy;
@@ -1563,14 +1983,32 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const nextBuf = this.bufferPool.pop();
                     if (!nextBuf) this.poolMisses++;
                     this.activeBuffer = nextBuf || new Float32Array(this.chunkSize);
-                    this.writeIndex = 0;
-                    this.chunksPosted++;
-                    this.port.postMessage({
-                      type: 'audio_chunk',
-                      buffer: fullBuf,
-                      length: this.chunkSize,
-                      sampleOffset: this.totalSamplesProcessed - this.chunkSize
-                    }, [fullBuf.buffer]);
+                    if (isStereo) {
+                      const fullBufR = this.activeBufferR;
+                      const nextBufR = this.bufferPoolR.pop();
+                      if (!nextBufR) this.poolMisses++;
+                      this.activeBufferR = nextBufR || new Float32Array(this.chunkSize);
+                      this.writeIndex = 0;
+                      this.chunksPosted++;
+                      this.port.postMessage({
+                        type: 'audio_chunk',
+                        buffer: fullBuf,
+                        bufferR: fullBufR,
+                        channels: 2,
+                        length: this.chunkSize,
+                        sampleOffset: this.totalSamplesProcessed - this.chunkSize
+                      }, [fullBuf.buffer, fullBufR.buffer]);
+                    } else {
+                      this.writeIndex = 0;
+                      this.chunksPosted++;
+                      this.port.postMessage({
+                        type: 'audio_chunk',
+                        buffer: fullBuf,
+                        channels: 1,
+                        length: this.chunkSize,
+                        sampleOffset: this.totalSamplesProcessed - this.chunkSize
+                      }, [fullBuf.buffer]);
+                    }
                   }
                 }
                 return true;
@@ -1614,17 +2052,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   let activeTargetStore = pass2AudioStore;
+  let activeTargetStoreR = pass2AudioStoreR;
   let activeTransientCallback = null;
 
-  async function attachRecordingPipeline({ detectTransients = false, targetStore = pass2AudioStore, onTransient = null }) {
+  async function attachRecordingPipeline({ detectTransients = false, targetStore = pass2AudioStore, targetStoreR = pass2AudioStoreR, onTransient = null }) {
     activeTargetStore = targetStore;
+    activeTargetStoreR = targetStoreR;
     activeTransientCallback = onTransient;
     recPipelineAttachPerfMs = performance.now();
     recFirstChunkLogged = false;
+    const chCfg = activeRecordingChannelConfig || { mode: 'mono', ch: 0, left: 0, right: 1, neededChannels: 1 };
 
     recDiag('REC_PIPELINE_ATTACH_START', {
       recordingState,
       detectTransients: Boolean(detectTransients),
+      channelConfig: chCfg,
       hadMicSource: Boolean(recMicSource),
       hadWorkletNode: Boolean(recWorkletNode),
       ctx: inspectAudioCtx(recAudioCtx),
@@ -1637,6 +2079,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (!recMicSource && recStream && recAudioCtx) {
       recMicSource = recAudioCtx.createMediaStreamSource(recStream);
+      try {
+        recMicSource.channelInterpretation = 'discrete';
+      } catch (_) {}
       recDiag('REC_MEDIA_STREAM_SOURCE_CREATED', {
         channelCount: recMicSource.channelCount,
         channelCountMode: recMicSource.channelCountMode,
@@ -1652,7 +2097,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     const workletOk = await ensureRecorderWorklet(recAudioCtx);
     if (workletOk) {
       if (!recWorkletNode) {
-        recWorkletNode = new AudioWorkletNode(recAudioCtx, 'nanodaw-recorder-processor');
+        try {
+          recWorkletNode = new AudioWorkletNode(recAudioCtx, 'nanodaw-recorder-processor', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            channelCountMode: 'max',
+            channelInterpretation: 'discrete'
+          });
+        } catch (_) {
+          recWorkletNode = new AudioWorkletNode(recAudioCtx, 'nanodaw-recorder-processor');
+        }
+        try {
+          recWorkletNode.channelCountMode = 'max';
+          recWorkletNode.channelInterpretation = 'discrete';
+        } catch (_) {}
+
         recWorkletNode.onprocessorerror = (errEvt) => {
           recDiag('REC_WORKLET_PROCESSOR_ERROR', {
             message: errEvt && errEvt.message ? errEvt.message : String(errEvt),
@@ -1679,6 +2138,9 @@ document.addEventListener('DOMContentLoaded', async () => {
               sinceAttachMs: Number((performance.now() - recPipelineAttachPerfMs).toFixed(2)),
               inputCount: data.inputCount,
               channelCount: data.channelCount,
+              channelMode: data.channelMode,
+              selectedChannel: data.selectedChannel,
+              stereoPair: data.stereoPair,
               frameLen: data.frameLen,
               workletSampleRate: data.workletSampleRate,
               workletCurrentTime: Number((data.workletCurrentTime || 0).toFixed(4))
@@ -1688,12 +2150,17 @@ document.addEventListener('DOMContentLoaded', async () => {
               processCalls: data.processCalls,
               emptyInputCalls: data.emptyInputCalls,
               inputChannels: data.inputChannels,
+              channelMode: data.channelMode,
+              selectedChannel: data.selectedChannel,
+              stereoPair: data.stereoPair,
               chunksPosted: data.chunksPosted,
               poolLen: data.poolLen,
+              poolRLen: data.poolRLen,
               poolMisses: data.poolMisses,
               totalSamples: data.totalSamples,
               ch0Peak: Number((data.ch0Peak || 0).toFixed(5)),
               ch1Peak: Number((data.ch1Peak || 0).toFixed(5)),
+              channelPeaks: Array.isArray(data.channelPeaks) ? data.channelPeaks.map(v => Number((v || 0).toFixed(5))) : undefined,
               transientThreshold: data.transientThreshold ? Number(data.transientThreshold.toFixed(5)) : undefined,
               workletSampleRate: data.workletSampleRate,
               workletCurrentTime: Number((data.workletCurrentTime || 0).toFixed(4))
@@ -1705,6 +2172,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           } else if (data.type === 'audio_chunk') {
             const chunk = data.buffer;
+            const chunkR = data.bufferR || null;
             const len = data.length || chunk.length;
             recChunksReceivedTotal++;
 
@@ -1715,11 +2183,16 @@ document.addEventListener('DOMContentLoaded', async () => {
               for (let i = 0; i < len; i += 8) {
                 const a = Math.abs(chunk[i]);
                 if (a > firstPeak) firstPeak = a;
+                if (chunkR) {
+                  const aR = Math.abs(chunkR[i]);
+                  if (aR > firstPeak) firstPeak = aR;
+                }
               }
               recDiag('REC_WORKLET_FIRST_CHUNK', {
                 recordingState,
                 sinceAttachMs,
                 chunkLen: len,
+                channels: data.channels || 1,
                 sampleOffset: data.sampleOffset,
                 firstPeak: Number(firstPeak.toFixed(5)),
                 ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null
@@ -1746,10 +2219,23 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (activeTargetStore) {
               activeTargetStore.append(chunk, len);
             }
+            if (chunkR && activeTargetStoreR) {
+              activeTargetStoreR.append(chunkR, len);
+            }
 
-            // Zero-allocation: recycle the transferred buffer back to worklet's standby pool
+            // Zero-allocation: recycle the transferred buffer(s) back to worklet's standby pool
             try {
-              recWorkletNode.port.postMessage({ type: 'recycle_buffer', buffer: chunk }, [chunk.buffer]);
+              if (chunkR) {
+                recWorkletNode.port.postMessage(
+                  { type: 'recycle_buffer', buffer: chunk, bufferR: chunkR },
+                  [chunk.buffer, chunkR.buffer]
+                );
+              } else {
+                recWorkletNode.port.postMessage(
+                  { type: 'recycle_buffer', buffer: chunk },
+                  [chunk.buffer]
+                );
+              }
             } catch (_) {}
           }
         };
@@ -1758,6 +2244,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       recWorkletNode.port.postMessage({
         type: 'set_config',
         isRecording: true,
+        channelMode: chCfg.mode,
+        selectedChannel: chCfg.ch,
+        stereoLeftChannel: chCfg.left,
+        stereoRightChannel: chCfg.right,
         detectTransients: !!detectTransients,
         transientThreshold: getPeakThresholdLinear(),
         onsetRatio: getPeakOnsetRatio(),
@@ -1769,7 +2259,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         mode: 'AudioWorkletNode',
         recordingState,
         durationMs: attachDur,
+        channelConfig: chCfg,
         workletChannelCount: recWorkletNode.channelCount,
+        workletChannelCountMode: recWorkletNode.channelCountMode,
+        workletChannelInterpretation: recWorkletNode.channelInterpretation,
         workletNumberOfInputs: recWorkletNode.numberOfInputs,
         transientThresholdDb: peakSensDb,
         ctxState: recAudioCtx ? recAudioCtx.state : null
@@ -1782,42 +2275,77 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
     } else {
-      // Robust fallback to 4096-sample ScriptProcessorNode
+      // Robust fallback to 4096-sample discrete ScriptProcessorNode
       if (!recScriptProcessor) {
-        const inCh = Math.min(2, Math.max(1, recMicSource ? recMicSource.channelCount || 2 : 2));
-        recScriptProcessor = recAudioCtx.createScriptProcessor(4096, inCh, 1);
+        const streamTracks = recStream && recStream.getAudioTracks ? recStream.getAudioTracks() : [];
+        const trkCh = (streamTracks[0] && typeof streamTracks[0].getSettings === 'function')
+          ? (streamTracks[0].getSettings().channelCount || 0)
+          : 0;
+        const rawInCh = Math.max(trkCh, recMicSource ? (recMicSource.channelCount || 2) : 2, chCfg.neededChannels || 1);
+        // ScriptProcessorNode requires power-of-2 or valid channel counts (1, 2, 4, 6, 8)
+        const spInCh = rawInCh > 4 ? 8 : (rawInCh > 2 ? 4 : Math.max(1, Math.min(2, rawInCh)));
+        recScriptProcessor = recAudioCtx.createScriptProcessor(4096, spInCh, 1);
+        try { recScriptProcessor.channelInterpretation = 'discrete'; } catch (_) {}
         recMicSource.connect(recScriptProcessor);
         recScriptProcessor.connect(recSilentGain);
         recSilentGain.connect(recAudioCtx.destination);
         window.__nanodaw_processor = recScriptProcessor;
       }
 
-      let spCh0Env = 0;
-      let spCh1Env = 0;
+      const spEnvs = new Float32Array(16);
       let spLastTransientMs = 0;
 
       recScriptProcessor.onaudioprocess = (e) => {
+        const numCh = e.inputBuffer.numberOfChannels;
         const ch0 = e.inputBuffer.getChannelData(0);
         const len = ch0.length;
-        const ch1 = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : null;
-        let input = ch0;
-        if (ch1) {
+        for (let c = 0; c < Math.min(16, numCh); c++) {
+          const arr = e.inputBuffer.getChannelData(c);
+          let env = spEnvs[c];
           for (let i = 0; i < len; i++) {
-            const a0 = Math.abs(ch0[i]);
-            const a1 = Math.abs(ch1[i]);
-            spCh0Env = a0 > spCh0Env ? a0 : spCh0Env * 0.9992;
-            spCh1Env = a1 > spCh1Env ? a1 : spCh1Env * 0.9992;
+            const a = Math.abs(arr[i]);
+            env = a > env ? a : env * 0.9992;
           }
-          if (spCh1Env > spCh0Env * 2.8 && spCh1Env > 0.001) {
-            input = ch1;
-          } else if (spCh0Env > spCh1Env * 2.8) {
-            input = ch0;
-          } else {
-            const mixed = new Float32Array(len);
-            for (let i = 0; i < len; i++) mixed[i] = 0.5 * (ch0[i] + ch1[i]);
-            input = mixed;
-          }
+          spEnvs[c] = env;
         }
+
+        let inputL = ch0;
+        let inputR = null;
+        let detectArr = ch0;
+
+        if (chCfg.mode === 'stereo') {
+          const idxL = Math.min(chCfg.left, numCh - 1);
+          const idxR = Math.min(chCfg.right, numCh - 1);
+          inputL = e.inputBuffer.getChannelData(idxL);
+          inputR = e.inputBuffer.getChannelData(idxR);
+          const comp = new Float32Array(len);
+          for (let i = 0; i < len; i++) {
+            comp[i] = Math.abs(inputL[i]) >= Math.abs(inputR[i]) ? inputL[i] : inputR[i];
+          }
+          detectArr = comp;
+        } else if (chCfg.mode === 'mono') {
+          const idxM = Math.min(chCfg.ch, numCh - 1);
+          inputL = e.inputBuffer.getChannelData(idxM);
+          detectArr = inputL;
+        } else if (numCh > 1) {
+          let best = 0, sec = 1;
+          if (spEnvs[1] > spEnvs[0]) { best = 1; sec = 0; }
+          for (let c = 2; c < Math.min(16, numCh); c++) {
+            if (spEnvs[c] > spEnvs[best]) { sec = best; best = c; }
+            else if (spEnvs[c] > spEnvs[sec]) { sec = c; }
+          }
+          if (spEnvs[best] > spEnvs[sec] * 2.4 && spEnvs[best] > 0.0008) {
+            inputL = e.inputBuffer.getChannelData(best);
+          } else {
+            const cA = e.inputBuffer.getChannelData(best);
+            const cB = e.inputBuffer.getChannelData(sec);
+            const mixed = new Float32Array(len);
+            for (let i = 0; i < len; i++) mixed[i] = 0.5 * (cA[i] + cB[i]);
+            inputL = mixed;
+          }
+          detectArr = inputL;
+        }
+
         recChunksReceivedTotal++;
 
         if (!recFirstChunkLogged) {
@@ -1827,7 +2355,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             recordingState,
             sinceAttachMs,
             chunkLen: len,
-            inputChannels: e.inputBuffer.numberOfChannels,
+            inputChannels: numCh,
+            channelConfig: chCfg,
             sampleRate: e.inputBuffer.sampleRate
           }, {
             stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_FIRST_CHUNK : undefined,
@@ -1851,14 +2380,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         if (activeTargetStore) {
-          activeTargetStore.append(input, len);
+          activeTargetStore.append(inputL, len);
+        }
+        if (inputR && activeTargetStoreR) {
+          activeTargetStoreR.append(inputR, len);
         }
 
         if (detectTransients && activeTransientCallback) {
           let peak = 0;
           let peakOff = 0;
           for (let i = 0; i < len; i++) {
-            const a = Math.abs(input[i]);
+            const a = Math.abs(detectArr[i]);
             if (a > peak) { peak = a; peakOff = i; }
           }
           const thresh = getPeakThresholdLinear();
@@ -1875,6 +2407,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       recDiag('REC_PIPELINE_ATTACH_COMPLETE', {
         mode: 'ScriptProcessorNode',
         recordingState,
+        channelConfig: chCfg,
         durationMs: attachDur,
         ctxState: recAudioCtx ? recAudioCtx.state : null
       }, {
@@ -2330,11 +2863,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       if (recordDeviceSelect) {
         recordDeviceSelect.innerHTML = '';
+        deviceRawLabelById.clear();
         if (audioInputs.length === 0) {
           const opt = document.createElement('option');
           opt.value = '';
           opt.textContent = '📱 Built-in Phone Mic (44.1kHz CD Quality)';
           recordDeviceSelect.appendChild(opt);
+          deviceRawLabelById.set('', 'Built-in Phone Mic');
+          populateChannelSelectOptions({ streamChannels: 1, maxCapChannels: 1, deviceLabel: 'Built-in Phone Mic', preserveValue: true });
           recDiag('REC_ENUMERATE_COMPLETE', {
             durationMs: Number((performance.now() - enumStart).toFixed(2)),
             inputCount: 0,
@@ -2345,28 +2881,38 @@ document.addEventListener('DOMContentLoaded', async () => {
             extraData: 0
           });
         } else {
-          // Identify devices:
-          // Distinguish Bluetooth headset vs Built-in phone mic
+          // Identify USB Audio Interfaces (including Android Chrome's "USB headset" label for AIR 192|8 & AIR 192|14),
+          // Built-in Phone Mic, Wired Headset, and Bluetooth Headset.
           let preferredDeviceId = null;
 
           const classified = audioInputs.map((dev, idx) => {
             const label = dev.label || `Microphone ${idx + 1}`;
-            const isBt = /bluetooth|headset|hands-free|sco|powerbeat|airpod|galaxy\s*buds|pixel\s*buds|wh-|wf-|bose|wireless/i.test(label);
-            const isInternal = /built-in|internal|phone|default|iphone|front|back|microphone$/i.test(label) && !isBt;
-            return { dev, label, isBt, isInternal };
+            const flags = classifyInputDeviceLabel(label);
+            deviceRawLabelById.set(dev.deviceId, label);
+            return { dev, label, ...flags };
           });
 
-          // Preferred mic is internal phone mic, or first non-bluetooth mic
-          const builtIn = classified.find(c => c.isInternal) || classified.find(c => !c.isBt) || classified[0];
-          if (builtIn) {
-            preferredDeviceId = builtIn.dev.deviceId;
+          const usbDevice = classified.find(c => c.isUsb);
+          const builtIn = classified.find(c => c.isInternal) || classified.find(c => !c.isBt && !c.isUsb) || classified[0];
+          const manualStillPresent = userManuallySelectedDeviceId
+            ? classified.find(c => c.dev.deviceId === userManuallySelectedDeviceId)
+            : null;
+
+          // Priority: 1) User's manual selection if still connected, 2) Connected USB Audio Interface, 3) Built-in Mic (keeps BT A2DP!)
+          const chosen = manualStillPresent || usbDevice || builtIn || classified[0];
+          if (chosen) {
+            preferredDeviceId = chosen.dev.deviceId;
           }
 
           classified.forEach((item) => {
             const opt = document.createElement('option');
             opt.value = item.dev.deviceId;
 
-            if (item.isInternal || (builtIn && item.dev.deviceId === builtIn.dev.deviceId)) {
+            if (item.isUsb) {
+              opt.textContent = `🎛️ ${item.label} (USB Audio Interface)`;
+            } else if (item.isWiredHeadset) {
+              opt.textContent = `🎙️ ${item.label} (Wired Headset)`;
+            } else if (item.isInternal || (!usbDevice && builtIn && item.dev.deviceId === builtIn.dev.deviceId && !item.isBt)) {
               opt.textContent = `📱 ${item.label || 'Built-in Phone Mic'} (44.1kHz CD Quality — Recommended)`;
             } else if (item.isBt) {
               opt.textContent = `🎧 ${item.label} (16kHz Bluetooth Voice Mode)`;
@@ -2377,11 +2923,23 @@ document.addEventListener('DOMContentLoaded', async () => {
             recordDeviceSelect.appendChild(opt);
           });
 
-          // Default to the Built-in Phone Mic:
-          // Keeps Bluetooth headphones in A2DP stereo (44.1kHz CD quality music playback) without dropping to SCO!
           if (preferredDeviceId) {
             recordDeviceSelect.value = preferredDeviceId;
           }
+
+          // Refresh Auto Gain default based on selected device (OFF for USB interfaces & Android, ON for built-in iOS mic)
+          initAutoGainDefault();
+
+          const selRawLabel = getSelectedDeviceRawLabel();
+          const selFlags = classifyInputDeviceLabel(selRawLabel);
+          const savedPref = loadChannelSelectionPref(selRawLabel);
+          const prefNeeded = savedPref ? parseChannelSelection(savedPref).neededChannels : 1;
+          populateChannelSelectOptions({
+            streamChannels: 1,
+            maxCapChannels: selFlags.isUsb ? Math.max(2, prefNeeded) : 1,
+            deviceLabel: selRawLabel,
+            preserveValue: true
+          });
 
           const enumDur = Number((performance.now() - enumStart).toFixed(2));
           recDiag('REC_ENUMERATE_COMPLETE', {
@@ -2392,6 +2950,8 @@ document.addEventListener('DOMContentLoaded', async () => {
               label: c.label,
               idPrefix: c.dev.deviceId ? String(c.dev.deviceId).slice(0, 12) : '',
               groupPrefix: c.dev.groupId ? String(c.dev.groupId).slice(0, 10) : '',
+              isUsb: c.isUsb,
+              isWiredHeadset: c.isWiredHeadset,
               isBt: c.isBt,
               isInternal: c.isInternal
             })),
@@ -2399,7 +2959,8 @@ document.addEventListener('DOMContentLoaded', async () => {
               label: o.label || '(unlabeled)',
               idPrefix: o.deviceId ? String(o.deviceId).slice(0, 12) : ''
             })),
-            autoSelectedLabel: builtIn ? builtIn.label : null,
+            autoSelectedLabel: chosen ? chosen.label : null,
+            autoSelectedIsUsb: chosen ? chosen.isUsb : false,
             autoSelectedIdPrefix: preferredDeviceId ? String(preferredDeviceId).slice(0, 12) : null
           }, {
             stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_ENUMERATE_DEVICES : undefined,
@@ -2451,11 +3012,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     return Math.round(((SENS_MAX_DB - peakSensDb) / (SENS_MAX_DB - SENS_MIN_DB)) * 100);
   }
 
+  function updateVUMeterModeLayout() {
+    const sel = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
+    const isStereo = sel.mode === 'stereo';
+    const vuContainer = document.getElementById('recordVUMeterContainer');
+    const trackR = document.getElementById('recordVUMeterTrackR');
+    const modeLabel = document.getElementById('recordVUModeLabel');
+    if (vuContainer) {
+      vuContainer.classList.toggle('stereo-active', isStereo);
+    }
+    if (trackR) {
+      trackR.style.display = isStereo ? 'flex' : 'none';
+    }
+    if (modeLabel) {
+      modeLabel.textContent = isStereo ? 'L · R' : 'VU';
+    }
+  }
+
   function updatePeakSensitivityUI() {
     const syncActive = isPeakSyncConfigured();
     const vuContainer = document.getElementById('recordVUMeterContainer');
     const peakBadge = document.getElementById('recordVUPeakBadge');
     const sensZoneFill = document.getElementById('vuSensZoneFill');
+    const sensZoneFillR = document.getElementById('vuSensZoneFillR');
     const sensOverlay = document.getElementById('peakSensitivityOverlay');
     const sensLine = document.getElementById('vuSensThresholdLine');
     const sensSlider = document.getElementById('peakSensitivitySlider');
@@ -2466,6 +3045,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pctFromBottom = Math.max(0, Math.min(100, ((peakSensDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
     const sensPct = getPeakSensitivityPercent();
 
+    updateVUMeterModeLayout();
     if (vuContainer) {
       vuContainer.classList.toggle('sync-active', syncActive);
     }
@@ -2473,6 +3053,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (sensZoneFill) {
       sensZoneFill.style.display = syncActive ? 'block' : 'none';
       sensZoneFill.style.bottom = `${pctFromBottom.toFixed(1)}%`;
+    }
+    if (sensZoneFillR) {
+      sensZoneFillR.style.display = syncActive ? 'block' : 'none';
+      sensZoneFillR.style.bottom = `${pctFromBottom.toFixed(1)}%`;
     }
     if (sensOverlay) {
       sensOverlay.style.display = syncActive ? 'block' : 'none';
@@ -2663,22 +3247,181 @@ document.addEventListener('DOMContentLoaded', async () => {
   let vuSource = null;
   let vuSplitter = null;
   let vuAnalyser = null;
-  let vuAnalyserCh1 = null;
+  let vuAnalysers = [];
   let vuAnimId = null;
   let vuPeakHold = 0;
   let vuPeakHoldTime = 0;
+  let vuPeakHoldR = 0;
+  let vuPeakHoldTimeR = 0;
   let vuClipTime = 0;
   let vuIsStarting = false;
   let vuFastEnv = 0;
+  let vuFastEnvR = 0;
   let vuAmbientFloor = 0.003;
   let vuLastTransientMs = 0;
   let vuLastCtxTime = 0;
-  let vuCh0Env = 0;
-  let vuCh1Env = 0;
+  let vuHintLastUpdateMs = 0;
   const VU_FFT_SIZE = 2048;
-  const vuDataCh0 = new Float32Array(VU_FFT_SIZE);
-  const vuDataCh1 = new Float32Array(VU_FFT_SIZE);
+  const vuChannelBuffers = [new Float32Array(VU_FFT_SIZE), new Float32Array(VU_FFT_SIZE)];
+  const vuChannelEnvs = new Float32Array(16);
   const vuMonoScratch = new Float32Array(VU_FFT_SIZE);
+
+  function ensureVuChannelBuffers(count) {
+    const target = Math.min(16, Math.max(2, count | 0));
+    while (vuChannelBuffers.length < target) {
+      vuChannelBuffers.push(new Float32Array(VU_FFT_SIZE));
+    }
+  }
+
+  function getStreamActualChannels(stream) {
+    if (!stream || !stream.getAudioTracks) return 1;
+    const trk = stream.getAudioTracks()[0];
+    if (!trk) return 1;
+    try {
+      if (typeof trk.getSettings === 'function') {
+        const s = trk.getSettings();
+        if (s && typeof s.channelCount === 'number' && s.channelCount >= 1) {
+          return s.channelCount | 0;
+        }
+      }
+    } catch (_) {}
+    return 1;
+  }
+
+  function getStreamMaxCapChannels(stream, deviceLabel = '') {
+    let maxCap = getStreamActualChannels(stream);
+    if (stream && stream.getAudioTracks && stream.getAudioTracks()[0]) {
+      const trk = stream.getAudioTracks()[0];
+      try {
+        if (typeof trk.getCapabilities === 'function') {
+          const caps = trk.getCapabilities();
+          if (caps && caps.channelCount && typeof caps.channelCount.max === 'number' && caps.channelCount.max > maxCap) {
+            maxCap = caps.channelCount.max | 0;
+          }
+        }
+      } catch (_) {}
+    }
+    // On iOS Safari, if a USB interface (e.g. AIR 192|8 or AIR 192|14) was probed at 1ch and WebKit omits channelCount.max,
+    // expose at least 2 channels (or 4 for 192|14) so the user can select Input 2 / Stereo 1/2 / Stereo 3/4!
+    if (maxCap < 2) {
+      const flags = classifyInputDeviceLabel(deviceLabel);
+      if (flags.isUsb) {
+        maxCap = /192\s*\|\s*14|\b14\b|umc404|umc1820|18i|8pre|4\s*ch/i.test(deviceLabel) ? 4 : 2;
+      }
+    }
+    return Math.min(16, Math.max(1, maxCap));
+  }
+
+  function computeTargetIdealChannelCount(deviceLabel, useAutoGain, channelSel) {
+    const flags = classifyInputDeviceLabel(deviceLabel);
+    if (useAutoGain || flags.isBt) return 1;
+    const needed = (channelSel && channelSel.neededChannels) ? channelSel.neededChannels : 1;
+    if (isIOSorIPad()) {
+      // Hang-safe iOS mode: keep stream at 1ch by default unless user explicitly selects Input 2+ or Stereo pair
+      return needed > 1 ? needed : 1;
+    }
+    // Android (Chrome AAudio/OpenSL & Firefox Gecko) + Desktop (Windows WASAPI, macOS CoreAudio, Linux PipeWire):
+    // Request non-mandatory ideal: 8 for USB interfaces (captures 2ch on AIR 192|8 and up to 4/8ch on AIR 192|14 without OverconstrainedError)
+    return flags.isUsb ? Math.max(8, needed) : Math.max(2, needed);
+  }
+
+  async function acquireMultiChannelMicStream({ deviceId = '', deviceLabel = '', useAutoGain = false, channelSel = null, targetSampleRate = undefined, exactDevice = false, diagPrefix = 'REC_GUM' } = {}) {
+    const idealCh = computeTargetIdealChannelCount(deviceLabel, useAutoGain, channelSel);
+    const gumStart = performance.now();
+
+    const attempt1 = {
+      audio: {
+        sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
+        channelCount: { ideal: idealCh },
+        echoCancellation: false,
+        autoGainControl: Boolean(useAutoGain),
+        noiseSuppression: false
+      }
+    };
+    if (deviceId) {
+      attempt1.audio.deviceId = exactDevice ? { exact: deviceId } : { ideal: deviceId };
+    }
+
+    recDiag(`${diagPrefix}_ATTEMPT_1_START`, {
+      deviceLabel,
+      idealChannels: idealCh,
+      constraints: attempt1
+    }, {
+      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+      phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
+      forcePersist: true
+    });
+
+    try {
+      const s1 = await navigator.mediaDevices.getUserMedia(attempt1);
+      const gumDur = Number((performance.now() - gumStart).toFixed(2));
+      recDiag(`${diagPrefix}_ATTEMPT_1_OK`, {
+        durationMs: gumDur,
+        idealChannels: idealCh,
+        stream: inspectMediaStream(s1)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+        duration: gumDur,
+        forcePersist: true
+      });
+      return s1;
+    } catch (e1) {
+      recDiag(`${diagPrefix}_ATTEMPT_1_FAILED`, {
+        name: e1 && e1.name ? e1.name : undefined,
+        message: e1 && e1.message ? e1.message : String(e1),
+        constraint: e1 && e1.constraint ? e1.constraint : undefined
+      }, { level: 'warn', forcePersist: true });
+
+      try {
+        const fbCh = idealCh > 2 ? 2 : 1;
+        const attempt2 = {
+          audio: {
+            sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
+            channelCount: { ideal: fbCh },
+            echoCancellation: false,
+            autoGainControl: Boolean(useAutoGain),
+            noiseSuppression: false
+          }
+        };
+        if (deviceId) {
+          attempt2.audio.deviceId = { ideal: deviceId };
+        }
+        recDiag(`${diagPrefix}_ATTEMPT_2_START`, { constraints: attempt2 }, { forcePersist: true });
+        const s2 = await navigator.mediaDevices.getUserMedia(attempt2);
+        const gumDur = Number((performance.now() - gumStart).toFixed(2));
+        recDiag(`${diagPrefix}_ATTEMPT_2_OK`, {
+          durationMs: gumDur,
+          stream: inspectMediaStream(s2)
+        }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+          duration: gumDur,
+          forcePersist: true
+        });
+        return s2;
+      } catch (e2) {
+        recDiag(`${diagPrefix}_ATTEMPT_2_FAILED`, {
+          name: e2 && e2.name ? e2.name : undefined,
+          message: e2 && e2.message ? e2.message : String(e2),
+          constraint: e2 && e2.constraint ? e2.constraint : undefined
+        }, { level: 'warn', forcePersist: true });
+        recDiag(`${diagPrefix}_ATTEMPT_3_START`, { constraints: { audio: true } }, { forcePersist: true });
+        const s3 = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const gumDur = Number((performance.now() - gumStart).toFixed(2));
+        recDiag(`${diagPrefix}_ATTEMPT_3_OK`, {
+          durationMs: gumDur,
+          stream: inspectMediaStream(s3)
+        }, {
+          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
+          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
+          duration: gumDur,
+          forcePersist: true
+        });
+        return s3;
+      }
+    }
+  }
 
   function setVUMeterGrayedOut(isGray) {
     const vuContainer = document.getElementById('recordVUMeterContainer');
@@ -2705,14 +3448,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     const modal = document.getElementById('recordSetupModal');
     if (!modal || modal.classList.contains('hidden') || modal.style.display === 'none') return;
 
-    if (forceRestart) {
+    const currentSel = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
+    const existingStreamCh = vuStream ? getStreamActualChannels(vuStream) : 0;
+    const needsMoreChannels = Boolean(
+      vuStream &&
+      currentSel.neededChannels > existingStreamCh &&
+      vuStreamMaxCapCh >= currentSel.neededChannels
+    );
+
+    if (forceRestart || needsMoreChannels) {
       stopVUMonitor(false);
     }
 
-    // If stream is already healthy and analyser is running, keep it alive seamlessly
-    if (!forceRestart && vuStream && vuStream.active && vuAnalyser && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
+    // If stream is already healthy and analyser is running with enough channels, keep it alive seamlessly
+    if (!forceRestart && !needsMoreChannels && vuStream && vuStream.active && vuAnalyser && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live') {
       setVUMeterGrayedOut(false);
       updatePeakSensitivityUI();
+      updateChannelStatusBadge();
       if (!vuAnimId) {
         vuAnimId = requestAnimationFrame(renderVU);
       }
@@ -2726,30 +3478,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     try {
       const selectedDeviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
+      const rawDeviceLabel = getSelectedDeviceRawLabel();
       const selectedOptionText = (recordDeviceSelect && recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
         ? recordDeviceSelect.selectedOptions[0].textContent
-        : '';
-      const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+        : rawDeviceLabel;
+      const useAutoGain = recordAutoGain ? recordAutoGain.checked : (isIOSorIPad() && !classifyInputDeviceLabel(rawDeviceLabel).isUsb);
       const vuCtx = audio.getOrCreateAudioContext();
       const targetSampleRate = vuCtx ? vuCtx.sampleRate : undefined;
-      const constraints = {
-        audio: {
-          sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
-          channelCount: { ideal: 1 },
-          echoCancellation: false,
-          autoGainControl: useAutoGain,
-          noiseSuppression: false
-        }
-      };
-      if (selectedDeviceId) {
-        constraints.audio.deviceId = { exact: selectedDeviceId };
-      }
 
       recDiag('REC_VU_GUM_START', {
         forceRestart,
         selectedOptionText,
+        rawDeviceLabel,
+        channelSelection: currentSel,
         selectedDeviceIdPrefix: selectedDeviceId ? String(selectedDeviceId).slice(0, 12) : '',
-        constraints,
         ctx: inspectAudioCtx(vuCtx)
       }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_VU_START : undefined,
@@ -2757,7 +3499,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         forcePersist: true
       });
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const stream = await acquireMultiChannelMicStream({
+        deviceId: selectedDeviceId,
+        deviceLabel: rawDeviceLabel || selectedOptionText,
+        useAutoGain,
+        channelSel: currentSel,
+        targetSampleRate,
+        exactDevice: Boolean(selectedDeviceId),
+        diagPrefix: 'REC_VU_GUM'
+      });
       const gumDur = Number((performance.now() - vuStartPerf).toFixed(2));
       const currentModal = document.getElementById('recordSetupModal');
       if (!currentModal || currentModal.classList.contains('hidden') || currentModal.style.display === 'none') {
@@ -2775,14 +3525,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         try { vuSplitter.disconnect(); } catch (_) {}
         vuSplitter = null;
       }
-      if (vuAnalyser) {
-        try { vuAnalyser.disconnect(); } catch (_) {}
-        vuAnalyser = null;
+      if (vuAnalysers.length > 0) {
+        vuAnalysers.forEach(a => { try { a.disconnect(); } catch (_) {} });
+        vuAnalysers = [];
       }
-      if (vuAnalyserCh1) {
-        try { vuAnalyserCh1.disconnect(); } catch (_) {}
-        vuAnalyserCh1 = null;
-      }
+      vuAnalyser = null;
       if (vuStream && vuStream !== stream) {
         try { vuStream.getTracks().forEach(t => t.stop()); } catch (_) {}
       }
@@ -2811,28 +3558,64 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       vuSource = ctx.createMediaStreamSource(vuStream);
-      vuSplitter = ctx.createChannelSplitter(2);
-      vuAnalyser = ctx.createAnalyser();
-      vuAnalyser.fftSize = VU_FFT_SIZE;
-      vuAnalyser.smoothingTimeConstant = 0.0;
-      vuAnalyserCh1 = ctx.createAnalyser();
-      vuAnalyserCh1.fftSize = VU_FFT_SIZE;
-      vuAnalyserCh1.smoothingTimeConstant = 0.0;
+      try {
+        vuSource.channelInterpretation = 'discrete';
+      } catch (_) {}
+
+      const detectedStreamCh = Math.min(16, Math.max(1, getStreamActualChannels(vuStream), vuSource.channelCount || 1));
+      const maxCapCh = Math.max(detectedStreamCh, getStreamMaxCapChannels(vuStream, rawDeviceLabel || selectedOptionText));
+      const splitterCh = Math.max(2, detectedStreamCh);
+
+      vuSplitter = ctx.createChannelSplitter(splitterCh);
+      try {
+        vuSplitter.channelInterpretation = 'discrete';
+      } catch (_) {}
+
+      ensureVuChannelBuffers(detectedStreamCh);
+      vuAnalysers = [];
+      for (let c = 0; c < detectedStreamCh; c++) {
+        const an = ctx.createAnalyser();
+        an.fftSize = VU_FFT_SIZE;
+        an.smoothingTimeConstant = 0.0;
+        vuAnalysers.push(an);
+      }
+      vuAnalyser = vuAnalysers[0];
       vuSource.connect(vuSplitter);
-      vuSplitter.connect(vuAnalyser, 0);
-      vuSplitter.connect(vuAnalyserCh1, 1);
+      for (let c = 0; c < detectedStreamCh; c++) {
+        vuSplitter.connect(vuAnalysers[c], c);
+      }
+
+      populateChannelSelectOptions({
+        streamChannels: detectedStreamCh,
+        maxCapChannels: maxCapCh,
+        deviceLabel: rawDeviceLabel || selectedOptionText,
+        preserveValue: true
+      });
+
+      // If the restored saved preference requires >1 channel on iOS (where initial probe was 1ch), upgrade stream once seamlessly
+      const postPopulateSel = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
+      if (isIOSorIPad() && postPopulateSel.neededChannels > detectedStreamCh && maxCapCh >= postPopulateSel.neededChannels && !forceRestart) {
+        vuIsStarting = false;
+        startVUMonitor(true);
+        return;
+      }
 
       vuFastEnv = 0;
+      vuFastEnvR = 0;
+      vuPeakHold = 0;
+      vuPeakHoldR = 0;
       vuAmbientFloor = 0.003;
       vuLastTransientMs = 0;
       vuLastCtxTime = ctx.currentTime;
-      vuCh0Env = 0;
-      vuCh1Env = 0;
+      vuChannelEnvs.fill(0);
 
       const totalVuInitMs = Number((performance.now() - vuStartPerf).toFixed(2));
       recDiag('REC_VU_READY', {
         gumDurationMs: gumDur,
         totalInitMs: totalVuInitMs,
+        detectedStreamCh,
+        maxCapCh,
+        channelSelection: postPopulateSel,
         peakSensDb,
         stream: inspectMediaStream(vuStream),
         ctx: inspectAudioCtx(ctx)
@@ -2870,9 +3653,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  function levelToVuPercent(linearVal) {
+    if (linearVal <= 0.0001) return 0;
+    const db = 20 * Math.log10(linearVal);
+    if (db <= VU_MIN_DB) return 0;
+    return Math.min(100, Math.max(0, ((db - VU_MIN_DB) / -VU_MIN_DB) * 100));
+  }
+
   function renderVU() {
     const modal = document.getElementById('recordSetupModal');
-    if (!vuAnalyser || !modal || modal.classList.contains('hidden') || modal.style.display === 'none') {
+    if (!vuAnalyser || vuAnalysers.length === 0 || !modal || modal.classList.contains('hidden') || modal.style.display === 'none') {
       stopVUMonitor();
       return;
     }
@@ -2887,30 +3677,100 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Scan every newly-arrived sample since the previous rAF tick (zero dropped transients between frames)
       const inspectLen = Math.min(VU_FFT_SIZE, Math.max(256, Math.round(elapsedSec * sr)));
       const startIdx = VU_FFT_SIZE - inspectLen;
+      const numAn = vuAnalysers.length;
+      ensureVuChannelBuffers(numAn);
 
-      vuAnalyser.getFloatTimeDomainData(vuDataCh0);
-      if (vuAnalyserCh1) {
-        vuAnalyserCh1.getFloatTimeDomainData(vuDataCh1);
+      const perChPeak = new Float32Array(numAn);
+      const perChRms = new Float32Array(numAn);
+
+      for (let c = 0; c < numAn; c++) {
+        const buf = vuChannelBuffers[c];
+        vuAnalysers[c].getFloatTimeDomainData(buf);
+        let pk = 0;
+        let sq = 0;
+        let env = vuChannelEnvs[c];
+        for (let i = startIdx; i < VU_FFT_SIZE; i++) {
+          const a = Math.abs(buf[i]);
+          if (a > pk) pk = a;
+          sq += buf[i] * buf[i];
+          env = a > env ? a : env * 0.9992;
+        }
+        perChPeak[c] = pk;
+        perChRms[c] = Math.sqrt(sq / inspectLen);
+        vuChannelEnvs[c] = env;
       }
 
-      for (let i = startIdx; i < VU_FFT_SIZE; i++) {
-        const a0 = Math.abs(vuDataCh0[i]);
-        vuCh0Env = a0 > vuCh0Env ? a0 : vuCh0Env * 0.9992;
-        if (vuAnalyserCh1) {
-          const a1 = Math.abs(vuDataCh1[i]);
-          vuCh1Env = a1 > vuCh1Env ? a1 : vuCh1Env * 0.9992;
+      const sel = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
+      const now = performance.now();
+
+      let detectArr = vuChannelBuffers[0];
+      let barPeakL = 0;
+      let barRmsL = 0;
+      let barPeakR = 0;
+      let barRmsR = 0;
+      const isStereo = sel.mode === 'stereo';
+
+      if (isStereo) {
+        const idxL = Math.min(sel.left, numAn - 1);
+        const idxR = Math.min(sel.right, numAn - 1);
+        const bufL = vuChannelBuffers[idxL];
+        const bufR = vuChannelBuffers[idxR];
+        barPeakL = perChPeak[idxL];
+        barRmsL = perChRms[idxL];
+        barPeakR = perChPeak[idxR];
+        barRmsR = perChRms[idxR];
+        for (let i = startIdx; i < VU_FFT_SIZE; i++) {
+          vuMonoScratch[i] = Math.abs(bufL[i]) >= Math.abs(bufR[i]) ? bufL[i] : bufR[i];
+        }
+        detectArr = vuMonoScratch;
+      } else if (sel.mode === 'mono') {
+        const idxM = Math.min(sel.ch, numAn - 1);
+        detectArr = vuChannelBuffers[idxM];
+        barPeakL = perChPeak[idxM];
+        barRmsL = perChRms[idxM];
+      } else {
+        // 'auto' mode across all active channels
+        if (numAn > 1) {
+          let best = 0;
+          let sec = 1;
+          if (vuChannelEnvs[1] > vuChannelEnvs[0]) { best = 1; sec = 0; }
+          for (let c = 2; c < numAn; c++) {
+            if (vuChannelEnvs[c] > vuChannelEnvs[best]) { sec = best; best = c; }
+            else if (vuChannelEnvs[c] > vuChannelEnvs[sec]) { sec = c; }
+          }
+          if (vuChannelEnvs[best] > vuChannelEnvs[sec] * 2.4 && vuChannelEnvs[best] > 0.0008) {
+            detectArr = vuChannelBuffers[best];
+          } else {
+            const bA = vuChannelBuffers[best];
+            const bB = vuChannelBuffers[sec];
+            for (let i = startIdx; i < VU_FFT_SIZE; i++) {
+              vuMonoScratch[i] = 0.5 * (bA[i] + bB[i]);
+            }
+            detectArr = vuMonoScratch;
+          }
         }
       }
 
-      let srcArr = vuDataCh0;
-      if (vuAnalyserCh1 && vuCh1Env > 0.0005) {
-        if (vuCh1Env > vuCh0Env * 2.8) {
-          srcArr = vuDataCh1;
-        } else if (vuCh0Env <= vuCh1Env * 2.8) {
-          for (let i = startIdx; i < VU_FFT_SIZE; i++) {
-            vuMonoScratch[i] = 0.5 * (vuDataCh0[i] + vuDataCh1[i]);
+      // Live hint if another unselected input channel has strong signal while selected channel is quiet
+      if (numAn > 1 && now - vuHintLastUpdateMs > 220) {
+        vuHintLastUpdateMs = now;
+        const activeSignalPeak = isStereo ? Math.max(barPeakL, barPeakR) : (sel.mode === 'mono' ? barPeakL : Math.max(...perChPeak));
+        let otherStrongCh = -1;
+        let otherMax = 0;
+        if (sel.mode !== 'auto' && activeSignalPeak < 0.006) {
+          for (let c = 0; c < numAn; c++) {
+            const isSelected = isStereo ? (c === sel.left || c === sel.right) : (c === sel.ch);
+            if (!isSelected && perChPeak[c] > 0.035 && perChPeak[c] > otherMax) {
+              otherMax = perChPeak[c];
+              otherStrongCh = c;
+            }
           }
-          srcArr = vuMonoScratch;
+        }
+        if (otherStrongCh >= 0) {
+          const hwNum = getHardwarePairBaseChannel(getSelectedDeviceRawLabel()) + otherStrongCh;
+          updateChannelStatusBadge(`⚡ Signal on Input ${hwNum}`);
+        } else {
+          updateChannelStatusBadge(null);
         }
       }
 
@@ -2918,31 +3778,43 @@ document.addEventListener('DOMContentLoaded', async () => {
       let maxDiff = 0;
       let sumSq = 0;
       for (let i = startIdx; i < VU_FFT_SIZE; i++) {
-        const val = srcArr[i];
+        const val = detectArr[i];
         const abs = Math.abs(val);
         if (abs > peak) peak = abs;
         sumSq += val * val;
         if (i > startIdx) {
-          const d = Math.abs(val - srcArr[i - 1]);
+          const d = Math.abs(val - detectArr[i - 1]);
           if (d > maxDiff) maxDiff = d;
         }
       }
 
       const rms = Math.sqrt(sumSq / inspectLen);
-      const now = performance.now();
-
-      // Fast-attack / smooth-release peak-envelope bar so transient taps visibly cross the sensitivity line 1:1
-      if (peak >= vuFastEnv) {
-        vuFastEnv = peak;
-      } else {
-        vuFastEnv = Math.max(rms, vuFastEnv * 0.85);
+      if (sel.mode === 'auto') {
+        barPeakL = peak;
+        barRmsL = rms;
       }
 
-      if (peak > vuPeakHold || now - vuPeakHoldTime > 850) {
-        vuPeakHold = peak;
+      // Left / Mono envelope & peak hold
+      vuFastEnv = barPeakL >= vuFastEnv ? barPeakL : Math.max(barRmsL, vuFastEnv * 0.85);
+      if (barPeakL > vuPeakHold || now - vuPeakHoldTime > 850) {
+        vuPeakHold = barPeakL;
         vuPeakHoldTime = now;
       } else {
         vuPeakHold = Math.max(0, vuPeakHold * 0.94 - 0.002);
+      }
+
+      // Right envelope & peak hold (when in Stereo mode)
+      if (isStereo) {
+        vuFastEnvR = barPeakR >= vuFastEnvR ? barPeakR : Math.max(barRmsR, vuFastEnvR * 0.85);
+        if (barPeakR > vuPeakHoldR || now - vuPeakHoldTimeR > 850) {
+          vuPeakHoldR = barPeakR;
+          vuPeakHoldTimeR = now;
+        } else {
+          vuPeakHoldR = Math.max(0, vuPeakHoldR * 0.94 - 0.002);
+        }
+      } else {
+        vuFastEnvR = 0;
+        vuPeakHoldR = 0;
       }
 
       // Live Pre-Recording Peak Detection Check (identical rule & threshold to NanodawRecorderProcessor)
@@ -2962,38 +3834,42 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
-      const envDb = vuFastEnv > 0.0001 ? 20 * Math.log10(vuFastEnv) : -100;
-      let vuPct = 0;
-      if (envDb > VU_MIN_DB) {
-        vuPct = Math.min(100, Math.max(0, ((envDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
-      }
-
-      let peakPct = 0;
-      if (vuPeakHold > 0.0001) {
-        const holdDb = 20 * Math.log10(vuPeakHold);
-        if (holdDb > VU_MIN_DB) {
-          peakPct = Math.min(100, Math.max(0, ((holdDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
-        }
-      }
+      const vuPctL = levelToVuPercent(vuFastEnv);
+      const peakPctL = levelToVuPercent(vuPeakHold);
 
       const barEl = document.getElementById('recordVUMeterBar');
       const peakEl = document.getElementById('recordVUMeterPeak');
+      const barElR = document.getElementById('recordVUMeterBarR');
+      const peakElR = document.getElementById('recordVUMeterPeakR');
       const clipEl = document.getElementById('recordVUClipIndicator');
       const dbEl = document.getElementById('recordVUMeterDb');
 
-      if (barEl) {
-        barEl.style.height = `${vuPct.toFixed(1)}%`;
-      }
+      if (barEl) barEl.style.height = `${vuPctL.toFixed(1)}%`;
       if (peakEl) {
-        if (peakPct > 2) {
+        if (peakPctL > 2) {
           peakEl.style.display = 'block';
-          peakEl.style.bottom = `${peakPct.toFixed(1)}%`;
+          peakEl.style.bottom = `${peakPctL.toFixed(1)}%`;
         } else {
           peakEl.style.display = 'none';
         }
       }
 
-      if (peak >= 0.98) {
+      if (isStereo) {
+        const vuPctR = levelToVuPercent(vuFastEnvR);
+        const peakPctR = levelToVuPercent(vuPeakHoldR);
+        if (barElR) barElR.style.height = `${vuPctR.toFixed(1)}%`;
+        if (peakElR) {
+          if (peakPctR > 2) {
+            peakElR.style.display = 'block';
+            peakElR.style.bottom = `${peakPctR.toFixed(1)}%`;
+          } else {
+            peakElR.style.display = 'none';
+          }
+        }
+      }
+
+      const maxInstantPeak = isStereo ? Math.max(barPeakL, barPeakR) : barPeakL;
+      if (maxInstantPeak >= 0.98) {
         vuClipTime = now;
       }
       if (clipEl) {
@@ -3007,7 +3883,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       if (dbEl) {
-        const displayDb = vuPeakHold > 0.0003 ? 20 * Math.log10(vuPeakHold) : envDb;
+        const maxHold = isStereo ? Math.max(vuPeakHold, vuPeakHoldR) : vuPeakHold;
+        const maxFast = isStereo ? Math.max(vuFastEnv, vuFastEnvR) : vuFastEnv;
+        const refLin = maxHold > 0.0003 ? maxHold : maxFast;
+        const displayDb = refLin > 0.0001 ? 20 * Math.log10(refLin) : -100;
         if (displayDb <= -50) {
           dbEl.textContent = '-∞';
         } else {
@@ -3033,14 +3912,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       try { vuSplitter.disconnect(); } catch (_) {}
       vuSplitter = null;
     }
-    if (vuAnalyser) {
-      try { vuAnalyser.disconnect(); } catch (_) {}
-      vuAnalyser = null;
+    if (vuAnalysers.length > 0) {
+      vuAnalysers.forEach(a => { try { a.disconnect(); } catch (_) {} });
+      vuAnalysers = [];
     }
-    if (vuAnalyserCh1) {
-      try { vuAnalyserCh1.disconnect(); } catch (_) {}
-      vuAnalyserCh1 = null;
-    }
+    vuAnalyser = null;
     if (!preserveStream && vuStream) {
       try {
         vuStream.getTracks().forEach(t => t.stop());
@@ -3055,10 +3931,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     const barEl = document.getElementById('recordVUMeterBar');
     const peakEl = document.getElementById('recordVUMeterPeak');
+    const barElR = document.getElementById('recordVUMeterBarR');
+    const peakElR = document.getElementById('recordVUMeterPeakR');
     const clipEl = document.getElementById('recordVUClipIndicator');
     const dbEl = document.getElementById('recordVUMeterDb');
     if (barEl) barEl.style.height = '0%';
     if (peakEl) peakEl.style.display = 'none';
+    if (barElR) barElR.style.height = '0%';
+    if (peakElR) peakElR.style.display = 'none';
     if (clipEl) {
       clipEl.style.background = 'rgba(239, 68, 68, 0.25)';
       clipEl.style.boxShadow = 'none';
@@ -3069,15 +3949,65 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (recordDeviceSelect) {
     recordDeviceSelect.addEventListener('change', () => {
+      userManuallySelectedDeviceId = recordDeviceSelect.value || null;
       const optText = (recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
         ? recordDeviceSelect.selectedOptions[0].textContent
         : '';
+      const rawLabel = getSelectedDeviceRawLabel();
+      initAutoGainDefault();
+      populateChannelSelectOptions({
+        streamChannels: 1,
+        maxCapChannels: classifyInputDeviceLabel(rawLabel).isUsb ? 2 : 1,
+        deviceLabel: rawLabel,
+        preserveValue: false
+      });
       recDiag('REC_DEVICE_SELECT_CHANGED', {
         deviceIdPrefix: recordDeviceSelect.value ? String(recordDeviceSelect.value).slice(0, 12) : '',
+        rawLabel,
         optionText: optText
       }, { forcePersist: true });
       resetPreRecTapTest();
       startVUMonitor(true);
+    });
+  }
+
+  if (recordChannelSelect) {
+    recordChannelSelect.addEventListener('change', () => {
+      const sel = parseChannelSelection(recordChannelSelect.value);
+      const rawLabel = getSelectedDeviceRawLabel();
+      saveChannelSelectionPref(rawLabel, sel.raw);
+
+      // If user picks Input 2+ or a Stereo pair while OS Auto Gain was manually forced ON, disable Auto Gain so OS doesn't downmix to mono
+      let mustRestartStream = false;
+      if (sel.neededChannels > 1 && recordAutoGain && recordAutoGain.checked) {
+        recordAutoGain.checked = false;
+        if (recordAutoGainBadge) recordAutoGainBadge.textContent = 'AUTO (MULTI-CH OFF)';
+        showToast('Disabled Auto Gain to preserve discrete multi-channel USB inputs.', 'info', 3500);
+        mustRestartStream = true;
+      }
+
+      if (vuStream && sel.neededChannels > getStreamActualChannels(vuStream)) {
+        mustRestartStream = true;
+      }
+
+      recDiag('REC_CHANNEL_SELECT_CHANGED', {
+        selection: sel,
+        deviceLabel: rawLabel,
+        currentStreamCh: vuStream ? getStreamActualChannels(vuStream) : 0,
+        mustRestartStream
+      }, { forcePersist: true });
+
+      vuFastEnv = 0;
+      vuFastEnvR = 0;
+      vuPeakHold = 0;
+      vuPeakHoldR = 0;
+      resetPreRecTapTest();
+      updatePeakSensitivityUI();
+      updateChannelStatusBadge();
+
+      if (mustRestartStream) {
+        startVUMonitor(true);
+      }
     });
   }
 
@@ -3527,6 +4457,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     recordingState = 'recording_take';
     pass2AudioStore.reset();
     pass2AudioStore.prepareAheadOfTime(4);
+    pass2AudioStoreR.reset();
+    if (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo') {
+      pass2AudioStoreR.prepareAheadOfTime(4);
+    }
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
@@ -3542,6 +4476,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       guideTrackName: trackName,
       firstBeat,
       numBeats,
+      channelConfig: activeRecordingChannelConfig,
       playhead: recordingStartPlayhead,
       ctx: inspectAudioCtx(recAudioCtx)
     }, {
@@ -3564,6 +4499,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await attachRecordingPipeline({
       detectTransients: true,
       targetStore: pass2AudioStore,
+      targetStoreR: pass2AudioStoreR,
       onTransient: (now, samplePos) => {
         if (recordingState !== 'recording_take' || !isTrackSyncTake) return;
         const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
@@ -3613,13 +4549,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     const deviceId = recordDeviceSelect ? recordDeviceSelect.value : '';
+    const rawDeviceLabel = getSelectedDeviceRawLabel();
     const selectedOptionText = (recordDeviceSelect && recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
       ? recordDeviceSelect.selectedOptions[0].textContent
-      : '';
+      : rawDeviceLabel;
+    activeRecordingChannelConfig = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
     const use2PassSync = record2PassSync ? record2PassSync.checked : true;
     const isTrackGuide = guideModeTrack ? guideModeTrack.checked : false;
     const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
-    const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+    let useAutoGain = recordAutoGain ? recordAutoGain.checked : (isIOSorIPad() && !classifyInputDeviceLabel(rawDeviceLabel || selectedOptionText).isUsb);
+    if (activeRecordingChannelConfig.neededChannels > 1 && useAutoGain) {
+      // Never enable WebRTC AutoGain when capturing discrete multi-channel inputs (prevents mono downmixing on Android/Desktop)
+      useAutoGain = false;
+    }
     const useInternalGain = Boolean(recordInternalGain && recordInternalGain.checked);
 
     recChunksReceivedTotal = 0;
@@ -3629,7 +4571,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (window.zoomProfiler && typeof window.zoomProfiler.beginRecSession === 'function') {
       window.zoomProfiler.beginRecSession({
         selectedDeviceIdPrefix: deviceId ? String(deviceId).slice(0, 12) : '',
-        selectedDeviceLabel: selectedOptionText,
+        selectedDeviceLabel: rawDeviceLabel || selectedOptionText,
+        channelSelection: activeRecordingChannelConfig,
         useAutoGain,
         useInternalGain,
         use2PassSync,
@@ -3681,13 +4624,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       const targetSampleRate = recAudioCtx ? recAudioCtx.sampleRate : undefined;
 
-      // 3. Acquire mic stream: reuse pre-warmed stream transferred from VU meter monitor if active!
-      const isStreamActive = recStream && recStream.active && recStream.getAudioTracks().length > 0 && recStream.getAudioTracks()[0].readyState === 'live';
-      if (isStreamActive) {
+      // 3. Acquire mic stream: reuse pre-warmed stream transferred from VU meter monitor if active & has enough channels!
+      const hasLiveStream = Boolean(recStream && recStream.active && recStream.getAudioTracks().length > 0 && recStream.getAudioTracks()[0].readyState === 'live');
+      const existingCh = hasLiveStream ? getStreamActualChannels(recStream) : 0;
+      const isStreamSufficient = hasLiveStream && (existingCh >= activeRecordingChannelConfig.neededChannels);
+      if (hasLiveStream && !isStreamSufficient) {
+        recDiag('REC_FLOW_STREAM_UPGRADE_NEEDED', {
+          existingCh,
+          neededChannels: activeRecordingChannelConfig.neededChannels,
+          channelSelection: activeRecordingChannelConfig
+        }, { forcePersist: true });
+        try { recStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+        recStream = null;
+      }
+
+      if (isStreamSufficient) {
         const streamSpec = inspectMediaStream(recStream);
         const actualSR = streamSpec.tracks?.[0]?.settings?.sampleRate || 0;
         recDiag('REC_FLOW_STREAM_REUSED', {
           stream: streamSpec,
+          channelSelection: activeRecordingChannelConfig,
           ctxSampleRate: targetSampleRate,
           sampleRateMismatch: Boolean(actualSR && targetSampleRate && actualSR !== targetSampleRate)
         }, {
@@ -3696,90 +4652,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           forcePersist: true
         });
       } else {
-        const audioConstraints = {
-          sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
-          channelCount: { ideal: 1 },
-          echoCancellation: false,
-          autoGainControl: useAutoGain,
-          noiseSuppression: false
-        };
-        if (deviceId) {
-          audioConstraints.deviceId = { ideal: deviceId };
-        }
-
-        const gumStart = performance.now();
-        recDiag('REC_FLOW_GUM_ATTEMPT_1_START', { constraints: audioConstraints }, {
-          stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
-          phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
-          forcePersist: true
+        recStream = await acquireMultiChannelMicStream({
+          deviceId,
+          deviceLabel: rawDeviceLabel || selectedOptionText,
+          useAutoGain,
+          channelSel: activeRecordingChannelConfig,
+          targetSampleRate,
+          exactDevice: false,
+          diagPrefix: 'REC_FLOW_GUM'
         });
-
-        try {
-          recStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-          const gumDur = Number((performance.now() - gumStart).toFixed(2));
-          const streamSpec = inspectMediaStream(recStream);
-          const actualSR = streamSpec.tracks?.[0]?.settings?.sampleRate || 0;
-          recDiag('REC_FLOW_GUM_ATTEMPT_1_OK', {
-            durationMs: gumDur,
-            stream: streamSpec,
-            ctxSampleRate: targetSampleRate,
-            sampleRateMismatch: Boolean(actualSR && targetSampleRate && actualSR !== targetSampleRate)
-          }, {
-            stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
-            phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
-            duration: gumDur,
-            extraData: actualSR,
-            forcePersist: true
-          });
-        } catch (e1) {
-          console.warn('Initial constraints with deviceId failed, retrying ideal sample rate:', e1);
-          recDiag('REC_FLOW_GUM_ATTEMPT_1_FAILED', {
-            name: e1 && e1.name ? e1.name : undefined,
-            message: e1 && e1.message ? e1.message : String(e1),
-            constraint: e1 && e1.constraint ? e1.constraint : undefined
-          }, { level: 'warn', forcePersist: true });
-          try {
-            const fbConstraints = {
-              audio: {
-                sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
-                echoCancellation: false,
-                autoGainControl: useAutoGain,
-                noiseSuppression: false
-              }
-            };
-            recDiag('REC_FLOW_GUM_ATTEMPT_2_START', { constraints: fbConstraints }, { forcePersist: true });
-            recStream = await navigator.mediaDevices.getUserMedia(fbConstraints);
-            const gumDur = Number((performance.now() - gumStart).toFixed(2));
-            recDiag('REC_FLOW_GUM_ATTEMPT_2_OK', {
-              durationMs: gumDur,
-              stream: inspectMediaStream(recStream)
-            }, {
-              stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
-              phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
-              duration: gumDur,
-              forcePersist: true
-            });
-          } catch (e2) {
-            console.warn('Retrying basic audio getUserMedia:', e2);
-            recDiag('REC_FLOW_GUM_ATTEMPT_2_FAILED', {
-              name: e2 && e2.name ? e2.name : undefined,
-              message: e2 && e2.message ? e2.message : String(e2),
-              constraint: e2 && e2.constraint ? e2.constraint : undefined
-            }, { level: 'warn', forcePersist: true });
-            recDiag('REC_FLOW_GUM_ATTEMPT_3_START', { constraints: { audio: true } }, { forcePersist: true });
-            recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const gumDur = Number((performance.now() - gumStart).toFixed(2));
-            recDiag('REC_FLOW_GUM_ATTEMPT_3_OK', {
-              durationMs: gumDur,
-              stream: inspectMediaStream(recStream)
-            }, {
-              stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_GUM_REQUEST : undefined,
-              phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
-              duration: gumDur,
-              forcePersist: true
-            });
-          }
-        }
       }
 
       // Attach track-level mute / unmute / ended listeners for live USB disconnect / route-change tracking
@@ -3792,6 +4673,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const firstTrackSettings = activeStreamSpec.tracks?.[0]?.settings || {};
       recDiag('REC_TRACK_SETTINGS_SNAPSHOT', {
         trackSettings: firstTrackSettings,
+        channelSelection: activeRecordingChannelConfig,
         ctx: inspectAudioCtx(recAudioCtx)
       }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TRACK_SETTINGS : undefined,
@@ -3863,6 +4745,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     recordingState = 'pass1';
     pass1AudioStore.reset();
     pass1AudioStore.prepareAheadOfTime(4);
+    pass1AudioStoreR.reset();
+    if (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo') {
+      pass1AudioStoreR.prepareAheadOfTime(4);
+    }
     pass1ClickEvents = [];
     totalPass1Samples = 0;
     pass1StreamStartTime = null;
@@ -3917,6 +4803,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await attachRecordingPipeline({
       detectTransients: true,
       targetStore: pass1AudioStore,
+      targetStoreR: pass1AudioStoreR,
       onTransient: registerClick
     });
 
@@ -3931,6 +4818,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     recDiag('REC_PASS1_START', {
       isSynthGuide,
+      channelConfig: activeRecordingChannelConfig,
       streamStartTime: pass1StreamStartTime,
       ctx: inspectAudioCtx(recAudioCtx)
     }, {
@@ -4034,8 +4922,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
     const dtSamples = Math.round(dt * sampleRate);
 
-    // Concatenate all Pass 1 recorded PCM in one batched operation (detect peaks on raw audio BEFORE gain/noise filtering)
-    const rawP1 = pass1AudioStore.toFlatArray();
+    // Concatenate all Pass 1 recorded PCM in one batched operation (detect peaks on raw audio BEFORE gain/noise filtering).
+    // In stereo mode, combine L & R via max-signed-amplitude so tapping into EITHER mic calibrates Pass 1 cleanly.
+    const rawP1L = pass1AudioStore.toFlatArray();
+    const rawP1R = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass1AudioStoreR.totalSamples > 0)
+      ? pass1AudioStoreR.toFlatArray()
+      : null;
+    const rawP1 = rawP1R ? combineStereoForPeakDetection(rawP1L, rawP1R) : rawP1L;
     const totalP1 = rawP1.length;
 
     const searchWin = Math.round(0.22 * dtSamples);
@@ -4154,7 +5047,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
     // 1. Gather all recorded PCM from Pass 1 in one batched operation (detect peaks on raw audio first)
-    const rawP1 = pass1AudioStore.toFlatArray();
+    const rawP1L = pass1AudioStore.toFlatArray();
+    const rawP1R = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass1AudioStoreR.totalSamples > 0)
+      ? pass1AudioStoreR.toFlatArray()
+      : null;
+    const rawP1 = rawP1R ? combineStereoForPeakDetection(rawP1L, rawP1R) : rawP1L;
     const totalP1 = rawP1.length;
 
     // 2. High-precision transient peak detection for all 4 taps in rawP1
@@ -4212,7 +5109,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       try {
         const guideTrack = audio.tracks[parseInt(selectedGuideTrackIdx, 10)];
         if (guideTrack && guideTrack.audioBuffer) {
-          const trackChan = guideTrack.audioBuffer.getChannelData(0);
+          const trackChan = guideTrack.audioBuffer.numberOfChannels > 1
+            ? combineStereoForPeakDetection(guideTrack.audioBuffer.getChannelData(0), guideTrack.audioBuffer.getChannelData(1))
+            : guideTrack.audioBuffer.getChannelData(0);
           const trackSR = guideTrack.audioBuffer.sampleRate;
           const latencies = [];
           for (let k = 0; k < 4; k++) {
@@ -4294,6 +5193,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Prepare Pass 2 recording pipeline
     pass2AudioStore.reset();
     pass2AudioStore.prepareAheadOfTime(4);
+    pass2AudioStoreR.reset();
+    if (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo') {
+      pass2AudioStoreR.prepareAheadOfTime(4);
+    }
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
@@ -4310,6 +5213,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await attachRecordingPipeline({
       detectTransients: true,
       targetStore: pass2AudioStore,
+      targetStoreR: pass2AudioStoreR,
       onTransient: (now, samplePos) => {
         if (recordingState === 'pass2_prelude') {
           pass2ClickEvents.push({ ctxTime: now, samplePos });
@@ -4462,6 +5366,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     pass2AudioStore.reset();
     pass2AudioStore.prepareAheadOfTime(4);
+    pass2AudioStoreR.reset();
+    if (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo') {
+      pass2AudioStoreR.prepareAheadOfTime(4);
+    }
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
@@ -4477,7 +5385,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     await attachRecordingPipeline({
       detectTransients: false,
-      targetStore: pass2AudioStore
+      targetStore: pass2AudioStore,
+      targetStoreR: pass2AudioStoreR
     });
 
     window.__nanodaw_stream = recStream;
@@ -4564,6 +5473,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       stateAtStop,
       pass1Samples: pass1AudioStore.totalSamples,
       pass2Samples: pass2AudioStore.totalSamples,
+      pass2SamplesR: pass2AudioStoreR.totalSamples,
+      channelConfig: activeRecordingChannelConfig,
       chunksReceived: recChunksReceivedTotal,
       lastWorkletDiag: lastWorkletDiagReport,
       ctx: inspectAudioCtx(recAudioCtx)
@@ -4591,11 +5502,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudTimerIntervalId = null;
     }
 
-    // 2. Snapshot timing references and sync flags BEFORE calling cleanupRecordingNodes()
+    // 2. Snapshot timing references, channel config, and sync flags BEFORE calling cleanupRecordingNodes()
     const scheduledDownbeatTime = pass2DownbeatScheduledTime;
     const streamStartTime = pass2StreamStartTime;
     const wasTrackSync = isTrackSyncTake;
     const syncGuideIdx = trackSyncGuideIndex;
+    const recChCfg = { ...(activeRecordingChannelConfig || { raw: 'mono:0', mode: 'mono', ch: 0, left: 0, right: 0, neededChannels: 1 }) };
+    const isStereoTake = (recChCfg.mode === 'stereo');
 
     // Flush any pending trailing audio from worklet
     if (recWorkletNode) {
@@ -4608,6 +5521,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     recDiag('REC_STOP_FLUSHED', {
       pass1SamplesAfterFlush: pass1AudioStore.totalSamples,
       pass2SamplesAfterFlush: pass2AudioStore.totalSamples,
+      pass2SamplesRAfterFlush: pass2AudioStoreR.totalSamples,
       chunksReceived: recChunksReceivedTotal,
       lastWorkletDiag: lastWorkletDiagReport
     }, { forcePersist: true });
@@ -4622,16 +5536,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
 
     let takePCM = null;
+    let takePCMR = null;
 
     if (pass2AudioStore.totalSamples > 0) {
       // CRITICAL: Extract raw captured audio FIRST and run all sync tap peak detection BEFORE
       // suppressAudioGlitches / processInternalGainAndNoiseSuppression, which otherwise shave sharp transients!
-      const rawPass2 = pass2AudioStore.toFlatArray();
-      const totalSamples = rawPass2.length;
+      const rawPass2L = pass2AudioStore.toFlatArray();
+      const rawPass2R = (isStereoTake && pass2AudioStoreR.totalSamples > 0) ? pass2AudioStoreR.toFlatArray() : null;
+      const rawPass2 = rawPass2R ? combineStereoForPeakDetection(rawPass2L, rawPass2R) : rawPass2L;
+      const totalSamples = rawPass2L.length;
 
       // If this was a Track Sync take, process it using raw-PCM peak alignment first
       if (wasTrackSync && syncGuideIdx !== null) {
-        await processTrackSyncTake(syncGuideIdx, rawPass2, sampleRate);
+        await processTrackSyncTake(syncGuideIdx, rawPass2L, rawPass2R, isStereoTake, sampleRate);
         return;
       }
 
@@ -4656,7 +5573,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           expectedUser1Sample = Math.round((0.150 + 4 * dt) * sampleRate);
         }
 
-        // Search for the 4 user calibration tap peaks (Beats 5, 6, 7, 8) on rawPass2
+        // Search for the 4 user calibration tap peaks (Beats 5, 6, 7, 8) on rawPass2 (L/R max-combined in stereo mode)
         const detectedPeaks = [];
         const seqRes = findBestTapSequence(rawPass2, sampleRate, expectedUser1Sample / sampleRate, dt, 4, getPeakThresholdLinear());
         if (seqRes.peaksIdx.length === 4) {
@@ -4725,7 +5642,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       const trimSamples = Math.max(0, projected5thTapSample);
-      console.log(`[Recording Trim] total: ${totalSamples}, projected5thTapSample: ${projected5thTapSample}, trimSamples: ${trimSamples}`);
+      console.log(`[Recording Trim] total: ${totalSamples}, projected5thTapSample: ${projected5thTapSample}, trimSamples: ${trimSamples}, stereo: ${isStereoTake}`);
 
       const ppStart = performance.now();
       recDiag('REC_POST_PROCESS_START', {
@@ -4733,6 +5650,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         samples: totalSamples,
         trimSamples,
         sampleRate,
+        isStereoTake,
         internalGain: Boolean(recordInternalGain && recordInternalGain.checked)
       }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
@@ -4740,18 +5658,33 @@ document.addEventListener('DOMContentLoaded', async () => {
         forcePersist: true
       });
 
-      let trimmedRaw = (totalSamples > trimSamples + Math.round(sampleRate * 0.05))
-        ? rawPass2.slice(trimSamples)
-        : rawPass2.slice();
-      takePCM = suppressAudioGlitches(trimmedRaw, sampleRate);
-      if (recordInternalGain && recordInternalGain.checked) {
-        takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
+      const doSlice = (totalSamples > trimSamples + Math.round(sampleRate * 0.05));
+      const trimmedRawL = doSlice ? rawPass2L.slice(trimSamples) : rawPass2L.slice();
+      const trimmedRawR = rawPass2R
+        ? (doSlice ? rawPass2R.slice(Math.min(trimSamples, rawPass2R.length)) : rawPass2R.slice())
+        : null;
+
+      if (isStereoTake && trimmedRawR) {
+        if (recordInternalGain && recordInternalGain.checked) {
+          const stereoProc = processStereoInternalGainAndNoiseSuppression(trimmedRawL, trimmedRawR, sampleRate, 0.75);
+          takePCM = stereoProc.left;
+          takePCMR = stereoProc.right;
+        } else {
+          takePCM = suppressAudioGlitches(trimmedRawL, sampleRate);
+          takePCMR = suppressAudioGlitches(trimmedRawR, sampleRate);
+        }
+      } else {
+        takePCM = suppressAudioGlitches(trimmedRawL, sampleRate);
+        if (recordInternalGain && recordInternalGain.checked) {
+          takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
+        }
       }
 
       const ppDur = Number((performance.now() - ppStart).toFixed(2));
       recDiag('REC_POST_PROCESS_DONE', {
         durationMs: ppDur,
-        samples: takePCM.length
+        samples: takePCM.length,
+        isStereoTake
       }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -4760,27 +5693,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     } else if (pass1AudioStore.totalSamples > 0) {
       // Stopped during Pass 1: keep all audio captured in Pass 1
-      takePCM = pass1AudioStore.toFlatArray();
-      takePCM = suppressAudioGlitches(takePCM, sampleRate);
-      if (recordInternalGain && recordInternalGain.checked) {
-        takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
+      const rawP1L = pass1AudioStore.toFlatArray();
+      const rawP1R = (isStereoTake && pass1AudioStoreR.totalSamples > 0) ? pass1AudioStoreR.toFlatArray() : null;
+      if (isStereoTake && rawP1R) {
+        if (recordInternalGain && recordInternalGain.checked) {
+          const stereoProc = processStereoInternalGainAndNoiseSuppression(rawP1L, rawP1R, sampleRate, 0.75);
+          takePCM = stereoProc.left;
+          takePCMR = stereoProc.right;
+        } else {
+          takePCM = suppressAudioGlitches(rawP1L, sampleRate);
+          takePCMR = suppressAudioGlitches(rawP1R, sampleRate);
+        }
+      } else {
+        takePCM = suppressAudioGlitches(rawP1L, sampleRate);
+        if (recordInternalGain && recordInternalGain.checked) {
+          takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
+        }
       }
     }
 
-    // Fallback if no audio samples were captured
-    if (!takePCM || takePCM.length < Math.round(sampleRate * 0.1)) {
-      takePCM = new Float32Array(Math.round(sampleRate * 1.0));
-    }
-
-    // Apply a soft 5ms cosine ramp to audio start to avoid any edge click
-    const rampSamples = Math.min(takePCM.length, Math.round(sampleRate * 0.005));
-    for (let i = 0; i < rampSamples; i++) {
-      takePCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
-    }
-
     const ctx = audio.getOrCreateAudioContext() || recAudioCtx;
-    const takeBuffer = ctx.createBuffer(1, takePCM.length, sampleRate);
-    takeBuffer.getChannelData(0).set(takePCM);
+    const takeBuffer = buildRecordedTakeAudioBuffer(ctx, takePCM, takePCMR, isStereoTake, sampleRate);
 
     recordedTakesCount++;
     const takeName = `Recorded Take ${recordedTakesCount}`;
@@ -4789,10 +5722,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444');
 
     const totalStopDur = Number((performance.now() - stopStartPerf).toFixed(2));
-    const takeDurationSec = Number((takePCM.length / sampleRate).toFixed(3));
+    const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
     recDiag('REC_STOP_COMPLETE', {
       takeName,
       takeDurationSec,
+      channels: takeBuffer.numberOfChannels,
+      channelConfig: recChCfg,
       sampleRate,
       offsetSec: recordingStartPlayhead,
       stopProcessingMs: totalStopDur
@@ -4805,12 +5740,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       window.zoomProfiler.endRecSession('completed', {
         takeName,
         takeDurationSec,
+        channels: takeBuffer.numberOfChannels,
         sampleRate,
         stopProcessingMs: totalStopDur
       });
     }
 
-    showToast(`Added "${takeName}" (${(takePCM.length / sampleRate).toFixed(1)}s) to project!`, 'success', 4000);
+    const chTag = takeBuffer.numberOfChannels === 2 ? ' · Stereo' : '';
+    showToast(`Added "${takeName}" (${(takeBuffer.length / sampleRate).toFixed(1)}s${chTag}) to project!`, 'success', 4000);
     audio.seek(recordingStartPlayhead);
     timeline.render();
     timeline.renderWaveforms();
@@ -4819,10 +5756,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // --- Track-Based Sync Take Processing ---
-  async function processTrackSyncTake(guideIdx, fullPass2, sampleRate) {
+  async function processTrackSyncTake(guideIdx, fullPass2L, fullPass2R, isStereoTake, sampleRate) {
     const guideTrack = audio.tracks[guideIdx];
-    if (!guideTrack || fullPass2.length < Math.round(sampleRate * 0.1)) {
-      fallbackAddTrack(fullPass2, sampleRate, guideIdx);
+    if (!guideTrack || fullPass2L.length < Math.round(sampleRate * 0.1)) {
+      fallbackAddTrack(fullPass2L, fullPass2R, isStereoTake, sampleRate, guideIdx);
       return;
     }
 
@@ -4831,7 +5768,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_START', {
       guideIdx,
       guideName: guideTrack.name,
-      takeSamples: fullPass2.length,
+      takeSamples: fullPass2L.length,
+      isStereoTake,
       sampleRate
     }, { forcePersist: true });
     try {
@@ -4839,6 +5777,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_OK', {
         durationMs: Number((performance.now() - guideLoadStart).toFixed(2)),
         guideSR: guideBuffer ? guideBuffer.sampleRate : null,
+        guideChannels: guideBuffer ? guideBuffer.numberOfChannels : null,
         guideDurationSec: guideBuffer ? Number(guideBuffer.duration.toFixed(3)) : null
       }, { forcePersist: true });
     } catch (e) {
@@ -4849,11 +5788,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     if (!guideBuffer) {
-      fallbackAddTrack(fullPass2, sampleRate, guideIdx);
+      fallbackAddTrack(fullPass2L, fullPass2R, isStereoTake, sampleRate, guideIdx);
       return;
     }
 
-    const guidePCM = guideBuffer.getChannelData(0);
+    const guidePCM = guideBuffer.numberOfChannels > 1
+      ? combineStereoForPeakDetection(guideBuffer.getChannelData(0), guideBuffer.getChannelData(1))
+      : guideBuffer.getChannelData(0);
     const guideSR = guideBuffer.sampleRate;
     const guideOffset = Number(guideTrack.offset) || 0;
 
@@ -4916,14 +5857,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    // 2. Detect N peaks in the newly-recorded take directly from raw captured system audio (BEFORE glitch/gain filtering)
+    // 2. Detect N peaks in the newly-recorded take directly from raw captured system audio (BEFORE glitch/gain filtering).
+    // For stereo takes, max-signed combine L & R so tapping into EITHER mic triggers clean peak detection!
+    const detectTakePCM = (isStereoTake && fullPass2R && fullPass2R.length > 0)
+      ? combineStereoForPeakDetection(fullPass2L, fullPass2R)
+      : fullPass2L;
     const takePeaksSec = [];
     const userThreshLinear = getPeakThresholdLinear();
     const expFirstTakeSec = metroPeaksTimelineSec.length > 0
       ? Math.max(0, metroPeaksTimelineSec[0] - recordingStartPlayhead)
       : ((firstBeat - 1) * dt);
 
-    const takeSeq = findBestTapSequence(fullPass2, sampleRate, expFirstTakeSec, dt, numBeats, userThreshLinear);
+    const takeSeq = findBestTapSequence(detectTakePCM, sampleRate, expFirstTakeSec, dt, numBeats, userThreshLinear);
     if (takeSeq.peaksSec.length === numBeats) {
       takePeaksSec.push(...takeSeq.peaksSec);
     } else {
@@ -4937,21 +5882,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         let s0, s1;
         if (lastTakePeakSample === null) {
           s0 = Math.max(0, Math.round((expFirstTakeSec - 0.85 * dt) * sampleRate));
-          s1 = Math.min(fullPass2.length, Math.round((expFirstTakeSec + 1.35 * dt) * sampleRate));
+          s1 = Math.min(detectTakePCM.length, Math.round((expFirstTakeSec + 1.35 * dt) * sampleRate));
         } else {
           const center = lastTakePeakSample + Math.round(dt * sampleRate);
           s0 = Math.max(lastTakePeakSample + Math.round(0.35 * dt * sampleRate), center - Math.round(0.48 * dt * sampleRate));
-          s1 = Math.min(fullPass2.length, center + Math.round(0.48 * dt * sampleRate));
+          s1 = Math.min(detectTakePCM.length, center + Math.round(0.48 * dt * sampleRate));
         }
         if (s0 >= s1) continue;
 
-        const pk = findTransientPeak(fullPass2, s0, s1, takeClaimedRanges);
+        const pk = findTransientPeak(detectTakePCM, s0, s1, takeClaimedRanges);
         if (pk.found && pk.peakAbs >= fallbackMinPeak && pk.crest >= 1.2) {
           takePeaksSec.push(pk.idx / sampleRate);
           lastTakePeakSample = pk.idx;
           takeClaimedRanges.push({
             start: Math.max(0, pk.idx - exclRadiusTake),
-            end: Math.min(fullPass2.length - 1, pk.idx + exclRadiusTake)
+            end: Math.min(detectTakePCM.length - 1, pk.idx + exclRadiusTake)
           });
         }
       }
@@ -4964,6 +5909,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       dtSec: Number(dt.toFixed(4)),
       firstBeat,
       numBeats,
+      isStereoTake,
       peakSensDb,
       thresholdLinear: Number(userThreshLinear.toFixed(5)),
       expFirstTakeSec: Number(expFirstTakeSec.toFixed(3)),
@@ -4989,7 +5935,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const alertMsg = `NANOdaw Track Sync Notice:\n\n${reason}\n\nThe track has been added directly below "${guideTrack.name}" at playhead (${recordingStartPlayhead.toFixed(2)}s) without alignment shift.`;
 
-      fallbackAddTrack(fullPass2, sampleRate, guideIdx);
+      fallbackAddTrack(fullPass2L, fullPass2R, isStereoTake, sampleRate, guideIdx);
 
       setTimeout(() => {
         alert(alertMsg);
@@ -5009,35 +5955,43 @@ document.addEventListener('DOMContentLoaded', async () => {
     const calibEndSec = lastTapSec + tapDecayMargin;
 
     let trimSamples = 0;
-    if (fullPass2.length / sampleRate > calibEndSec + 0.1) {
+    if (fullPass2L.length / sampleRate > calibEndSec + 0.1) {
       trimSamples = Math.round(calibEndSec * sampleRate);
     }
     let trimmedSec = trimSamples / sampleRate;
-    let finalPCM = trimSamples > 0 ? fullPass2.slice(trimSamples) : fullPass2.slice();
+    let finalPCML = trimSamples > 0 ? fullPass2L.slice(trimSamples) : fullPass2L.slice();
+    let finalPCMR = (isStereoTake && fullPass2R)
+      ? (trimSamples > 0 ? fullPass2R.slice(Math.min(trimSamples, fullPass2R.length)) : fullPass2R.slice())
+      : null;
     let finalOffset = targetOffset + trimmedSec;
 
     if (finalOffset < 0) {
-      const extraTrim = Math.min(finalPCM.length, Math.round(-finalOffset * sampleRate));
-      finalPCM = finalPCM.slice(extraTrim);
+      const extraTrim = Math.min(finalPCML.length, Math.round(-finalOffset * sampleRate));
+      finalPCML = finalPCML.slice(extraTrim);
+      if (finalPCMR) finalPCMR = finalPCMR.slice(Math.min(extraTrim, finalPCMR.length));
       trimmedSec += extraTrim / sampleRate;
       finalOffset = 0;
     }
 
     // Apply glitch suppression & optional internal gain ONLY after sync peaks have been detected & trimmed
-    finalPCM = suppressAudioGlitches(finalPCM, sampleRate);
-    if (recordInternalGain && recordInternalGain.checked) {
-      finalPCM = processInternalGainAndNoiseSuppression(finalPCM, sampleRate, 0.75);
-    }
-
-    // Soft 5ms cosine ramp
-    const rampSamples = Math.min(finalPCM.length, Math.round(sampleRate * 0.005));
-    for (let i = 0; i < rampSamples; i++) {
-      finalPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
+    if (isStereoTake && finalPCMR) {
+      if (recordInternalGain && recordInternalGain.checked) {
+        const stereoProc = processStereoInternalGainAndNoiseSuppression(finalPCML, finalPCMR, sampleRate, 0.75);
+        finalPCML = stereoProc.left;
+        finalPCMR = stereoProc.right;
+      } else {
+        finalPCML = suppressAudioGlitches(finalPCML, sampleRate);
+        finalPCMR = suppressAudioGlitches(finalPCMR, sampleRate);
+      }
+    } else {
+      finalPCML = suppressAudioGlitches(finalPCML, sampleRate);
+      if (recordInternalGain && recordInternalGain.checked) {
+        finalPCML = processInternalGainAndNoiseSuppression(finalPCML, sampleRate, 0.75);
+      }
     }
 
     const ctx = audio.getOrCreateAudioContext() || recAudioCtx;
-    const takeBuffer = ctx.createBuffer(1, finalPCM.length, sampleRate);
-    takeBuffer.getChannelData(0).set(finalPCM);
+    const takeBuffer = buildRecordedTakeAudioBuffer(ctx, finalPCML, finalPCMR, isStereoTake, sampleRate);
 
     recordedTakesCount++;
     const takeName = `Recorded Take ${recordedTakesCount}`;
@@ -5060,11 +6014,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     timeline.updateInspectorPane();
     if (timeline.scrollToStart) timeline.scrollToStart();
 
-    showToast(`Sync locked! "${takeName}" placed below "${guideTrack.name}" with Peak 1 anchor aligned!`, 'success', 5000);
-    const takeDurationSec = Number((finalPCM.length / sampleRate).toFixed(3));
+    const chTag = takeBuffer.numberOfChannels === 2 ? ' (Stereo)' : '';
+    showToast(`Sync locked! "${takeName}"${chTag} placed below "${guideTrack.name}" with Peak 1 anchor aligned!`, 'success', 5000);
+    const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
     recDiag('REC_TRACK_SYNC_COMPLETE', {
       takeName,
       takeDurationSec,
+      channels: takeBuffer.numberOfChannels,
       sampleRate,
       finalOffset: Number(finalOffset.toFixed(4)),
       metroPeaksCount: metroPeaksTimelineSec.length,
@@ -5077,37 +6033,44 @@ document.addEventListener('DOMContentLoaded', async () => {
       window.zoomProfiler.endRecSession('completed_track_sync', {
         takeName,
         takeDurationSec,
+        channels: takeBuffer.numberOfChannels,
         sampleRate,
         finalOffset: Number(finalOffset.toFixed(4))
       });
     }
   }
 
-  function fallbackAddTrack(rawTakePCM, sampleRate, guideIdx) {
-    let pcm = suppressAudioGlitches(rawTakePCM.slice(), sampleRate);
-    if (recordInternalGain && recordInternalGain.checked) {
-      pcm = processInternalGainAndNoiseSuppression(pcm, sampleRate, 0.75);
-    }
-    if (!pcm || pcm.length < Math.round(sampleRate * 0.1)) {
-      pcm = new Float32Array(Math.round(sampleRate * 1.0));
-    }
-    const rampSamples = Math.min(pcm.length, Math.round(sampleRate * 0.005));
-    for (let i = 0; i < rampSamples; i++) {
-      pcm[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / rampSamples)));
+  function fallbackAddTrack(rawTakePCML, rawTakePCMR, isStereoTake, sampleRate, guideIdx) {
+    let pcmL = null;
+    let pcmR = null;
+    if (isStereoTake && rawTakePCMR && rawTakePCMR.length > 0) {
+      if (recordInternalGain && recordInternalGain.checked) {
+        const stereoProc = processStereoInternalGainAndNoiseSuppression(rawTakePCML.slice(), rawTakePCMR.slice(), sampleRate, 0.75);
+        pcmL = stereoProc.left;
+        pcmR = stereoProc.right;
+      } else {
+        pcmL = suppressAudioGlitches(rawTakePCML.slice(), sampleRate);
+        pcmR = suppressAudioGlitches(rawTakePCMR.slice(), sampleRate);
+      }
+    } else {
+      pcmL = suppressAudioGlitches(rawTakePCML.slice(), sampleRate);
+      if (recordInternalGain && recordInternalGain.checked) {
+        pcmL = processInternalGainAndNoiseSuppression(pcmL, sampleRate, 0.75);
+      }
     }
     const ctx = audio.getOrCreateAudioContext() || recAudioCtx;
-    const takeBuffer = ctx.createBuffer(1, pcm.length, sampleRate);
-    takeBuffer.getChannelData(0).set(pcm);
+    const takeBuffer = buildRecordedTakeAudioBuffer(ctx, pcmL, pcmR, isStereoTake, sampleRate);
 
     recordedTakesCount++;
     const takeName = `Recorded Take ${recordedTakesCount}`;
     const insertIdx = (guideIdx !== null && guideIdx !== undefined) ? guideIdx + 1 : audio.tracks.length;
     audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444', insertIdx);
 
-    const takeDurationSec = Number((pcm.length / sampleRate).toFixed(3));
+    const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
     recDiag('REC_TRACK_SYNC_FALLBACK_ADDED', {
       takeName,
       takeDurationSec,
+      channels: takeBuffer.numberOfChannels,
       sampleRate,
       guideIdx
     }, {
@@ -5119,6 +6082,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       window.zoomProfiler.endRecSession('completed_fallback_unshifted', {
         takeName,
         takeDurationSec,
+        channels: takeBuffer.numberOfChannels,
         sampleRate
       });
     }
@@ -5159,7 +6123,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Proactively pre-allocate standby buffers and pre-warm AudioWorklet ahead of time!
         pass1AudioStore.prepareAheadOfTime(4);
+        pass1AudioStoreR.prepareAheadOfTime(2);
         pass2AudioStore.prepareAheadOfTime(4);
+        pass2AudioStoreR.prepareAheadOfTime(2);
         const preCtx = audio.getOrCreateAudioContext();
         if (preCtx) ensureRecorderWorklet(preCtx);
 
@@ -5207,19 +6173,25 @@ document.addEventListener('DOMContentLoaded', async () => {
       btnStartRecordingAction.textContent = '⏳ Initializing...';
       btnStartRecordingAction.disabled = true;
 
-      // 2. Transfer active VU stream to recStream to eliminate secondary getUserMedia spinup delay!
-      const canTransferVuStream = Boolean(vuStream && vuStream.active && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live');
+      // 2. Transfer active VU stream to recStream if it already satisfies the selected channel count!
+      const sel = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
+      const vuStreamLive = Boolean(vuStream && vuStream.active && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live');
+      const canTransferVuStream = vuStreamLive && (getStreamActualChannels(vuStream) >= sel.neededChannels);
       recDiag('REC_START_BTN_CLICK', {
+        channelSelection: sel,
         transferredVuStream: canTransferVuStream,
-        vuStreamSpec: canTransferVuStream ? inspectMediaStream(vuStream) : null,
+        vuStreamChannels: vuStreamLive ? getStreamActualChannels(vuStream) : 0,
+        vuStreamSpec: vuStreamLive ? inspectMediaStream(vuStream) : null,
         ctx: inspectAudioCtx(audio.audioCtx)
       }, { forcePersist: true });
 
       if (canTransferVuStream) {
         recStream = vuStream;
         vuStream = null;
+        stopVUMonitor(true);
+      } else {
+        stopVUMonitor(false);
       }
-      stopVUMonitor(true);
 
       // 3. Close the modal
       if (recordSetupModal) {

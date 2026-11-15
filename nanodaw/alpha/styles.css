@@ -1284,6 +1284,70 @@ body {
   margin-bottom: max(20px, calc(env(safe-area-inset-bottom, 0px) + 20px));
 }
 
+.record-device-group,
+.record-channel-row {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+.record-channel-row {
+  gap: 6px;
+}
+
+.record-field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.record-channel-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.record-channel-badge {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  color: #38bdf8;
+  line-height: 1.25;
+  white-space: nowrap;
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.record-channel-badge.signal-hint {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.55);
+  color: #fbbf24;
+}
+
+.record-select-control {
+  width: 100%;
+  min-block-size: 38px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+@media (pointer: coarse) {
+  .record-select-control {
+    min-block-size: 44px;
+    font-size: 16px;
+  }
+}
+
 .record-vu-meter-strip {
   width: 30px;
   flex-shrink: 0;
@@ -1301,6 +1365,29 @@ body {
 
 .record-vu-meter-strip.sync-active {
   width: 40px;
+}
+
+.record-vu-meter-strip.stereo-active {
+  width: 44px;
+}
+
+.record-vu-meter-strip.stereo-active.sync-active {
+  width: 48px;
+}
+
+.vu-mode-label {
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin: 2px 0;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.record-vu-meter-strip.stereo-active .vu-mode-label {
+  color: #38bdf8;
 }
 
 .record-vu-meter-strip.peak-hit {
@@ -1347,6 +1434,14 @@ body {
   margin: 2px 0;
 }
 
+.vu-bars-pair {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 3px;
+  height: 100%;
+}
+
 .vu-meter-track-inner {
   width: 12px;
   height: 100%;
@@ -1358,6 +1453,14 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
+}
+
+.record-vu-meter-strip.stereo-active .vu-meter-track-inner {
+  width: 9px;
+}
+
+.record-vu-meter-strip.stereo-active .vu-sens-thumb {
+  width: 30px;
 }
 
 .vu-sens-zone-fill {

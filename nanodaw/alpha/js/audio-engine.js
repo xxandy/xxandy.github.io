@@ -577,6 +577,43 @@ class AudioEngine {
   }
 
   /**
+   * Compute waveform peaks across ALL channels of an AudioBuffer slice (so Right-only stereo signals render properly)
+   */
+  computeBufferSlicePeaks(audioBuffer, startFrame, endFrame, duration, pointsPerSec = 80) {
+    const numChannels = Math.max(1, audioBuffer.numberOfChannels || 1);
+    if (numChannels === 1) {
+      return this.computePeaks(audioBuffer.getChannelData(0).subarray(startFrame, endFrame), duration, pointsPerSec);
+    }
+    const sliceLen = Math.max(0, endFrame - startFrame);
+    const totalPoints = Math.max(10, Math.floor(duration * pointsPerSec));
+    const samplesPerPoint = Math.max(1, Math.floor(sliceLen / totalPoints));
+    const minPeaks = new Float32Array(totalPoints);
+    const maxPeaks = new Float32Array(totalPoints);
+    const channels = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      channels.push(audioBuffer.getChannelData(ch).subarray(startFrame, endFrame));
+    }
+
+    for (let p = 0; p < totalPoints; p++) {
+      let min = 1.0;
+      let max = -1.0;
+      const start = p * samplesPerPoint;
+      const end = Math.min((p + 1) * samplesPerPoint, sliceLen);
+      for (let ch = 0; ch < numChannels; ch++) {
+        const chArr = channels[ch];
+        for (let s = start; s < end; s += 4) {
+          const val = chArr[s];
+          if (val < min) min = val;
+          if (val > max) max = val;
+        }
+      }
+      minPeaks[p] = min === 1.0 ? 0 : min;
+      maxPeaks[p] = max === -1.0 ? 0 : max;
+    }
+    return { minPeaks, maxPeaks, totalPoints };
+  }
+
+  /**
    * Apply smooth half-cosine micro-fade out on the tail of an audio buffer
    */
   applyBufferMicroFadeEnd(audioBuffer, fadeSeconds = 0.05) {
@@ -742,7 +779,7 @@ class AudioEngine {
               }
               chunk.buffer = chunkBuf;
               chunk.duration = frames / fullBuf.sampleRate;
-              const p = this.computePeaks(fullBuf.getChannelData(0).subarray(startFrame, endFrame), chunk.duration);
+              const p = this.computeBufferSlicePeaks(fullBuf, startFrame, endFrame, chunk.duration);
               chunk.minPeaks = p.minPeaks;
               chunk.maxPeaks = p.maxPeaks;
               chunk.totalPoints = p.totalPoints;
@@ -779,7 +816,7 @@ class AudioEngine {
             }
             chunk.buffer = chunkBuf;
             chunk.duration = frames / fullBuf.sampleRate;
-            const p = this.computePeaks(fullBuf.getChannelData(0).subarray(startFrame, endFrame), chunk.duration);
+            const p = this.computeBufferSlicePeaks(fullBuf, startFrame, endFrame, chunk.duration);
             chunk.minPeaks = p.minPeaks;
             chunk.maxPeaks = p.maxPeaks;
             chunk.totalPoints = p.totalPoints;
@@ -1528,8 +1565,7 @@ class AudioEngine {
         }
       }
 
-      const leadChannel = audioBuffer.getChannelData(0).subarray(startSample, endSample);
-      const peaks = this.computePeaks(leadChannel, chunkDurSec);
+      const peaks = this.computeBufferSlicePeaks(audioBuffer, startSample, endSample, chunkDurSec);
 
       chunks.push({
         index: k,
