@@ -1668,15 +1668,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=77', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=78', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=77');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=78');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=77');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=78');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -3131,12 +3131,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const MAX_PEAK_TRIANGLES = 10;
+  const PEAK_TRIANGLE_FADE_START_SLOT = 5; // 6th triangle (0-indexed slot 5) begins fading toward 0 at the 11th (slot 10)
   const PEAK_TRIANGLE_IDLE_MS = 6000;
   let vuTapTestCount = 0;
   let vuFlashTimerId = null;
   let vuTriangleIdleTimerId = null;
   let vuTriangleFadeEpoch = 0;
   let activePeakTriangles = [];
+
+  function getPeakTriangleSlotAlpha(slotIdx) {
+    if (slotIdx < PEAK_TRIANGLE_FADE_START_SLOT) return 1;
+    const fadeSpan = (MAX_PEAK_TRIANGLES - PEAK_TRIANGLE_FADE_START_SLOT) + 1; // 6 equal steps: 5/6, 4/6, 3/6, 2/6, 1/6, 0
+    const remaining = (MAX_PEAK_TRIANGLES - slotIdx) / fadeSpan;
+    return Math.max(0, Math.min(1, remaining));
+  }
 
   function getSyncColorCycleLength() {
     if (guideModeSynth && guideModeSynth.checked) {
@@ -3170,6 +3178,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.dataset.peakSeq = String(beatSeqIdx);
     el.style.setProperty('--tri-color', getPeakTriangleGreenShade(beatSeqIdx, cycleLen));
     el.style.setProperty('--tri-slot', '0');
+    el.style.setProperty('--tri-alpha', '1');
     el.innerHTML = '<svg viewBox="0 0 11 9" width="11" height="9" aria-hidden="true" focusable="false"><polygon points="0.8,4.5 10.2,0.7 10.2,8.3" fill="currentColor" stroke="rgba(2, 44, 34, 0.85)" stroke-width="0.85" stroke-linejoin="round"/></svg>';
     return el;
   }
@@ -3265,9 +3274,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const cycleLen = getSyncColorCycleLength();
 
     if (trailEl) {
-      // Scroll existing triangles down by 1 row
+      // Scroll existing triangles down by 1 row and taper alpha from the 6th triangle (slot 5) onwards
       for (let i = 0; i < activePeakTriangles.length; i++) {
-        activePeakTriangles[i].style.setProperty('--tri-slot', String(i + 1));
+        const nextSlot = i + 1;
+        activePeakTriangles[i].style.setProperty('--tri-slot', String(nextSlot));
+        activePeakTriangles[i].style.setProperty('--tri-alpha', getPeakTriangleSlotAlpha(nextSlot).toFixed(4));
       }
 
       // Insert new left-pointing triangle at row 0 directly to the left of [PEAK]
