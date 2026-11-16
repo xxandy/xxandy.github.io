@@ -401,4 +401,27 @@ class StateManager {
   addTrack(trackData, trackState = { volume: 1.0, mute: false, solo: false }) {
     return this.insertTrack(trackData, trackState, null);
   }
+
+  deleteTrack(trackIndex) {
+    if (!this.project || !Array.isArray(this.project.tracks)) return null;
+    if (trackIndex < 0 || trackIndex >= this.project.tracks.length) return null;
+
+    const removed = this.project.tracks.splice(trackIndex, 1)[0];
+    this.tracksState.splice(trackIndex, 1);
+
+    if (this.project.tracks.length === 0) {
+      this.selectedTrackIndex = 0;
+    } else if (trackIndex < this.selectedTrackIndex) {
+      this.selectedTrackIndex = Math.max(0, this.selectedTrackIndex - 1);
+    } else if (this.selectedTrackIndex >= this.project.tracks.length) {
+      this.selectedTrackIndex = this.project.tracks.length - 1;
+    }
+
+    this.notify('track_deleted', {
+      track: removed,
+      index: trackIndex,
+      selectedTrackIndex: this.selectedTrackIndex
+    });
+    return removed;
+  }
 }

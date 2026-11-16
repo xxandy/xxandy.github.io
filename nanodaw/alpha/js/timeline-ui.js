@@ -58,6 +58,8 @@ class TimelineUI {
     this.pinchTracksOverlay = null;
     this.syncLinesData = null;
     this.syncLinesOverlay = null;
+    this.swipedOpenTrackIndex = null;
+    this.onRequestDeleteTrack = null;
 
     // Runtime flag for Option C (hardware-stretched waveform) vs Option A (dots only, waveform suppressed)
     let storedStretch = null;
@@ -97,8 +99,21 @@ class TimelineUI {
     // Scroll event on timeline
     this.timelineScrollArea.addEventListener('scroll', () => {
       this.scrollLeft = this.timelineScrollArea.scrollLeft;
+      if (this.scrollLeft > 3 && this.swipedOpenTrackIndex !== null) {
+        this.closeAllMobileDeleteRows();
+      }
       this.updatePlayheadPosition();
       this.checkWindowedScroll();
+    }, { passive: true });
+
+    // Close swiped-open mobile delete action if user taps outside the revealed delete button or row
+    document.addEventListener('pointerdown', (e) => {
+      if (this.swipedOpenTrackIndex === null) return;
+      if (e.target.closest('.track-mobile-delete-btn')) return;
+      const openRow = this.tracksContainer?.querySelector(`.track-row[data-index="${this.swipedOpenTrackIndex}"]`);
+      if (!openRow || !openRow.contains(e.target)) {
+        this.closeAllMobileDeleteRows();
+      }
     }, { passive: true });
 
     // Middle mouse button "hand scroll" (drag horizontally) in desktop mode
@@ -168,6 +183,9 @@ class TimelineUI {
     // Touch events for mobile pinch-to-zoom
     this.timelineScrollArea.addEventListener('touchstart', (e) => {
       if (e.touches.length === 2) {
+        if (this.swipedOpenTrackIndex !== null) {
+          this.closeAllMobileDeleteRows();
+        }
         this.startPinch(e);
       }
     }, { passive: true });
@@ -317,6 +335,25 @@ class TimelineUI {
     });
 
     this.audio.on('track_added', () => {
+      this.swipedOpenTrackIndex = null;
+      this.updateTimelineDimensions();
+      this.render();
+      this.renderRuler();
+      this.renderWaveforms();
+      this.updateInspectorPane();
+    });
+
+    this.audio.on('track_deleted', ({ trackIndex }) => {
+      this.swipedOpenTrackIndex = null;
+      if (this.syncLinesData) {
+        const { metroTrackIndex, recTrackIndex } = this.syncLinesData;
+        if (trackIndex === metroTrackIndex || trackIndex === recTrackIndex) {
+          this.clearSyncLines();
+        } else {
+          if (metroTrackIndex > trackIndex) this.syncLinesData.metroTrackIndex--;
+          if (recTrackIndex > trackIndex) this.syncLinesData.recTrackIndex--;
+        }
+      }
       this.updateTimelineDimensions();
       this.render();
       this.renderRuler();
@@ -412,7 +449,36 @@ class TimelineUI {
     const track = tracks[idx];
     const trackState = this.state.tracksState[idx] || { volume: 1.0, mute: false, solo: false };
 
-    if (!track) return;
+    if (!track) {
+      if (this.paneTrackDot) {
+        this.paneTrackDot.style.background = '#475569';
+        this.paneTrackDot.style.boxShadow = 'none';
+      }
+      if (this.paneTrackName) this.paneTrackName.textContent = 'No Tracks';
+      if (this.paneOffsetBadge) this.paneOffsetBadge.textContent = '—';
+      if (this.paneBtnMute) {
+        this.paneBtnMute.classList.remove('active');
+        this.paneBtnMute.disabled = true;
+      }
+      if (this.paneBtnSolo) {
+        this.paneBtnSolo.classList.remove('active');
+        this.paneBtnSolo.disabled = true;
+      }
+      if (this.paneVolSlider) {
+        this.paneVolSlider.value = 1.0;
+        this.paneVolSlider.disabled = true;
+      }
+      if (this.paneVolLabel) this.paneVolLabel.textContent = '0.0 dB';
+      if (this.panePrevTrack) this.panePrevTrack.disabled = true;
+      if (this.paneNextTrack) this.paneNextTrack.disabled = true;
+      return;
+    }
+
+    if (this.paneBtnMute) this.paneBtnMute.disabled = false;
+    if (this.paneBtnSolo) this.paneBtnSolo.disabled = false;
+    if (this.paneVolSlider) this.paneVolSlider.disabled = false;
+    if (this.panePrevTrack) this.panePrevTrack.disabled = tracks.length <= 1;
+    if (this.paneNextTrack) this.paneNextTrack.disabled = tracks.length <= 1;
 
     if (this.paneTrackDot) {
       this.paneTrackDot.style.background = track.color || '#00f2fe';
@@ -440,6 +506,9 @@ class TimelineUI {
   }
 
   handleResize() {
+    if (!this.isMobile() && this.swipedOpenTrackIndex !== null) {
+      this.closeAllMobileDeleteRows();
+    }
     this.maxZoom = this.computeProjectMaxZoom();
     this.minZoom = this.computeProjectMinZoom();
 
@@ -1317,8 +1386,35 @@ class TimelineUI {
       row.className = `track-row ${isDimmed ? 'track-dimmed' : ''} ${isSelected ? 'track-selected' : ''}`;
       row.dataset.index = index;
 
+      // Mobile Swipe-Right Revealed Delete Button (tucked on the left at x=0, revealed when sliding track right at t=0)
+      const mobileDeleteBtn = document.createElement('button');
+      mobileDeleteBtn.type = 'button';
+      mobileDeleteBtn.className = 'track-mobile-delete-btn';
+      mobileDeleteBtn.dataset.index = index;
+      mobileDeleteBtn.tabIndex = -1;
+      mobileDeleteBtn.title = `Delete ${t.name || `Track ${index + 1}`}`;
+      mobileDeleteBtn.setAttribute('aria-label', `Delete ${t.name || `Track ${index + 1}`}`);
+      mobileDeleteBtn.innerHTML = `
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+          <path d="M10 11v6"></path>
+          <path d="M14 11v6"></path>
+          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+        </svg>
+      `;
+      row.appendChild(mobileDeleteBtn);
+
       // Handle track selection when row is clicked
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (e) => {
+        if (row._suppressClickUntil && performance.now() < row._suppressClickUntil) {
+          e.stopPropagation();
+          return;
+        }
+        if (this.swipedOpenTrackIndex !== null && !e.target.closest('.track-mobile-delete-btn')) {
+          this.closeAllMobileDeleteRows();
+          return;
+        }
         if (this.state.selectedTrackIndex !== index) {
           this.state.selectTrack(index);
         }
@@ -1333,6 +1429,13 @@ class TimelineUI {
       sidebarCell.addEventListener('click', (e) => {
         if (this.isMobile()) {
           e.stopPropagation();
+          if (row._suppressClickUntil && performance.now() < row._suppressClickUntil) {
+            return;
+          }
+          if (this.swipedOpenTrackIndex !== null) {
+            this.closeAllMobileDeleteRows();
+            return;
+          }
           if (this.state.selectedTrackIndex === index) {
             this.state.toggleTrackMute(index);
           } else {
@@ -1382,8 +1485,17 @@ class TimelineUI {
         </div>
         <div class="track-controls">
           <div class="btn-group">
-            <button class="btn-ctrl btn-mute ${trackState.mute ? 'active' : ''}" data-action="mute" data-index="${index}" title="Mute Track (M)">M</button>
-            <button class="btn-ctrl btn-solo ${trackState.solo ? 'active' : ''}" data-action="solo" data-index="${index}" title="Solo Track (S)">S</button>
+            <button type="button" class="btn-ctrl btn-mute ${trackState.mute ? 'active' : ''}" data-action="mute" data-index="${index}" title="Mute Track (M)">M</button>
+            <button type="button" class="btn-ctrl btn-solo ${trackState.solo ? 'active' : ''}" data-action="solo" data-index="${index}" title="Solo Track (S)">S</button>
+            <button type="button" class="btn-ctrl btn-delete-track" data-action="delete" data-index="${index}" title="Delete Track" aria-label="Delete ${this.escapeHtml(t.name)}">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+                <path d="M10 11v6"></path>
+                <path d="M14 11v6"></path>
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+              </svg>
+            </button>
           </div>
           <div class="fader-group">
             <input type="range" class="track-vol-slider" min="0" max="1.5" step="0.01" value="${trackState.volume}" data-index="${index}" title="Volume: ${Math.round(trackState.volume * 100)}%">
@@ -1414,6 +1526,7 @@ class TimelineUI {
       lane.appendChild(canvas);
 
       row.appendChild(lane);
+      this.attachMobileRowSwipeGesture(row, index);
       this.tracksContainer.appendChild(row);
     });
 
@@ -1423,6 +1536,164 @@ class TimelineUI {
     this.renderMarkerElements();
     this.updatePlayheadPosition();
     this.updateInspectorPane();
+  }
+
+  setRowSwipeOffset(rowEl, px, isDragging) {
+    if (!rowEl) return;
+    const revealW = 44;
+    const clamped = Math.max(0, px);
+    const progress = Math.min(1, clamped / revealW);
+    rowEl.style.setProperty('--swipe-x', `${clamped.toFixed(1)}px`);
+    rowEl.style.setProperty('--swipe-progress', progress.toFixed(3));
+    rowEl.classList.toggle('swipe-dragging', Boolean(isDragging));
+    const isOpen = !isDragging && clamped >= revealW - 0.5;
+    rowEl.classList.toggle('swipe-delete-open', isOpen);
+    const btn = rowEl.querySelector('.track-mobile-delete-btn');
+    if (btn) btn.tabIndex = isOpen ? 0 : -1;
+  }
+
+  openMobileDeleteRow(trackIndex) {
+    if (!this.tracksContainer) return;
+    this.tracksContainer.querySelectorAll('.track-row').forEach(r => {
+      const rIdx = parseInt(r.dataset.index, 10);
+      if (rIdx === trackIndex) {
+        this.setRowSwipeOffset(r, 44, false);
+      } else {
+        this.setRowSwipeOffset(r, 0, false);
+      }
+    });
+    this.swipedOpenTrackIndex = trackIndex;
+  }
+
+  closeAllMobileDeleteRows() {
+    if (this.tracksContainer) {
+      this.tracksContainer.querySelectorAll('.track-row').forEach(r => {
+        this.setRowSwipeOffset(r, 0, false);
+      });
+    }
+    this.swipedOpenTrackIndex = null;
+  }
+
+  attachMobileRowSwipeGesture(row, index) {
+    const revealW = 44;
+    let startX = 0;
+    let startY = 0;
+    let startScrollLeft = 0;
+    let wasOpen = false;
+    let baseOffset = 0;
+    let currentOffset = 0;
+    let gestureMode = null; // null | 'swipe' | 'native'
+    let active = false;
+
+    const beginGesture = (clientX, clientY) => {
+      if (!this.isMobile() || this.isPinching || (this.audio && this.audio.isRecording)) return false;
+      if (this.swipedOpenTrackIndex !== null && this.swipedOpenTrackIndex !== index) {
+        this.closeAllMobileDeleteRows();
+      }
+      startX = clientX;
+      startY = clientY;
+      startScrollLeft = this.timelineScrollArea ? this.timelineScrollArea.scrollLeft : 0;
+      wasOpen = (this.swipedOpenTrackIndex === index);
+      baseOffset = wasOpen ? revealW : 0;
+      currentOffset = baseOffset;
+      gestureMode = null;
+      active = true;
+      return true;
+    };
+
+    const moveGesture = (clientX, clientY, preventDefaultFn) => {
+      if (!active || !this.isMobile() || this.isPinching) return;
+      const dx = clientX - startX;
+      const dy = clientY - startY;
+
+      if (gestureMode === null) {
+        if (Math.hypot(dx, dy) < 7) return;
+        if (Math.abs(dy) >= Math.abs(dx)) {
+          gestureMode = 'native';
+          return;
+        }
+        const curScrollLeft = this.timelineScrollArea ? this.timelineScrollArea.scrollLeft : 0;
+        if (wasOpen) {
+          gestureMode = 'swipe';
+        } else if (dx > 0 && startScrollLeft <= 2 && curScrollLeft <= 2) {
+          // Parked at the beginning of the timeline (t=0) and sliding track to the right!
+          gestureMode = 'swipe';
+        } else {
+          gestureMode = 'native';
+          return;
+        }
+      }
+
+      if (gestureMode === 'swipe') {
+        if (preventDefaultFn) preventDefaultFn();
+        const raw = baseOffset + dx;
+        const damped = raw <= revealW ? Math.max(0, raw) : revealW + (raw - revealW) * 0.22;
+        currentOffset = damped;
+        this.setRowSwipeOffset(row, damped, true);
+      }
+    };
+
+    const endGesture = () => {
+      if (!active) return;
+      active = false;
+      if (gestureMode === 'swipe') {
+        row._suppressClickUntil = performance.now() + 260;
+        const shouldOpen = wasOpen ? (currentOffset > revealW * 0.65) : (currentOffset >= revealW * 0.45);
+        if (shouldOpen) {
+          this.openMobileDeleteRow(index);
+        } else {
+          this.closeAllMobileDeleteRows();
+        }
+      }
+      gestureMode = null;
+    };
+
+    row.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || (e.target && e.target.closest && e.target.closest('.track-mobile-delete-btn'))) return;
+      beginGesture(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
+
+    row.addEventListener('touchmove', (e) => {
+      if (!active || e.touches.length !== 1) {
+        if (active) {
+          active = false;
+          if (gestureMode === 'swipe') this.closeAllMobileDeleteRows();
+        }
+        return;
+      }
+      moveGesture(e.touches[0].clientX, e.touches[0].clientY, () => {
+        if (e.cancelable) e.preventDefault();
+      });
+    }, { passive: false });
+
+    row.addEventListener('touchend', endGesture);
+    row.addEventListener('touchcancel', () => {
+      if (active) {
+        active = false;
+        this.closeAllMobileDeleteRows();
+        gestureMode = null;
+      }
+    });
+
+    // Also support mouse drag when testing mobile viewport width (<= 768px) on desktop
+    row.addEventListener('mousedown', (e) => {
+      if (!this.isMobile() || e.button !== 0 || e.target.closest('.track-mobile-delete-btn') || e.target.closest('.track-vol-slider')) return;
+      if (!beginGesture(e.clientX, e.clientY)) return;
+      const onMouseMove = (me) => moveGesture(me.clientX, me.clientY, () => me.preventDefault());
+      const onMouseUp = () => {
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        endGesture();
+      };
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    });
+  }
+
+  requestDeleteTrack(trackIndex) {
+    if (typeof this.onRequestDeleteTrack === 'function') {
+      this.onRequestDeleteTrack(trackIndex);
+    }
   }
 
   bindTrackControlEvents() {
@@ -1439,6 +1710,14 @@ class TimelineUI {
         e.stopPropagation();
         const idx = parseInt(btn.dataset.index, 10);
         this.state.toggleTrackSolo(idx);
+      });
+    });
+
+    this.tracksContainer.querySelectorAll('.btn-delete-track, .track-mobile-delete-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.dataset.index, 10);
+        this.requestDeleteTrack(idx);
       });
     });
 

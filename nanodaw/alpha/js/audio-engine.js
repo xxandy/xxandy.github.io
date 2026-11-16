@@ -700,25 +700,26 @@ class AudioEngine {
    */
   async decodeTrackChunk(trackIndex, chunkIndex) {
     const track = this.tracks[trackIndex];
-    if (!track || !track.chunks || !track.chunks[chunkIndex]) return;
+    if (!track || track._deleted || !track.chunks || !track.chunks[chunkIndex]) return;
     const chunk = track.chunks[chunkIndex];
     if (chunk.status === 'decoded') return chunk;
     if (chunk.decodePromise) return chunk.decodePromise;
 
     chunk.status = 'loading';
-    this.emit('chunk_loading', { trackIndex, chunkIndex });
+    this.emit('chunk_loading', { trackIndex: track.index, chunkIndex });
 
     chunk.decodePromise = (async () => {
       const _chunkDecodeStart = performance.now();
       if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
         window.zoomProfiler.logEvent(window.PROFILER_STEP.CHUNK_DECODE_START, {
           opType: window.PROFILER_OP ? window.PROFILER_OP.PROJECT : 7,
-          trackIndex,
+          trackIndex: track.index,
           extraData: chunkIndex
         });
       }
       try {
         const bytes = await track.loader.ensureBuffer();
+        if (track._deleted) return null;
         this.ensureAudioContextUnlocked();
 
         // Detect actual media duration if not explicitly specified in project JSON
@@ -729,7 +730,7 @@ class AudioEngine {
             track.durationDetected = true;
             this.syncTrackChunks(track);
             this.emit('track_duration_updated', {
-              trackIndex,
+              trackIndex: track.index,
               duration: track.duration,
               totalDuration: this.getTotalDuration()
             });
@@ -876,7 +877,8 @@ class AudioEngine {
           }
         }
 
-        this.emit('chunk_decoded', { trackIndex, chunkIndex, chunk });
+        if (track._deleted) return null;
+        this.emit('chunk_decoded', { trackIndex: track.index, chunkIndex, chunk });
 
         if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
           window.zoomProfiler.logEvent(window.PROFILER_STEP.CHUNK_DECODE_END, {
@@ -1624,6 +1626,83 @@ class AudioEngine {
 
     this.emit('track_added', { trackIndex: idx, track: trackData, totalDuration });
     return trackData;
+  }
+
+  /**
+   * Irreversibly delete a track at trackIndex, stopping & disconnecting its Web Audio nodes
+   */
+  deleteTrack(trackIndex) {
+    if (trackIndex < 0 || trackIndex >= this.tracks.length) return null;
+    const removedTrack = this.tracks[trackIndex];
+    if (removedTrack) {
+      removedTrack._deleted = true;
+      if (removedTrack.sourceNodes) {
+        for (const [, src] of removedTrack.sourceNodes) {
+          try {
+            src.onended = null;
+            src.stop(0);
+          } catch (_) {}
+          try { src.disconnect(); } catch (_) {}
+          if (this.activeSources) this.activeSources.delete(src);
+        }
+        removedTrack.sourceNodes.clear();
+      }
+      if (removedTrack.sourceNode) {
+        try {
+          removedTrack.sourceNode.onended = null;
+          removedTrack.sourceNode.stop(0);
+        } catch (_) {}
+        try { removedTrack.sourceNode.disconnect(); } catch (_) {}
+        if (this.activeSources) this.activeSources.delete(removedTrack.sourceNode);
+        removedTrack.sourceNode = null;
+      }
+      if (removedTrack.gainNode) {
+        try { removedTrack.gainNode.disconnect(); } catch (_) {}
+        removedTrack.gainNode = null;
+      }
+      if (removedTrack.analyserNode) {
+        try { removedTrack.analyserNode.disconnect(); } catch (_) {}
+        removedTrack.analyserNode = null;
+      }
+      removedTrack.chunks = [];
+      removedTrack.fullAudioBuffer = null;
+      removedTrack.fullAudioPromise = null;
+      if (removedTrack.loader) {
+        removedTrack.loader.fullBuffer = null;
+        removedTrack.loader.fetchPromise = null;
+      }
+      removedTrack.mp3Decoder = null;
+    }
+
+    this.tracks.splice(trackIndex, 1);
+    this.tracks.forEach((t, i) => {
+      if (t) t.index = i;
+    });
+
+    if (this.state && typeof this.state.deleteTrack === 'function') {
+      this.state.deleteTrack(trackIndex);
+    }
+
+    const totalDuration = this.getTotalDuration();
+    if (this.tracks.length === 0) {
+      if (this.isPlaying) {
+        this.stop();
+      }
+      this.loopEnd = 0;
+      this.playheadPosition = 0;
+      if (this.state) this.state.setCurrentTime(0);
+    } else {
+      if (this.loopEnd > totalDuration || this.loopEnd <= 0) {
+        this.loopEnd = totalDuration;
+      }
+      if (this.playheadPosition > totalDuration) {
+        this.seek(0);
+      }
+      this.updateAllGains();
+    }
+
+    this.emit('track_deleted', { trackIndex, removedTrack, totalDuration });
+    return removedTrack;
   }
 
   /**

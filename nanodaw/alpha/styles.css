@@ -234,11 +234,32 @@ body {
 }
 
 .transport-left-group {
+  --transport-gap: 6px;
+  --play-btn-w: 58px;
+  --rec-btn-w: 32px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--transport-gap);
   flex-wrap: nowrap;
   flex-shrink: 0;
+}
+
+/* Fixed-width Play + Record slot: guarantees 0.00px horizontal shift of all controls to the right of REC */
+.transport-play-rec-slot {
+  width: calc(var(--play-btn-w) + var(--transport-gap) + var(--rec-btn-w));
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.transport-play-rec-slot.recording-mode .btn-record {
+  display: none !important;
+}
+
+.transport-play-rec-slot.recording-mode .btn-play-hero {
+  width: 100%;
 }
 
 .transport-right-group {
@@ -261,7 +282,7 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
   flex-shrink: 0;
 }
 
@@ -278,7 +299,7 @@ body {
 }
 
 .btn-play-hero {
-  width: 58px; /* 1.8x width of 32px rewind button (57.6px) */
+  width: var(--play-btn-w); /* 1.8x width of 32px rewind button (57.6px) */
   height: 32px;
   padding: 0;
   display: flex;
@@ -289,7 +310,7 @@ body {
   border: 1px solid #059669;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   flex-shrink: 0;
 }
 
@@ -844,6 +865,8 @@ body {
 }
 
 .track-row {
+  --swipe-x: 0px;
+  --swipe-progress: 0;
   height: var(--track-height);
   display: flex;
   flex-direction: row;
@@ -853,6 +876,68 @@ body {
   cursor: pointer;
   width: fit-content;
   min-width: 100%;
+}
+
+/* Mobile Swipe-Right Reveal Delete Button (parked at timeline start t=0) */
+.track-mobile-delete-btn {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--track-sidebar-width);
+  background: linear-gradient(180deg, #ef4444 0%, #dc2626 100%);
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 34;
+  opacity: var(--swipe-progress, 0);
+  visibility: hidden;
+  pointer-events: none;
+  padding: 0;
+  transition: opacity 0.18s ease, background-color 0.12s ease;
+}
+
+.track-mobile-delete-btn:active {
+  background: #b91c1c;
+}
+
+@media (max-width: 768px) {
+  .track-mobile-delete-btn {
+    display: flex;
+  }
+
+  .track-row.swipe-dragging .track-mobile-delete-btn,
+  .track-row.swipe-delete-open .track-mobile-delete-btn {
+    visibility: visible;
+  }
+
+  .track-row.swipe-delete-open .track-mobile-delete-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .track-row .track-sidebar-cell,
+  .track-row .track-lane {
+    transform: translateX(var(--swipe-x, 0px));
+    transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .track-row.swipe-dragging .track-sidebar-cell,
+  .track-row.swipe-dragging .track-lane {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .track-row .track-sidebar-cell,
+  .track-row .track-lane,
+  .track-mobile-delete-btn {
+    transition: none !important;
+  }
 }
 
 .track-row.track-dimmed .track-lane {
@@ -1041,8 +1126,8 @@ body {
 }
 
 .btn-ctrl {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 4px;
   border: 1px solid var(--border-subtle);
   background: rgba(255, 255, 255, 0.05);
@@ -1054,6 +1139,25 @@ body {
   align-items: center;
   justify-content: center;
   transition: all 0.12s ease;
+  padding: 0;
+}
+
+/* Desktop Active-Track Delete Button (to the right of Mute/Solo, shown ONLY on active track) */
+.btn-delete-track {
+  color: rgba(248, 113, 113, 0.85);
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.btn-delete-track:hover {
+  background: #ef4444;
+  border-color: #dc2626;
+  color: #fff;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.55);
+}
+
+.track-row:not(.track-selected) .btn-delete-track {
+  display: none;
 }
 
 .btn-mute:hover {
@@ -1982,7 +2086,8 @@ body {
   }
 
   .transport-left-group {
-    gap: 4px;
+    --transport-gap: 4px;
+    gap: var(--transport-gap);
   }
 
   .transport-spacer {
@@ -2340,4 +2445,90 @@ body.is-middle-panning * {
     padding: 5px 6px;
   }
 }
+
+/* --- Native Modal Confirmation Dialog (<dialog>) --- */
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: rgba(2, 6, 17, 0.76);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.confirm-dialog {
+  margin: auto;
+  padding: 0;
+  border: 1px solid rgba(239, 68, 68, 0.38);
+  border-radius: 14px;
+  background: var(--bg-surface-elevated);
+  color: var(--text-primary);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.78), 0 0 24px rgba(239, 68, 68, 0.16);
+  width: min(calc(100vw - 32px), 380px);
+  max-width: 380px;
+}
+
+.confirm-dialog[open] {
+  display: block;
+}
+
+.confirm-dialog-card {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.confirm-dialog-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #f87171;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.confirm-dialog-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.confirm-dialog-actions .btn {
+  min-block-size: 36px;
+  padding: 7px 14px;
+}
+
+@media (pointer: coarse) {
+  .confirm-dialog-actions .btn {
+    min-block-size: 44px;
+  }
+}
+
+.btn-danger-confirm {
+  background: #ef4444;
+  border-color: #dc2626;
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(239, 68, 68, 0.35);
+}
+
+.btn-danger-confirm:hover {
+  background: #dc2626;
+  border-color: #b91c1c;
+}
+
 

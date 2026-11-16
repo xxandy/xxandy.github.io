@@ -152,6 +152,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // --- Transport Controls ---
+  const transportPlayRecSlot = document.getElementById('transportPlayRecSlot');
   const btnPlay = document.getElementById('btnPlay');
   const btnRewind = document.getElementById('btnRewind');
   const btnLoop = document.getElementById('btnLoop');
@@ -163,7 +164,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnPlay) {
     btnPlay.addEventListener('click', () => {
-      audio.togglePlay();
+      if (isRecording) {
+        stopRecording();
+      } else {
+        audio.togglePlay();
+      }
     });
   }
 
@@ -448,12 +453,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Playback state UI changes: Toggle hero button between Play (green triangle) and Stop (red square)
+  // Playback & Recording state UI changes: Toggle hero button between Play (green triangle) and Stop (red square)
+  let transportRecModeActive = false;
   function updatePlayButtonUI(isPlaying) {
     if (!btnPlay) return;
-    if (isPlaying) {
+    const showStop = Boolean(isPlaying || transportRecModeActive || isRecording);
+    if (showStop) {
       btnPlay.classList.add('playing');
-      btnPlay.title = 'Stop (Space)';
+      btnPlay.title = (transportRecModeActive || isRecording) ? 'Stop Recording (Space)' : 'Stop (Space)';
+      btnPlay.setAttribute('aria-label', (transportRecModeActive || isRecording) ? 'Stop recording' : 'Stop playback');
       btnPlay.innerHTML = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
           <rect x="5" y="5" width="14" height="14" rx="2"/>
@@ -462,12 +470,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       btnPlay.classList.remove('playing');
       btnPlay.title = 'Play (Space)';
+      btnPlay.setAttribute('aria-label', 'Play');
       btnPlay.innerHTML = `
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
           <polygon points="6 4 20 12 6 20 6 4"/>
         </svg>
       `;
     }
+  }
+
+  function setTransportRecordingUI(active) {
+    transportRecModeActive = Boolean(active);
+    if (transportPlayRecSlot) {
+      transportPlayRecSlot.classList.toggle('recording-mode', transportRecModeActive);
+    }
+    updatePlayButtonUI(audio.isPlaying);
   }
 
   // --- Screen Wake Lock Management (prevent auto-lock during playback) ---
@@ -1651,15 +1668,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=76', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=77', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=76');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=77');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=76');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=77');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -4616,6 +4633,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     isRecording = false;
     recordingState = 'idle';
+    setTransportRecordingUI(false);
     pass2StreamStartTime = null;
     pass2DownbeatScheduledTime = null;
     isTrackSyncTake = false;
@@ -4881,6 +4899,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       isRecording = true;
+      setTransportRecordingUI(true);
       if (btnRecord) btnRecord.classList.add('recording');
       if (recordingHUD) {
         recordingHUD.classList.remove('hidden');
@@ -5684,6 +5703,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     isRecording = false; // Immediately disable to prevent re-entrant calls
+    setTransportRecordingUI(false);
     audio.isRecording = false;
     audio.isRecordingMode = false;
     audio.setPlaybackAudioSession();
@@ -6397,7 +6417,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         recordSetupModal.style.display = 'none';
       }
 
-      // 4. Immediate visual feedback: Show recording HUD with "INIT" status right away!
+      // 4. Immediate visual feedback: Show recording HUD with "INIT" status & expand Stop button right away!
+      setTransportRecordingUI(true);
       if (recordingHUD) {
         recordingHUD.classList.remove('hidden');
         recordingHUD.style.display = 'flex';
@@ -6558,10 +6579,79 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // --- Irreversible Delete Track Confirmation Controller (Native <dialog>) ---
+  const deleteTrackConfirmDialog = document.getElementById('deleteTrackConfirmDialog');
+  const deleteTrackConfirmDesc = document.getElementById('deleteTrackConfirmDesc');
+  let pendingDeleteTrackIndex = null;
+
+  if (deleteTrackConfirmDialog && !('closedBy' in HTMLDialogElement.prototype)) {
+    const isOutsideDialog = (e, dlg) => {
+      const r = dlg.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    let pressedOutside = false;
+    deleteTrackConfirmDialog.addEventListener('pointerdown', (e) => {
+      pressedOutside = isOutsideDialog(e, deleteTrackConfirmDialog);
+    });
+    deleteTrackConfirmDialog.addEventListener('pointerup', (e) => {
+      if (pressedOutside && isOutsideDialog(e, deleteTrackConfirmDialog)) {
+        deleteTrackConfirmDialog.close();
+      }
+    });
+  }
+
+  if (deleteTrackConfirmDialog) {
+    deleteTrackConfirmDialog.addEventListener('close', () => {
+      const choice = deleteTrackConfirmDialog.returnValue;
+      deleteTrackConfirmDialog.returnValue = '';
+      const idx = pendingDeleteTrackIndex;
+      pendingDeleteTrackIndex = null;
+
+      if (timeline && typeof timeline.closeAllMobileDeleteRows === 'function') {
+        timeline.closeAllMobileDeleteRows();
+      }
+
+      if (choice === 'delete' && idx !== null && idx >= 0 && idx < audio.tracks.length) {
+        const removed = audio.deleteTrack(idx);
+        const removedName = removed?.name || `Track ${idx + 1}`;
+        showToast(`Deleted "${removedName}"`, 'info', 2500);
+      }
+    });
+  }
+
+  timeline.onRequestDeleteTrack = (trackIndex) => {
+    if (isRecording) {
+      showToast('Stop recording before deleting a track.', 'warning', 3000);
+      return;
+    }
+    const track = state.project?.tracks?.[trackIndex] || audio.tracks?.[trackIndex];
+    if (!track) return;
+
+    pendingDeleteTrackIndex = trackIndex;
+    const trackLabel = track.name || `Track ${trackIndex + 1}`;
+    if (deleteTrackConfirmDesc) {
+      deleteTrackConfirmDesc.textContent = `Permanently delete "${trackLabel}"? This action is irreversible and cannot be undone.`;
+    }
+
+    if (deleteTrackConfirmDialog && typeof deleteTrackConfirmDialog.showModal === 'function') {
+      deleteTrackConfirmDialog.returnValue = '';
+      deleteTrackConfirmDialog.showModal();
+    } else if (confirm(`Permanently delete "${trackLabel}"? This action cannot be undone.`)) {
+      pendingDeleteTrackIndex = null;
+      if (timeline && typeof timeline.closeAllMobileDeleteRows === 'function') {
+        timeline.closeAllMobileDeleteRows();
+      }
+      audio.deleteTrack(trackIndex);
+      showToast(`Deleted "${trackLabel}"`, 'info', 2500);
+    }
+  };
+
   // --- Keyboard Shortcuts ---
   window.addEventListener('keydown', (e) => {
+    // Allow native modal <dialog> controls (Esc, Enter, Space) to work without interference
+    if (document.querySelector('dialog[open]')) return;
     // Ignore when typing inside an input
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
     switch (e.code) {
       case 'Space':
