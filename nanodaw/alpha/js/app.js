@@ -1651,15 +1651,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=75', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=76', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=75');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=76');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=75');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=76');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -2708,7 +2708,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (singleMetronomeOn) singleMetronomeOn.addEventListener('change', updateRecordModalToggles);
 
   // Tab Switcher and Metronome Generation Listeners
-  if (tabBtnRecord) tabBtnRecord.addEventListener('click', () => switchRecordModalTab('record'));
+  if (tabBtnRecord) {
+    tabBtnRecord.addEventListener('click', () => {
+      switchRecordModalTab('record');
+      startVUMonitor();
+    });
+  }
   if (tabBtnMetronome) tabBtnMetronome.addEventListener('click', () => switchRecordModalTab('metronome'));
 
   if (btnCancelMetronome && recordSetupModal) {
@@ -2723,21 +2728,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnGoMetronome) {
     btnGoMetronome.addEventListener('click', () => {
-      stopVUMonitor();
       const trackName = (metroTrackName?.value || '').trim() || getNextAvailableMetronomeName();
       const tempo = parseInt(metroTempo?.value, 10) || state.project?.tempo || state.project?.bpm || 90;
       const beatsPerMeasure = parseInt(metroBeatsPerMeasure?.value, 10) || 4;
       const durSec = parseDurationToSeconds(metroDuration?.value || '03:00');
 
       const metroBuffer = generateMetronomeAudioBuffer(tempo, beatsPerMeasure, durSec);
-
-      // Close record modal
-      if (recordSetupModal) {
-        recordSetupModal.classList.add('hidden');
-        recordSetupModal.style.display = 'none';
-      }
-      audio.isRecordingMode = false;
-      audio.setPlaybackAudioSession();
 
       // Insert at the TOP of the project (index 0) with full metronome metadata
       const trackData = audio.addRecordedTrack(trackName, metroBuffer, 0, '#38bdf8', 0, {
@@ -2760,14 +2756,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.project.bpm = tempo;
       }
 
-      // Re-render project
+      // Re-render project in the background
       timeline.render();
       timeline.renderWaveforms();
       timeline.updateInspectorPane();
 
+      // Refresh Guide Track list, select the newly generated metronome track, and switch back to Audio Record tab (keeping modal open!)
+      populateSyncGuideTracks();
+      if (syncGuideTrackSelect) {
+        syncGuideTrackSelect.value = '0';
+      }
+      if (metroTrackName) {
+        metroTrackName.value = getNextAvailableMetronomeName();
+      }
+      resetPreRecTapTest();
+      switchRecordModalTab('record');
+      startVUMonitor();
+
       const m = Math.floor(durSec / 60);
       const s = String(Math.floor(durSec % 60)).padStart(2, '0');
-      showToast(`Created "${trackName}" (${tempo} BPM, ${m}:${s}) at the top of the project!`, 'success', 4000);
+      showToast(`Created "${trackName}" (${tempo} BPM, ${m}:${s}) — ready to record!`, 'success', 4000);
     });
   }
 
@@ -3098,6 +3106,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     peakSensDb = clamped;
+    clearPeakTrianglesImmediate();
     try {
       localStorage.setItem(PEAK_SENS_STORAGE_KEY, String(peakSensDb));
     } catch (_) {}
@@ -3105,7 +3114,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const MAX_PEAK_TRIANGLES = 10;
-  const PEAK_TRIANGLE_IDLE_MS = 10000;
+  const PEAK_TRIANGLE_IDLE_MS = 6000;
   let vuTapTestCount = 0;
   let vuFlashTimerId = null;
   let vuTriangleIdleTimerId = null;
@@ -3121,15 +3130,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     return Math.min(16, Math.max(1, n));
   }
 
-  // Generate N distinct bright-green shades in sRGB HSL so the colors repeat every "Beats to sync" peaks
+  // Generate N highly distinct shades sweeping from vivid yellow-lime through chartreuse & neon emerald to deep jade-green
   function getPeakTriangleGreenShade(stepIdx, cycleLen) {
     if (cycleLen <= 1) {
-      return 'hsl(132 92% 54%)';
+      return 'hsl(118 94% 54%)';
     }
-    const t = ((stepIdx % cycleLen) + cycleLen) % cycleLen / (cycleLen - 1);
-    const hue = Math.round(112 + t * 46);   // 112° (electric lime-green) -> 158° (rich emerald-green)
-    const sat = Math.round(96 - t * 8);     // 96% -> 88%
-    const light = Math.round(66 - t * 27);  // 66% -> 39% (all > 8:1 contrast on dark VU strip)
+    if (cycleLen === 2) {
+      return ((((stepIdx % 2) + 2) % 2) === 0)
+        ? 'hsl(58 98% 61%)'   // Bright yellow-lime
+        : 'hsl(152 90% 42%)'; // Rich emerald-green
+    }
+    const t = (((stepIdx % cycleLen) + cycleLen) % cycleLen) / (cycleLen - 1);
+    const hue = Math.round(54 + t * 120);   // 54° (bright yellow-lime) -> 94° (chartreuse) -> 134° (emerald) -> 174° (deep jade-green)
+    const sat = Math.round(98 - t * 10);    // 98% -> 88%
+    const light = Math.round(63 - t * 25);  // 63% -> 38% (all high contrast on dark VU strip)
     return `hsl(${hue} ${sat}% ${light}%)`;
   }
 
@@ -3149,6 +3163,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       const el = activePeakTriangles[i];
       const seq = parseInt(el.dataset.peakSeq, 10) || 0;
       el.style.setProperty('--tri-color', getPeakTriangleGreenShade(seq, cycleLen));
+    }
+  }
+
+  function clearPeakTrianglesImmediate() {
+    vuTapTestCount = 0;
+    vuTriangleFadeEpoch++;
+    if (vuTriangleIdleTimerId) {
+      clearTimeout(vuTriangleIdleTimerId);
+      vuTriangleIdleTimerId = null;
+    }
+    activePeakTriangles = [];
+    const trailEl = document.getElementById('vuPeakTriangleTrail');
+    if (trailEl) {
+      trailEl.removeAttribute('data-closing');
+      trailEl.innerHTML = '';
     }
   }
 
@@ -3190,21 +3219,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function resetPreRecTapTest() {
-    vuTapTestCount = 0;
-    vuTriangleFadeEpoch++;
+    clearPeakTrianglesImmediate();
     if (vuFlashTimerId) {
       clearTimeout(vuFlashTimerId);
       vuFlashTimerId = null;
-    }
-    if (vuTriangleIdleTimerId) {
-      clearTimeout(vuTriangleIdleTimerId);
-      vuTriangleIdleTimerId = null;
-    }
-    activePeakTriangles = [];
-    const trailEl = document.getElementById('vuPeakTriangleTrail');
-    if (trailEl) {
-      trailEl.removeAttribute('data-closing');
-      trailEl.innerHTML = '';
     }
     const vuContainer = document.getElementById('recordVUMeterContainer');
     const peakBadge = document.getElementById('recordVUPeakBadge');
@@ -3247,7 +3265,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    // Fade out & clear all triangles if no peaks are detected for 10 seconds
+    // Fade out & clear all triangles if no peaks are detected for 6 seconds
     if (vuTriangleIdleTimerId) {
       clearTimeout(vuTriangleIdleTimerId);
     }
@@ -3350,6 +3368,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (sensSlider) {
           try { sensSlider.focus({ preventScroll: true }); } catch (_) {}
         }
+        clearPeakTrianglesImmediate();
         showThresholdDragLabel();
         updateFromClientY(e.clientY);
       });
@@ -3387,18 +3406,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       sensSlider.addEventListener('keydown', (e) => {
         if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
           e.preventDefault();
+          clearPeakTrianglesImmediate();
           showThresholdDragLabel();
           setPeakSensitivityDb(peakSensDb + 1);
         } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
           e.preventDefault();
+          clearPeakTrianglesImmediate();
           showThresholdDragLabel();
           setPeakSensitivityDb(peakSensDb - 1);
         } else if (e.key === 'Home') {
           e.preventDefault();
+          clearPeakTrianglesImmediate();
           showThresholdDragLabel();
           setPeakSensitivityDb(SENS_MIN_DB);
         } else if (e.key === 'End') {
           e.preventDefault();
+          clearPeakTrianglesImmediate();
           showThresholdDragLabel();
           setPeakSensitivityDb(SENS_MAX_DB);
         }
