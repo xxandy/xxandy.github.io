@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=73">
+  <link rel="stylesheet" href="styles.css?v=74">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -25,7 +25,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v73</span>
+        <span class="version-badge" id="appVersionBadge">v74</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -477,7 +477,7 @@
           </div>
 
           <!-- Controls + Vertical VU Meter Flex Row (aligns top of Mic Preamp Boost to bottom of NANOdaw sync) -->
-          <div style="display:flex; gap:10px; align-items:stretch;">
+          <div style="display:flex; gap:12px; align-items:stretch;">
             <!-- Left Side: Controls Column -->
             <div style="flex:1; display:flex; flex-direction:column; gap:10px; min-width:0;">
               
@@ -505,7 +505,7 @@
                 </label>
 
                 <!-- 2-Pass Options (visible when record2PassSync is checked) -->
-                <div id="container2PassSync" style="margin-top:12px; margin-left:26px; display:flex; flex-direction:column; gap:12px;">
+                <div id="container2PassSync" style="margin-top:12px; margin-left:26px; display:flex; flex-direction:column; gap:10px;">
                   <div style="font-size:11.5px; font-weight:600; color:var(--text-secondary);">Pass 1 Guide Beat:</div>
 
                   <!-- Option 1: Backing Track / Metronome Sync (Default) -->
@@ -530,9 +530,6 @@
                           <span>Beats to sync:</span>
                           <input type="number" id="syncTrackNumBeats" class="input-styled" value="4" min="1" max="16" style="width:50px; padding:3px 6px; font-size:12px;">
                         </div>
-                      </div>
-                      <div id="guideTrackSyncHint" style="font-size:11px; color:rgba(255,255,255,0.45); line-height:1.4;">
-                        No countdown. Tap along 4 beats from beat 5
                       </div>
                     </div>
                   </div>
@@ -559,23 +556,6 @@
                           <input type="text" id="syncMetronomeVolume" class="input-styled" value="0dB" style="width:55px; padding:3px 6px; font-size:12px;" placeholder="0dB">
                         </div>
                       </div>
-                    </div>
-                  </div>
-
-                  <!-- Live Pre-Recording Peak Detection Check Bar -->
-                  <div id="syncTapTestBar" class="sync-tap-test-bar" role="status" aria-live="polite">
-                    <div class="sync-tap-test-left">
-                      <span id="syncTapTestDot" class="sync-tap-test-dot" aria-hidden="true"></span>
-                      <span id="syncTapTestLabel" class="sync-tap-test-label">Tap near mic to test peak detection</span>
-                    </div>
-                    <div class="sync-tap-test-right">
-                      <div class="sync-test-beads" aria-hidden="true">
-                        <span class="test-bead" id="testBead1">1</span>
-                        <span class="test-bead" id="testBead2">2</span>
-                        <span class="test-bead" id="testBead3">3</span>
-                        <span class="test-bead" id="testBead4">4</span>
-                      </div>
-                      <span id="syncSensBadge" class="sync-sens-badge" title="Peak detection sensitivity (drag slider on VU meter)">-24dB</span>
                     </div>
                   </div>
                 </div>
@@ -606,10 +586,13 @@
 
             <!-- Right Side: Vertical VU Meter Strip + Superimposed Peak Sensitivity Slider -->
             <div id="recordVUMeterContainer" class="record-vu-meter-strip sync-active" title="Live Microphone Level & Peak Detection Sensitivity" style="opacity:0.35; filter:grayscale(1); pointer-events:none; transition:opacity 0.25s ease, filter 0.25s ease;">
-              <!-- Top Indicators: Clip LED + Peak Detected Badge -->
+              <!-- Top Indicators: Clip LED + Peak Detected Badge (with protruding scrolling green triangle trail on the left) -->
               <div class="vu-top-indicators">
                 <div id="recordVUClipIndicator" style="width:8px; height:8px; border-radius:50%; background:rgba(239,68,68,0.25); border:1px solid rgba(239,68,68,0.5); transition:background 0.08s, box-shadow 0.08s;" title="Clip Warning"></div>
-                <div id="recordVUPeakBadge" class="vu-peak-badge" title="Flashes when a sync tap peak is detected">PEAK</div>
+                <div class="vu-peak-row" id="vuPeakRow">
+                  <div id="vuPeakTriangleTrail" class="vu-peak-triangle-trail" aria-hidden="true"></div>
+                  <div id="recordVUPeakBadge" class="vu-peak-badge" title="Flashes when a sync tap peak is detected">PEAK</div>
+                </div>
               </div>
 
               <!-- VU Label (VU in Mono, L · R in Stereo) -->
@@ -764,12 +747,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=73"></script>
-  <script src="js/mp3-decoder.js?v=73"></script>
-  <script src="js/state-manager.js?v=73"></script>
-  <script src="js/waveform-cache.js?v=73"></script>
-  <script src="js/audio-engine.js?v=73"></script>
-  <script src="js/timeline-ui.js?v=73"></script>
-  <script src="js/app.js?v=73"></script>
+  <script src="js/profiler.js?v=74"></script>
+  <script src="js/mp3-decoder.js?v=74"></script>
+  <script src="js/state-manager.js?v=74"></script>
+  <script src="js/waveform-cache.js?v=74"></script>
+  <script src="js/audio-engine.js?v=74"></script>
+  <script src="js/timeline-ui.js?v=74"></script>
+  <script src="js/app.js?v=74"></script>
 </body>
 </html>

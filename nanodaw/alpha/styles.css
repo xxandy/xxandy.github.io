@@ -1351,6 +1351,9 @@ body {
 .record-vu-meter-strip {
   width: 30px;
   flex-shrink: 0;
+  position: relative;
+  overflow: visible;
+  z-index: 6;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1396,10 +1399,102 @@ body {
 }
 
 .vu-top-indicators {
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
+  position: relative;
+}
+
+.vu-peak-row {
+  width: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Protruding left-facing bright-green peak triangles to the left of [PEAK], scrolling down up to 10 rows */
+.vu-peak-triangle-trail {
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  width: 11px;
+  height: 0;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.vu-peak-tri {
+  position: absolute;
+  top: -4.5px;
+  left: 0;
+  width: 11px;
+  height: 9px;
+  display: block;
+  color: var(--tri-color, #4ade80);
+  opacity: 1;
+  scale: 1;
+  translate: 0 calc(var(--tri-slot, 0) * 11px);
+  filter: drop-shadow(0 0 3px rgba(16, 185, 129, 0.55));
+  transition:
+    opacity 0.28s ease-out,
+    translate 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    scale 0.18s ease-out;
+}
+
+.vu-peak-tri svg {
+  display: block;
+  width: 11px;
+  height: 9px;
+}
+
+@starting-style {
+  .vu-peak-tri {
+    opacity: 0;
+    scale: 1.25;
+    translate: 4px 0;
+  }
+}
+
+.vu-peak-tri[data-closing] {
+  opacity: 0;
+  translate: 0 calc((var(--tri-slot, 0) + 0.6) * 11px);
+}
+
+.vu-peak-triangle-trail[data-closing] .vu-peak-tri {
+  opacity: 0;
+  transition-duration: 0.45s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vu-peak-tri {
+    scale: 1;
+    transition: opacity 0.12s linear;
+  }
+
+  @starting-style {
+    .vu-peak-tri {
+      scale: 1;
+      translate: 0 calc(var(--tri-slot, 0) * 11px);
+    }
+  }
+
+  .vu-peak-tri[data-closing] {
+    translate: 0 calc(var(--tri-slot, 0) * 11px);
+  }
+}
+
+@media (forced-colors: active) {
+  .vu-peak-tri {
+    filter: none;
+    color: Highlight;
+  }
+
+  .vu-peak-tri polygon {
+    stroke: CanvasText;
+  }
 }
 
 .vu-peak-badge {
@@ -1586,111 +1681,6 @@ body {
   line-height: 1;
   font-weight: 600;
   user-select: none;
-}
-
-/* Live Pre-Recording Tap Detection Check Bar */
-.sync-tap-test-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 2px;
-  padding: 7px 10px;
-  border-radius: 7px;
-  background: rgba(15, 23, 42, 0.65);
-  border: 1px solid rgba(56, 189, 248, 0.22);
-  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
-}
-
-.sync-tap-test-bar.detected {
-  background: rgba(16, 185, 129, 0.14);
-  border-color: rgba(52, 211, 153, 0.6);
-  box-shadow: 0 0 10px rgba(16, 185, 129, 0.18);
-}
-
-.sync-tap-test-left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-inline-size: 0;
-  flex: 1 1 140px;
-}
-
-.sync-tap-test-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: rgba(148, 163, 184, 0.35);
-  border: 1px solid rgba(148, 163, 184, 0.5);
-  flex-shrink: 0;
-  transition: background 0.08s ease, box-shadow 0.08s ease, transform 0.08s ease;
-}
-
-.sync-tap-test-bar.detected .sync-tap-test-dot {
-  background: #10b981;
-  border-color: #6ee7b7;
-  box-shadow: 0 0 8px #10b981;
-  transform: scale(1.2);
-}
-
-.sync-tap-test-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  line-height: 1.25;
-}
-
-.sync-tap-test-bar.detected .sync-tap-test-label {
-  color: #6ee7b7;
-}
-
-.sync-tap-test-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.sync-test-beads {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.test-bead {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  font-size: 8.5px;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  color: var(--text-muted);
-  transition: all 0.12s ease;
-}
-
-.test-bead.active {
-  background: #10b981;
-  border-color: #6ee7b7;
-  color: #022c22;
-  box-shadow: 0 0 6px rgba(16, 185, 129, 0.8);
-  transform: scale(1.1);
-}
-
-.sync-sens-badge {
-  font-family: var(--font-mono, monospace);
-  font-size: 9.5px;
-  font-weight: 600;
-  padding: 2px 5px;
-  border-radius: 4px;
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  color: #38bdf8;
-  white-space: nowrap;
 }
 
 .modal-header {

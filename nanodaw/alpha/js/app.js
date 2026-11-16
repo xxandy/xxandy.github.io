@@ -690,22 +690,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   const recordModalHeaderTitle = document.getElementById('recordModalHeaderTitle');
   const syncTrackFirstBeat = document.getElementById('syncTrackFirstBeat');
   const syncTrackNumBeats = document.getElementById('syncTrackNumBeats');
-  const guideTrackSyncHint = document.getElementById('guideTrackSyncHint');
-
-  function updateGuideTrackSyncHint() {
-    if (!guideTrackSyncHint) return;
-    const x = syncTrackNumBeats ? (syncTrackNumBeats.value || '4') : '4';
-    const y = syncTrackFirstBeat ? (syncTrackFirstBeat.value || '5') : '5';
-    guideTrackSyncHint.textContent = `No countdown. Tap along ${x} beats from beat ${y}`;
-  }
 
   if (syncTrackNumBeats) {
-    syncTrackNumBeats.addEventListener('input', updateGuideTrackSyncHint);
-    syncTrackNumBeats.addEventListener('change', updateGuideTrackSyncHint);
-  }
-  if (syncTrackFirstBeat) {
-    syncTrackFirstBeat.addEventListener('input', updateGuideTrackSyncHint);
-    syncTrackFirstBeat.addEventListener('change', updateGuideTrackSyncHint);
+    const onBeatsChange = () => {
+      if (typeof refreshPeakTriangleShades === 'function') {
+        refreshPeakTriangleShades();
+      }
+    };
+    syncTrackNumBeats.addEventListener('input', onBeatsChange);
+    syncTrackNumBeats.addEventListener('change', onBeatsChange);
   }
 
   const metroTrackName = document.getElementById('metroTrackName');
@@ -1658,15 +1651,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=73', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=74', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=73');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=74');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=73');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=74');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -2518,7 +2511,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isSingleMetro = singleMetronomeOn ? singleMetronomeOn.checked : false;
       if (singleMetronomeSubOptions) singleMetronomeSubOptions.style.display = isSingleMetro ? 'flex' : 'none';
     }
-    updateGuideTrackSyncHint();
+    if (typeof refreshPeakTriangleShades === 'function') {
+      refreshPeakTriangleShades();
+    }
     if (typeof updatePeakSensitivityUI === 'function') {
       updatePeakSensitivityUI();
     }
@@ -2557,7 +2552,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         recordModalHeaderTitle.innerHTML = '<span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#ef4444; box-shadow:0 0 8px #ef4444;"></span> Record / Metronome Setup';
       }
       updateRecordModalToggles();
-      updateGuideTrackSyncHint();
     }
   }
 
@@ -3032,15 +3026,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   function updatePeakSensitivityUI() {
     const syncActive = isPeakSyncConfigured();
     const vuContainer = document.getElementById('recordVUMeterContainer');
+    const peakRow = document.getElementById('vuPeakRow');
     const peakBadge = document.getElementById('recordVUPeakBadge');
+    const trailEl = document.getElementById('vuPeakTriangleTrail');
     const sensZoneFill = document.getElementById('vuSensZoneFill');
     const sensZoneFillR = document.getElementById('vuSensZoneFillR');
     const sensOverlay = document.getElementById('peakSensitivityOverlay');
     const sensLine = document.getElementById('vuSensThresholdLine');
     const sensSlider = document.getElementById('peakSensitivitySlider');
     const sensReadout = document.getElementById('recordVUSensReadout');
-    const tapTestBar = document.getElementById('syncTapTestBar');
-    const syncSensBadge = document.getElementById('syncSensBadge');
 
     const pctFromBottom = Math.max(0, Math.min(100, ((peakSensDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
     const sensPct = getPeakSensitivityPercent();
@@ -3049,7 +3043,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (vuContainer) {
       vuContainer.classList.toggle('sync-active', syncActive);
     }
+    if (peakRow) peakRow.style.display = syncActive ? 'flex' : 'none';
     if (peakBadge) peakBadge.style.display = syncActive ? 'inline-block' : 'none';
+    if (trailEl) trailEl.style.display = syncActive ? 'block' : 'none';
+    if (!syncActive && activePeakTriangles.length > 0) {
+      resetPreRecTapTest();
+    }
     if (sensZoneFill) {
       sensZoneFill.style.display = syncActive ? 'block' : 'none';
       sensZoneFill.style.bottom = `${pctFromBottom.toFixed(1)}%`;
@@ -3071,12 +3070,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (sensReadout) {
       sensReadout.style.display = syncActive ? 'block' : 'none';
       sensReadout.textContent = `${peakSensDb}dB`;
-    }
-    if (tapTestBar) {
-      tapTestBar.style.display = syncActive ? 'flex' : 'none';
-    }
-    if (syncSensBadge) {
-      syncSensBadge.textContent = `Sens ${sensPct}% (${peakSensDb}dB)`;
     }
 
     if (recWorkletNode) {
@@ -3104,64 +3097,167 @@ document.addEventListener('DOMContentLoaded', async () => {
     updatePeakSensitivityUI();
   }
 
+  const MAX_PEAK_TRIANGLES = 10;
+  const PEAK_TRIANGLE_IDLE_MS = 10000;
   let vuTapTestCount = 0;
   let vuFlashTimerId = null;
+  let vuTriangleIdleTimerId = null;
+  let vuTriangleFadeEpoch = 0;
+  let activePeakTriangles = [];
+
+  function getSyncColorCycleLength() {
+    if (guideModeSynth && guideModeSynth.checked) {
+      return 4;
+    }
+    const n = syncTrackNumBeats ? parseInt(syncTrackNumBeats.value, 10) : 4;
+    if (!Number.isFinite(n) || n < 1) return 4;
+    return Math.min(16, Math.max(1, n));
+  }
+
+  // Generate N distinct bright-green shades in sRGB HSL so the colors repeat every "Beats to sync" peaks
+  function getPeakTriangleGreenShade(stepIdx, cycleLen) {
+    if (cycleLen <= 1) {
+      return 'hsl(132 92% 54%)';
+    }
+    const t = ((stepIdx % cycleLen) + cycleLen) % cycleLen / (cycleLen - 1);
+    const hue = Math.round(112 + t * 46);   // 112° (electric lime-green) -> 158° (rich emerald-green)
+    const sat = Math.round(96 - t * 8);     // 96% -> 88%
+    const light = Math.round(66 - t * 27);  // 66% -> 39% (all > 8:1 contrast on dark VU strip)
+    return `hsl(${hue} ${sat}% ${light}%)`;
+  }
+
+  function createPeakTriangleElement(beatSeqIdx, cycleLen) {
+    const el = document.createElement('span');
+    el.className = 'vu-peak-tri';
+    el.dataset.peakSeq = String(beatSeqIdx);
+    el.style.setProperty('--tri-color', getPeakTriangleGreenShade(beatSeqIdx, cycleLen));
+    el.style.setProperty('--tri-slot', '0');
+    el.innerHTML = '<svg viewBox="0 0 11 9" width="11" height="9" aria-hidden="true" focusable="false"><polygon points="0.8,4.5 10.2,0.7 10.2,8.3" fill="currentColor" stroke="rgba(2, 44, 34, 0.85)" stroke-width="0.85" stroke-linejoin="round"/></svg>';
+    return el;
+  }
+
+  function refreshPeakTriangleShades() {
+    const cycleLen = getSyncColorCycleLength();
+    for (let i = 0; i < activePeakTriangles.length; i++) {
+      const el = activePeakTriangles[i];
+      const seq = parseInt(el.dataset.peakSeq, 10) || 0;
+      el.style.setProperty('--tri-color', getPeakTriangleGreenShade(seq, cycleLen));
+    }
+  }
+
+  async function removeOverflowTriangle(el) {
+    if (!el || !el.isConnected) return;
+    el.setAttribute('data-closing', '');
+    const anims = typeof el.getAnimations === 'function' ? el.getAnimations() : [];
+    if (anims.length > 0) {
+      await Promise.race([
+        Promise.allSettled(anims.map(a => a.finished)),
+        new Promise(r => setTimeout(r, 350))
+      ]);
+    }
+    if (el.isConnected) el.remove();
+  }
+
+  async function fadeOutAllPeakTriangles() {
+    vuTriangleIdleTimerId = null;
+    const trailEl = document.getElementById('vuPeakTriangleTrail');
+    if (!trailEl || activePeakTriangles.length === 0) {
+      vuTapTestCount = 0;
+      return;
+    }
+    const myEpoch = ++vuTriangleFadeEpoch;
+    trailEl.setAttribute('data-closing', '');
+    const anims = activePeakTriangles.flatMap(el => (typeof el.getAnimations === 'function' ? el.getAnimations() : []));
+    if (anims.length > 0) {
+      await Promise.race([
+        Promise.allSettled(anims.map(a => a.finished)),
+        new Promise(r => setTimeout(r, 600))
+      ]);
+    }
+    if (myEpoch === vuTriangleFadeEpoch) {
+      trailEl.removeAttribute('data-closing');
+      trailEl.innerHTML = '';
+      activePeakTriangles = [];
+      vuTapTestCount = 0;
+    }
+  }
 
   function resetPreRecTapTest() {
     vuTapTestCount = 0;
+    vuTriangleFadeEpoch++;
     if (vuFlashTimerId) {
       clearTimeout(vuFlashTimerId);
       vuFlashTimerId = null;
     }
+    if (vuTriangleIdleTimerId) {
+      clearTimeout(vuTriangleIdleTimerId);
+      vuTriangleIdleTimerId = null;
+    }
+    activePeakTriangles = [];
+    const trailEl = document.getElementById('vuPeakTriangleTrail');
+    if (trailEl) {
+      trailEl.removeAttribute('data-closing');
+      trailEl.innerHTML = '';
+    }
     const vuContainer = document.getElementById('recordVUMeterContainer');
     const peakBadge = document.getElementById('recordVUPeakBadge');
     const sensLine = document.getElementById('vuSensThresholdLine');
-    const tapTestBar = document.getElementById('syncTapTestBar');
-    const tapTestLabel = document.getElementById('syncTapTestLabel');
     if (vuContainer) vuContainer.classList.remove('peak-hit');
     if (peakBadge) peakBadge.classList.remove('detected');
     if (sensLine) sensLine.classList.remove('detected');
-    if (tapTestBar) tapTestBar.classList.remove('detected');
-    if (tapTestLabel) tapTestLabel.textContent = 'Tap near mic to test peak detection';
-    ['testBead1', 'testBead2', 'testBead3', 'testBead4'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.classList.remove('active');
-    });
   }
 
-  function flashPreRecPeakDetected(peakLinear) {
-    vuTapTestCount++;
-    const cycleIdx = ((vuTapTestCount - 1) % 4) + 1;
-    if (cycleIdx === 1) {
-      ['testBead1', 'testBead2', 'testBead3', 'testBead4'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.classList.remove('active');
-      });
+  function flashPreRecPeakDetected() {
+    const trailEl = document.getElementById('vuPeakTriangleTrail');
+    if (trailEl && trailEl.hasAttribute('data-closing')) {
+      vuTriangleFadeEpoch++;
+      trailEl.removeAttribute('data-closing');
+      trailEl.innerHTML = '';
+      activePeakTriangles = [];
+      vuTapTestCount = 0;
     }
-    const beadEl = document.getElementById(`testBead${cycleIdx}`);
-    if (beadEl) beadEl.classList.add('active');
 
-    const peakDb = peakLinear > 1e-5 ? (20 * Math.log10(peakLinear)) : -100;
+    const beatSeqIdx = vuTapTestCount;
+    vuTapTestCount++;
+    const cycleLen = getSyncColorCycleLength();
+
+    if (trailEl) {
+      // Scroll existing triangles down by 1 row
+      for (let i = 0; i < activePeakTriangles.length; i++) {
+        activePeakTriangles[i].style.setProperty('--tri-slot', String(i + 1));
+      }
+
+      // Insert new left-pointing triangle at row 0 directly to the left of [PEAK]
+      const triEl = createPeakTriangleElement(beatSeqIdx, cycleLen);
+      trailEl.prepend(triEl);
+      activePeakTriangles.unshift(triEl);
+
+      // Cap at maximum of 10 triangles
+      while (activePeakTriangles.length > MAX_PEAK_TRIANGLES) {
+        const oldest = activePeakTriangles.pop();
+        removeOverflowTriangle(oldest);
+      }
+    }
+
+    // Fade out & clear all triangles if no peaks are detected for 10 seconds
+    if (vuTriangleIdleTimerId) {
+      clearTimeout(vuTriangleIdleTimerId);
+    }
+    vuTriangleIdleTimerId = setTimeout(fadeOutAllPeakTriangles, PEAK_TRIANGLE_IDLE_MS);
+
     const vuContainer = document.getElementById('recordVUMeterContainer');
     const peakBadge = document.getElementById('recordVUPeakBadge');
     const sensLine = document.getElementById('vuSensThresholdLine');
-    const tapTestBar = document.getElementById('syncTapTestBar');
-    const tapTestLabel = document.getElementById('syncTapTestLabel');
 
     if (vuContainer) vuContainer.classList.add('peak-hit');
     if (peakBadge) peakBadge.classList.add('detected');
     if (sensLine) sensLine.classList.add('detected');
-    if (tapTestBar) tapTestBar.classList.add('detected');
-    if (tapTestLabel) {
-      tapTestLabel.textContent = `Peak #${vuTapTestCount} detected (${peakDb.toFixed(1)} dB)`;
-    }
 
     if (vuFlashTimerId) clearTimeout(vuFlashTimerId);
     vuFlashTimerId = setTimeout(() => {
       if (vuContainer) vuContainer.classList.remove('peak-hit');
       if (peakBadge) peakBadge.classList.remove('detected');
       if (sensLine) sensLine.classList.remove('detected');
-      if (tapTestBar) tapTestBar.classList.remove('detected');
       vuFlashTimerId = null;
     }, 260);
   }
@@ -3944,6 +4040,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       clipEl.style.boxShadow = 'none';
     }
     if (dbEl) dbEl.textContent = '-∞';
+    resetPreRecTapTest();
     setVUMeterGrayedOut(true);
   }
 
@@ -6138,7 +6235,6 @@ document.addEventListener('DOMContentLoaded', async () => {
           recordSetupModal.classList.remove('hidden');
           recordSetupModal.style.display = 'flex';
           setVUMeterGrayedOut(true);
-          updateGuideTrackSyncHint();
           refreshAudioInputDevices().then(() => {
             startVUMonitor();
           });
