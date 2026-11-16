@@ -1651,15 +1651,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=74', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=75', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=74');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=75');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=74');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=75');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -3034,6 +3034,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sensOverlay = document.getElementById('peakSensitivityOverlay');
     const sensLine = document.getElementById('vuSensThresholdLine');
     const sensSlider = document.getElementById('peakSensitivitySlider');
+    const sensReadoutWrap = document.getElementById('vuSensReadoutWrap');
     const sensReadout = document.getElementById('recordVUSensReadout');
 
     const pctFromBottom = Math.max(0, Math.min(100, ((peakSensDb - VU_MIN_DB) / -VU_MIN_DB) * 100));
@@ -3066,6 +3067,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (sensSlider) {
       sensSlider.value = String(peakSensDb);
       sensSlider.setAttribute('aria-valuetext', `${peakSensDb} dB threshold (${sensPct}% sensitivity)`);
+    }
+    if (sensReadoutWrap) {
+      sensReadoutWrap.style.display = syncActive ? 'flex' : 'none';
+    }
+    if (!syncActive && typeof hideThresholdDragLabel === 'function') {
+      hideThresholdDragLabel(true);
     }
     if (sensReadout) {
       sensReadout.style.display = syncActive ? 'block' : 'none';
@@ -3205,6 +3212,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (vuContainer) vuContainer.classList.remove('peak-hit');
     if (peakBadge) peakBadge.classList.remove('detected');
     if (sensLine) sensLine.classList.remove('detected');
+    hideThresholdDragLabel(true);
   }
 
   function flashPreRecPeakDetected() {
@@ -3262,6 +3270,59 @@ document.addEventListener('DOMContentLoaded', async () => {
     }, 260);
   }
 
+  let supportsDiscreteDisplayTransition;
+  function canTransitionDisplay() {
+    if (supportsDiscreteDisplayTransition !== undefined) return supportsDiscreteDisplayTransition;
+    if (typeof window === 'undefined' || !window.CSS?.supports?.('transition-behavior', 'allow-discrete') || !document.body) {
+      return false;
+    }
+    const probe = document.createElement('div');
+    probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+    document.body.appendChild(probe);
+    getComputedStyle(probe).display;
+    probe.style.display = 'none';
+    supportsDiscreteDisplayTransition = getComputedStyle(probe).display === 'block';
+    probe.remove();
+    return supportsDiscreteDisplayTransition;
+  }
+
+  function showThresholdDragLabel() {
+    const labelEl = document.getElementById('vuThresholdDragLabel');
+    const readoutEl = document.getElementById('recordVUSensReadout');
+    if (readoutEl) readoutEl.classList.add('dragging');
+    if (!labelEl) return;
+    labelEl.removeAttribute('data-closing');
+    labelEl.hidden = false;
+  }
+
+  async function hideThresholdDragLabel(immediate = false) {
+    const labelEl = document.getElementById('vuThresholdDragLabel');
+    const readoutEl = document.getElementById('recordVUSensReadout');
+    if (readoutEl) readoutEl.classList.remove('dragging');
+    if (!labelEl || labelEl.hidden) return;
+    if (immediate) {
+      labelEl.removeAttribute('data-closing');
+      labelEl.hidden = true;
+      return;
+    }
+    if (canTransitionDisplay()) {
+      labelEl.hidden = true;
+    } else {
+      labelEl.setAttribute('data-closing', '');
+    }
+    const anims = typeof labelEl.getAnimations === 'function' ? labelEl.getAnimations() : [];
+    if (anims.length > 0) {
+      await Promise.race([
+        Promise.allSettled(anims.map(a => a.finished)),
+        new Promise(r => setTimeout(r, 400))
+      ]);
+    }
+    if (labelEl.hasAttribute('data-closing')) {
+      labelEl.removeAttribute('data-closing');
+      labelEl.hidden = true;
+    }
+  }
+
   // Wire superimposed Peak Detection Sensitivity Slider (pointer drag + keyboard accessible range)
   (function initPeakSensitivityControls() {
     const sensOverlay = document.getElementById('peakSensitivityOverlay');
@@ -3289,6 +3350,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (sensSlider) {
           try { sensSlider.focus({ preventScroll: true }); } catch (_) {}
         }
+        showThresholdDragLabel();
         updateFromClientY(e.clientY);
       });
 
@@ -3301,6 +3363,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const endDrag = () => {
         if (isPointerDraggingSens) {
           isPointerDraggingSens = false;
+          hideThresholdDragLabel(false);
           recDiag('REC_PEAK_SENS_ADJUSTED', {
             peakSensDb,
             thresholdLinear: Number(getPeakThresholdLinear().toFixed(5)),
@@ -3311,6 +3374,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       sensOverlay.addEventListener('pointerup', endDrag);
       sensOverlay.addEventListener('pointercancel', endDrag);
       sensOverlay.addEventListener('lostpointercapture', endDrag);
+      window.addEventListener('pointerup', endDrag);
+      window.addEventListener('blur', endDrag);
     }
 
     if (sensSlider) {
@@ -3322,16 +3387,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       sensSlider.addEventListener('keydown', (e) => {
         if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
           e.preventDefault();
+          showThresholdDragLabel();
           setPeakSensitivityDb(peakSensDb + 1);
         } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
           e.preventDefault();
+          showThresholdDragLabel();
           setPeakSensitivityDb(peakSensDb - 1);
         } else if (e.key === 'Home') {
           e.preventDefault();
+          showThresholdDragLabel();
           setPeakSensitivityDb(SENS_MIN_DB);
         } else if (e.key === 'End') {
           e.preventDefault();
+          showThresholdDragLabel();
           setPeakSensitivityDb(SENS_MAX_DB);
+        }
+      });
+      sensSlider.addEventListener('keyup', () => {
+        if (!isPointerDraggingSens) {
+          hideThresholdDragLabel(false);
+        }
+      });
+      sensSlider.addEventListener('blur', () => {
+        if (!isPointerDraggingSens) {
+          hideThresholdDragLabel(false);
         }
       });
     }

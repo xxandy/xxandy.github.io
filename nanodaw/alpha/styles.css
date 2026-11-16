@@ -1672,6 +1672,14 @@ body {
   outline-offset: 2px;
 }
 
+.vu-sens-readout-wrap {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
 .vu-sens-readout {
   font-size: 7px;
   font-family: var(--font-mono, monospace);
@@ -1681,6 +1689,85 @@ body {
   line-height: 1;
   font-weight: 600;
   user-select: none;
+  transition: color 0.12s ease, text-shadow 0.12s ease;
+}
+
+.vu-sens-readout.dragging {
+  color: #7dd3fc;
+  text-shadow: 0 0 6px rgba(56, 189, 248, 0.7);
+}
+
+/* Overlaid THRESHOLD badge shown right above the dB threshold readout while dragging the handle */
+.vu-threshold-drag-label {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  translate: -50% 0;
+  display: inline-block;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid rgba(56, 189, 248, 0.75);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.75), 0 0 8px rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  font-family: var(--font-mono, monospace);
+  font-size: 7.5px;
+  font-weight: 800;
+  letter-spacing: 0.45px;
+  line-height: 1.1;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  z-index: 25;
+  opacity: 1;
+  transition:
+    display,
+    opacity ease-out,
+    translate ease-out;
+  transition-duration: 0.24s;
+  transition-behavior: allow-discrete;
+}
+
+@starting-style {
+  .vu-threshold-drag-label {
+    opacity: 0;
+    translate: -50% 3px;
+  }
+}
+
+.vu-threshold-drag-label:where([hidden], [data-closing]) {
+  opacity: 0;
+  translate: -50% 3px;
+}
+
+.vu-threshold-drag-label[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vu-threshold-drag-label {
+    translate: -50% 0;
+    transition-duration: 0.1s;
+  }
+
+  @starting-style {
+    .vu-threshold-drag-label {
+      translate: -50% 0;
+    }
+  }
+
+  .vu-threshold-drag-label:where([hidden], [data-closing]) {
+    translate: -50% 0;
+  }
+}
+
+@media (forced-colors: active) {
+  .vu-threshold-drag-label {
+    background: Canvas;
+    color: CanvasText;
+    border: 1px solid Highlight;
+    box-shadow: none;
+  }
 }
 
 .modal-header {
