@@ -1652,15 +1652,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=79', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=80', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=79');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=80');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=79');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=80');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -2690,10 +2690,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       syncGuideTrackSelect.value = String(otherTracks[0].idx);
     } else {
       syncGuideTrackSelect.value = '';
-      // When project has zero tracks, automatically select Metronome Synth Beats since no guide track exists yet
-      if (guideModeTrack && guideModeTrack.checked && guideModeSynth) {
-        guideModeSynth.checked = true;
-      }
     }
 
     // Initialize default tempo if project has tempo

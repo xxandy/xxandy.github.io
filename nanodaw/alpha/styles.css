@@ -2546,10 +2546,11 @@ dialog::backdrop {
 
 /* Shared NANOdaw Sync controls & semantic fieldset */
 .sync-common-beats-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content 52px;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 6px;
   font-size: 11.5px;
   color: var(--text-secondary);
   padding-bottom: 7px;
@@ -2557,9 +2558,7 @@ dialog::backdrop {
 }
 
 .sync-inline-field {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: contents;
 }
 
 .sync-inline-field label {
