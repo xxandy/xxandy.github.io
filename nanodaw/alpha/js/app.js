@@ -1208,18 +1208,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     }, 1000);
   }
 
+  let vuStream = null;
+  let vuIsStarting = false;
+  let lastKnownAudioInputSignature = null;
+  let activeEnumeratePromise = null;
+
+  function buildAudioInputSignature(devices) {
+    if (!Array.isArray(devices)) return '';
+    return devices
+      .filter(d => d.kind === 'audioinput')
+      .map(d => `${d.deviceId || ''}:${(d.label || '').trim()}`)
+      .sort()
+      .join('|');
+  }
+
   if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
     navigator.mediaDevices.addEventListener('devicechange', async () => {
+      let devs = [];
       let summary = [];
       try {
-        const devs = await navigator.mediaDevices.enumerateDevices();
+        devs = await navigator.mediaDevices.enumerateDevices();
         summary = devs
           .filter(d => d.kind === 'audioinput' || d.kind === 'audiooutput')
           .map(d => ({ kind: d.kind, label: d.label || '(unlabeled)', idPrefix: d.deviceId ? d.deviceId.slice(0, 10) : '' }));
       } catch (_) {}
+
+      const newInputSig = buildAudioInputSignature(devs);
+      const inputsChanged = (lastKnownAudioInputSignature === null) || (newInputSig !== lastKnownAudioInputSignature);
+      const vuLive = Boolean(vuStream && vuStream.active && vuStream.getAudioTracks && vuStream.getAudioTracks().length > 0 && vuStream.getAudioTracks()[0].readyState === 'live');
+      const modalOpen = Boolean(!isRecording && recordSetupModal && !recordSetupModal.classList.contains('hidden') && recordSetupModal.style.display !== 'none');
+
+      // iOS/iPadOS Safari fires a synthetic 'devicechange' ~50–450ms after every getUserMedia() route switch
+      // (and often reorders the active input to index 0) even when physical audioinput devices have not changed.
+      // Ignoring unchanged devicechange events breaks the self-restarting getUserMedia -> devicechange -> stopVUMonitor loop!
+      let ignoredReason = null;
+      if (modalOpen) {
+        if ((vuIsStarting || activeEnumeratePromise) && !inputsChanged) {
+          ignoredReason = 'self_gum_in_progress';
+        } else if (!inputsChanged && vuLive) {
+          ignoredReason = 'inputs_unchanged_stream_live';
+        }
+      }
+
       recDiag('MEDIA_DEVICES_CHANGED', {
         isRecording,
         recordingState,
+        inputsChanged,
+        vuLive,
+        vuIsStarting,
+        ignoredReason,
         devices: summary,
         ctx: inspectAudioCtx(recAudioCtx || audio.audioCtx)
       }, {
@@ -1228,12 +1265,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         extraData: 9,
         forcePersist: true
       });
-      // Hot-plug support (e.g. USB-C OTG audio interface plugged in while Record Setup modal is open)
-      if (!isRecording && recordSetupModal && !recordSetupModal.classList.contains('hidden') && recordSetupModal.style.display !== 'none') {
-        await refreshAudioInputDevices();
-        if (activeRecordModalTab === 'record') {
-          startVUMonitor(true);
-        }
+
+      if (!modalOpen || ignoredReason) {
+        return;
+      }
+
+      // Real hot-plug support (e.g. USB-C audio interface plugged in or unplugged while Record Setup modal is open)
+      const activeTrackDevId = vuLive ? (vuStream.getAudioTracks()[0].getSettings?.()?.deviceId || '') : '';
+      await refreshAudioInputDevices();
+      if (activeRecordModalTab === 'record') {
+        const nextSelectedDevId = recordDeviceSelect ? recordDeviceSelect.value : '';
+        const shouldForceRestart = !vuLive || Boolean(nextSelectedDevId && activeTrackDevId && nextSelectedDevId !== activeTrackDevId);
+        startVUMonitor(shouldForceRestart);
       }
     });
   }
@@ -1652,15 +1695,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=84', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=85', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=84');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=85');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=84');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=85');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -3000,6 +3043,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       recDiag('REC_ENUMERATE_UNSUPPORTED', {}, { level: 'warn' });
       return;
     }
+    if (activeEnumeratePromise) {
+      return await activeEnumeratePromise;
+    }
+    activeEnumeratePromise = (async () => {
     const enumStart = performance.now();
     try {
       // Ensure iOS audioSession is in play-and-record mode BEFORE enumerating/probing
@@ -3015,6 +3062,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       let devices = await navigator.mediaDevices.enumerateDevices();
       let audioInputs = devices.filter(d => d.kind === 'audioinput');
+      if (audioInputs.length > 0 && audioInputs[0].label) {
+        lastKnownAudioInputSignature = buildAudioInputSignature(devices);
+      }
 
       // If device labels are blank, prompt briefly for mic permission
       if (audioInputs.length > 0 && !audioInputs[0].label) {
@@ -3077,6 +3127,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
+      lastKnownAudioInputSignature = buildAudioInputSignature(devices);
       const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
 
       if (recordDeviceSelect) {
@@ -3194,7 +3245,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       recDiag('REC_ENUMERATE_ERROR', {
         error: err && err.message ? err.message : String(err)
       }, { level: 'error', forcePersist: true });
+    } finally {
+      activeEnumeratePromise = null;
     }
+    })();
+    return await activeEnumeratePromise;
   }
 
   // --- Real-Time VU Meter, Pre-Recording Peak Check & Superimposed Sensitivity Slider ---
@@ -3649,7 +3704,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     updatePeakSensitivityUI();
   })();
 
-  let vuStream = null;
   let vuSource = null;
   let vuSplitter = null;
   let vuAnalyser = null;
@@ -3660,7 +3714,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   let vuPeakHoldR = 0;
   let vuPeakHoldTimeR = 0;
   let vuClipTime = 0;
-  let vuIsStarting = false;
   let vuFastEnv = 0;
   let vuFastEnvR = 0;
   let vuAmbientFloor = 0.003;
