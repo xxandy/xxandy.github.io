@@ -954,8 +954,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   let activeRecordModalTab = 'record'; // 'record' or 'metronome'
-  let isTrackSyncTake = false;
-  let trackSyncGuideIndex = null;
+  let activeSyncSession = null;
 
   const recordingHUD = document.getElementById('recordingHUD');
   const hudInstructionBox = document.getElementById('hudInstructionBox');
@@ -964,10 +963,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const hudInstruction = document.getElementById('hudInstruction');
   const hudLatencyText = document.getElementById('hudLatencyText');
   const hudClickBeads = document.getElementById('hudClickBeads');
-  const bead1 = document.getElementById('bead1');
-  const bead2 = document.getElementById('bead2');
-  const bead3 = document.getElementById('bead3');
-  const bead4 = document.getElementById('bead4');
+  const hudLiveAlert = document.getElementById('hudLiveAlert');
   const btnStopRecordingAction = document.getElementById('btnStopRecordingAction');
   const btnRecModalGetLog = document.getElementById('btnRecModalGetLog');
   const btnHudGetLog = document.getElementById('btnHudGetLog');
@@ -986,7 +982,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   let isRecording = false;
-  let recordingState = 'idle'; // 'idle', 'pass1', 'pass1_done', 'pass2_prelude', 'recording_take'
+  let recordingState = 'idle'; // 'idle', 'sync_preroll', 'pass2_prelude', 'recording_take'
   let recStream = null;
   let recAudioCtx = null;
   let recMicSource = null;
@@ -994,21 +990,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   let recWorkletNode = null;
   let recSilentGain = null;
 
-  let pass1AudioChunks = [];
-  let pass2AudioChunks = [];
-  let pass1ClickEvents = [];
   let pass2ClickEvents = [];
-  let pass1TimeoutId = null;
-  let pass1PostWaitTimeoutId = null;
   let hudTimerIntervalId = null;
   let takeStartTime = 0;
   let recordedTakesCount = 0;
   let detectedIntervalSec = 0;
-  let userClickBuffers = [];
-  let totalPass1Samples = 0;
   let totalPass2Samples = 0;
-  let pass1StreamStartTime = null;
-  let pass1GuideStartTime = 0;
   let pass2StreamStartTime = null;
   let pass2DownbeatScheduledTime = null;
   let recordingStartPlayhead = 0;
@@ -1189,8 +1176,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         ctxDeltaSec: ctxDelta,
         chunksDelta,
         chunksTotal: recChunksReceivedTotal,
-        pass1Samples: totalPass1Samples,
-        pass2Samples: totalPass2Samples,
+        capturedSamples: totalPass2Samples,
         streamActive: recStream ? Boolean(recStream.active) : false,
         trackReadyState: trk ? trk.readyState : 'none',
         trackMuted: trk ? trk.muted : null,
@@ -1200,7 +1186,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
 
       const isClockStalled = (recAudioCtx && recAudioCtx.state === 'running' && ctxDelta < 0.02);
-      const isChunkStalled = (tickIndex >= 2 && chunksDelta === 0 && (recordingState === 'pass1' || recordingState === 'pass2_prelude' || recordingState === 'recording_take'));
+      const isChunkStalled = (tickIndex >= 2 && chunksDelta === 0 && (recordingState === 'sync_preroll' || recordingState === 'pass2_prelude' || recordingState === 'recording_take'));
 
       if (isClockStalled || isChunkStalled) {
         recDiag('REC_STREAM_STALL_DETECTED', {
@@ -1349,8 +1335,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  const pass1AudioStore = new BatchedAudioStore();
-  const pass1AudioStoreR = new BatchedAudioStore();
   const pass2AudioStore = new BatchedAudioStore();
   const pass2AudioStoreR = new BatchedAudioStore();
   let activeRecordingChannelConfig = { raw: 'mono:0', mode: 'mono', ch: 0, left: 0, right: 0, neededChannels: 1 };
@@ -1668,15 +1652,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=78', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=79', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=78');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=79');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=78');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=79');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -2143,6 +2127,18 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (!data) return;
 
           if (data.type === 'worklet_first_process') {
+            if (typeof data.workletCurrentTime === 'number' && data.workletCurrentTime > 0) {
+              pass2StreamStartTime = data.workletCurrentTime;
+              if (activeSyncSession && activeSyncSession.mode === 'synth') {
+                activeSyncSession.streamStartTime = data.workletCurrentTime;
+                for (let k = 0; k < activeSyncSession.numBeats; k++) {
+                  activeSyncSession.expSyncBufferSec[k] = Math.max(
+                    0,
+                    (activeSyncSession.beat1CtxTime - data.workletCurrentTime) + ((activeSyncSession.firstBeat - 1) + k) * activeSyncSession.dt
+                  );
+                }
+              }
+            }
             recDiag('REC_WORKLET_FIRST_PROCESS', {
               recordingState,
               sinceAttachMs: Number((performance.now() - recPipelineAttachPerfMs).toFixed(2)),
@@ -2214,17 +2210,10 @@ document.addEventListener('DOMContentLoaded', async () => {
               });
             }
 
-            if (recordingState === 'pass1') {
-              if (pass1StreamStartTime === null && recAudioCtx) {
-                pass1StreamStartTime = recAudioCtx.currentTime;
-              }
-              totalPass1Samples += len;
-            } else {
-              if (pass2StreamStartTime === null && recAudioCtx) {
-                pass2StreamStartTime = recAudioCtx.currentTime;
-              }
-              totalPass2Samples += len;
+            if (pass2StreamStartTime === null && recAudioCtx) {
+              pass2StreamStartTime = recAudioCtx.currentTime;
             }
+            totalPass2Samples += len;
 
             if (activeTargetStore) {
               activeTargetStore.append(chunk, len);
@@ -2376,18 +2365,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           });
         }
 
-        const prevSamples = recordingState === 'pass1' ? totalPass1Samples : totalPass2Samples;
-        if (recordingState === 'pass1') {
-          if (pass1StreamStartTime === null && recAudioCtx) {
-            pass1StreamStartTime = recAudioCtx.currentTime;
-          }
-          totalPass1Samples += len;
-        } else {
-          if (pass2StreamStartTime === null && recAudioCtx) {
-            pass2StreamStartTime = recAudioCtx.currentTime;
-          }
-          totalPass2Samples += len;
+        const prevSamples = totalPass2Samples;
+        if (pass2StreamStartTime === null && recAudioCtx) {
+          pass2StreamStartTime = recAudioCtx.currentTime;
         }
+        totalPass2Samples += len;
 
         if (activeTargetStore) {
           activeTargetStore.append(inputL, len);
@@ -2430,27 +2412,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Tap support: User can tap on HUD / beads on screen as an explicit click
-  const onHudTap = (evt) => {
-    if (recordingState !== 'pass1' && recordingState !== 'pass2_prelude') return;
-    if (evt.target.closest('#btnStopRecordingAction') || evt.target.closest('#btnHudGetLog')) return;
-    evt.preventDefault();
-    evt.stopPropagation();
-    const now = recAudioCtx ? recAudioCtx.currentTime : (performance.now() / 1000);
-    if (recordingState === 'pass1') {
-      if (typeof registerClickGlobal === 'function') registerClickGlobal(now, pass1AudioStore.totalSamples);
-    } else if (recordingState === 'pass2_prelude') {
-      pass2ClickEvents.push({ ctxTime: now, samplePos: pass2AudioStore.totalSamples });
-    }
-  };
-  let registerClickGlobal = null;
-  if (hudInstructionBox) {
-    hudInstructionBox.addEventListener('pointerdown', onHudTap);
-  }
-
-  // Realtime Live Metronome
+  // Unified Just-In-Time Live Metronome (handles both early pre-take/sync beats and optional during-take metronome)
   let liveMetronomeIntervalId = null;
   let liveMetronomeGainNode = null;
+  let liveMetronomeScheduledOscs = [];
 
   function parseDbToLinear(dbStr, defaultDb = 0) {
     if (!dbStr) return 1.0;
@@ -2461,27 +2426,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     return Math.pow(10, clamped / 20);
   }
 
-  function startLiveMetronome(startTime, tempo, linearVolume) {
+  function startLiveMetronome(startTime, tempo, linearVolume = 1.0, options = {}) {
     stopLiveMetronome();
     if (!recAudioCtx || recAudioCtx.state === 'closed') return;
     const dt = 60 / tempo;
+    const preTakeBeats = Math.max(0, options.preTakeBeats | 0);
+    const firstSyncBeatIdx = typeof options.firstSyncBeatIdx === 'number' ? options.firstSyncBeatIdx : -1;
+    const takeEnabled = options.takeEnabled !== undefined ? Boolean(options.takeEnabled) : true;
 
-    try {
-      liveMetronomeGainNode = recAudioCtx.createGain();
-      liveMetronomeGainNode.gain.setValueAtTime(linearVolume, recAudioCtx.currentTime);
-      liveMetronomeGainNode.connect(recAudioCtx.destination);
-    } catch (e) {
-      console.warn('Metronome gain error:', e);
-      return;
+    if (takeEnabled) {
+      try {
+        liveMetronomeGainNode = recAudioCtx.createGain();
+        liveMetronomeGainNode.gain.setValueAtTime(linearVolume, recAudioCtx.currentTime);
+        liveMetronomeGainNode.connect(recAudioCtx.destination);
+      } catch (e) {
+        console.warn('Metronome gain error:', e);
+        return;
+      }
     }
 
     let nextBeatTime = startTime;
-    const scheduleAheadSec = 0.30;
+    const scheduleAheadSec = 0.28;
     let beatIndex = 0;
 
     function scheduleBeats() {
-      // Keep metronome running through both Pass 2 count-in and live recording
-      if (!isRecording || (recordingState !== 'pass2_prelude' && recordingState !== 'recording_take')) {
+      if (!isRecording || (recordingState !== 'sync_preroll' && recordingState !== 'pass2_prelude' && recordingState !== 'recording_take')) {
         stopLiveMetronome();
         return;
       }
@@ -2491,23 +2460,55 @@ document.addEventListener('DOMContentLoaded', async () => {
         beatIndex++;
       }
       while (nextBeatTime < now + scheduleAheadSec) {
-        // High crisp click with measure accent on beat 1
-        const freq = (beatIndex % 4 === 0) ? 1600 : 1100;
-        playSynthBeep(nextBeatTime, freq, 0.045, liveMetronomeGainNode);
+        if (beatIndex < preTakeBeats) {
+          // Early beats (count-in + sync beats up to F + N - 1) ALWAYS play the just-in-time metronome
+          let freq = (beatIndex % 4 === 0) ? 1600 : 1050;
+          let dur = 0.055;
+          if (beatIndex === preTakeBeats - 1) {
+            freq = 1850; // Crisp cue on final sync beat immediately preceding take downbeat (F + N)
+            dur = 0.068;
+          } else if (firstSyncBeatIdx >= 0 && beatIndex === firstSyncBeatIdx) {
+            freq = 1500; // Clear cue on first sync beat (F)
+            dur = 0.060;
+          }
+          const osc = playSynthBeep(nextBeatTime, freq, dur, null, 0.80);
+          if (osc) liveMetronomeScheduledOscs.push(osc);
+        } else if (takeEnabled && liveMetronomeGainNode) {
+          // Take beats (from beat F + N onwards): accent every 4 beats starting on the F + N downbeat
+          const takeBeatIdx = beatIndex - preTakeBeats;
+          const freq = (takeBeatIdx % 4 === 0) ? 1600 : 1100;
+          const osc = playSynthBeep(nextBeatTime, freq, 0.045, liveMetronomeGainNode, 0.80);
+          if (osc) liveMetronomeScheduledOscs.push(osc);
+        } else {
+          // Metronome OFF during take: all early sync beats have been scheduled, stop polling without cutting off scheduled clicks
+          if (liveMetronomeIntervalId) {
+            clearInterval(liveMetronomeIntervalId);
+            liveMetronomeIntervalId = null;
+          }
+          return;
+        }
         nextBeatTime += dt;
         beatIndex++;
       }
     }
 
-    console.log(`[Live Metronome] Started for take at ${startTime.toFixed(3)}s, tempo: ${tempo} BPM (${dt.toFixed(3)}s), vol: ${linearVolume.toFixed(2)}`);
     scheduleBeats();
-    liveMetronomeIntervalId = setInterval(scheduleBeats, 35);
+    if (preTakeBeats > 0 || takeEnabled) {
+      liveMetronomeIntervalId = setInterval(scheduleBeats, 35);
+    }
   }
 
   function stopLiveMetronome() {
     if (liveMetronomeIntervalId) {
       clearInterval(liveMetronomeIntervalId);
       liveMetronomeIntervalId = null;
+    }
+    if (liveMetronomeScheduledOscs.length > 0) {
+      for (const osc of liveMetronomeScheduledOscs) {
+        try { osc.stop(0); } catch (_) {}
+        try { osc.disconnect(); } catch (_) {}
+      }
+      liveMetronomeScheduledOscs = [];
     }
     if (liveMetronomeGainNode) {
       try { liveMetronomeGainNode.disconnect(); } catch (_) {}
@@ -2516,14 +2517,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function updateRecordModalToggles() {
-    const is2Pass = record2PassSync ? record2PassSync.checked : true;
-    if (container2PassSync) container2PassSync.style.display = is2Pass ? 'flex' : 'none';
-    if (containerSinglePass) containerSinglePass.style.display = is2Pass ? 'none' : 'flex';
+    const isNanodawSync = record2PassSync ? record2PassSync.checked : true;
+    if (container2PassSync) container2PassSync.style.display = isNanodawSync ? 'flex' : 'none';
+    if (containerSinglePass) containerSinglePass.style.display = isNanodawSync ? 'none' : 'flex';
 
-    if (is2Pass) {
+    if (isNanodawSync) {
       const isSynth = guideModeSynth ? guideModeSynth.checked : false;
       if (guideSynthSubOptions) guideSynthSubOptions.style.display = isSynth ? 'flex' : 'none';
       if (guideTrackSubOptions) guideTrackSubOptions.style.display = isSynth ? 'none' : 'flex';
+      const takeMetroOn = syncMetronomeOn ? syncMetronomeOn.checked : true;
+      if (syncMetronomeVolume) syncMetronomeVolume.disabled = !takeMetroOn;
+      const volWrap = document.getElementById('syncMetronomeVolWrap');
+      if (volWrap) volWrap.style.opacity = takeMetroOn ? '1' : '0.45';
     } else {
       const isSingleMetro = singleMetronomeOn ? singleMetronomeOn.checked : false;
       if (singleMetronomeSubOptions) singleMetronomeSubOptions.style.display = isSingleMetro ? 'flex' : 'none';
@@ -2685,6 +2690,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       syncGuideTrackSelect.value = String(otherTracks[0].idx);
     } else {
       syncGuideTrackSelect.value = '';
+      // When project has zero tracks, automatically select Metronome Synth Beats since no guide track exists yet
+      if (guideModeTrack && guideModeTrack.checked && guideModeSynth) {
+        guideModeSynth.checked = true;
+      }
     }
 
     // Initialize default tempo if project has tempo
@@ -2722,6 +2731,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (record2PassSync) record2PassSync.addEventListener('change', updateRecordModalToggles);
   if (guideModeSynth) guideModeSynth.addEventListener('change', updateRecordModalToggles);
   if (guideModeTrack) guideModeTrack.addEventListener('change', updateRecordModalToggles);
+  if (syncMetronomeOn) syncMetronomeOn.addEventListener('change', updateRecordModalToggles);
   if (singleMetronomeOn) singleMetronomeOn.addEventListener('change', updateRecordModalToggles);
 
   // Tab Switcher and Metronome Generation Listeners
@@ -2780,6 +2790,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Refresh Guide Track list, select the newly generated metronome track, and switch back to Audio Record tab (keeping modal open!)
       populateSyncGuideTracks();
+      if (guideModeTrack) {
+        guideModeTrack.checked = true;
+      }
       if (syncGuideTrackSelect) {
         syncGuideTrackSelect.value = '0';
       }
@@ -3147,9 +3160,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function getSyncColorCycleLength() {
-    if (guideModeSynth && guideModeSynth.checked) {
-      return 4;
-    }
     const n = syncTrackNumBeats ? parseInt(syncTrackNumBeats.value, 10) : 4;
     if (!Number.isFinite(n) || n < 1) return 4;
     return Math.min(16, Math.max(1, n));
@@ -4238,10 +4248,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  function resetClickBeads() {
-    [bead1, bead2, bead3, bead4].forEach(b => {
-      if (b) b.className = 'click-bead';
-    });
+  function renderHudSyncBeads(count = 4) {
+    const n = Math.max(1, Math.min(16, count | 0));
+    if (!hudClickBeads) return [];
+    hudClickBeads.innerHTML = '';
+    if (n > 8) {
+      hudClickBeads.setAttribute('data-compact', 'true');
+    } else {
+      hudClickBeads.removeAttribute('data-compact');
+    }
+    const els = [];
+    for (let i = 0; i < n; i++) {
+      const span = document.createElement('span');
+      span.className = 'click-bead';
+      span.dataset.beadIndex = String(i);
+      span.textContent = String(i + 1);
+      hudClickBeads.appendChild(span);
+      els.push(span);
+    }
+    return els;
+  }
+
+  function getHudBeadElements() {
+    if (!hudClickBeads) return [];
+    return Array.from(hudClickBeads.querySelectorAll('.click-bead'));
+  }
+
+  function clearHudSyncFeedback() {
+    if (recordingHUD) {
+      recordingHUD.classList.remove('sync-warning', 'sync-locked');
+    }
+    if (hudLiveAlert) {
+      hudLiveAlert.textContent = '';
+    }
+  }
+
+  function setHudSyncWarning(message, announce = false) {
+    if (recordingHUD) {
+      recordingHUD.classList.remove('sync-locked');
+      recordingHUD.classList.add('sync-warning');
+    }
+    if (hudRecStatusText) {
+      hudRecStatusText.textContent = '⚠️ SYNC WARNING';
+    }
+    if (hudInstruction && message) {
+      hudInstruction.textContent = message;
+    }
+    if (announce && hudLiveAlert && message) {
+      hudLiveAlert.textContent = message;
+    }
+  }
+
+  function resetClickBeads(count = 4) {
+    clearHudSyncFeedback();
+    renderHudSyncBeads(count);
   }
 
   // High-precision transient peak finder with support for claimed beat exclusion
@@ -4480,7 +4540,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
+      let dfsVisits = 0;
+      const maxDfsVisits = 12000;
       function dfs(depth) {
+        if (dfsVisits >= maxDfsVisits) return;
+        dfsVisits++;
         if (depth === numBeats) {
           evaluateSeq();
           return;
@@ -4488,6 +4552,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const prev = seq[depth - 1];
         const prevStep = depth >= 2 ? (seq[depth - 1].sec - seq[depth - 2].sec) : null;
         for (let i = 0; i < cands.length; i++) {
+          if (dfsVisits >= maxDfsVisits) break;
           const c = cands[i];
           if (c.idx <= prev.idx) continue;
           const step = c.sec - prev.sec;
@@ -4500,6 +4565,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       for (let i = 0; i < cands.length; i++) {
+        if (dfsVisits >= maxDfsVisits) break;
         const c0 = cands[i];
         if (c0.sec < firstMinSec || c0.sec > firstMaxSec) continue;
         seq[0] = c0;
@@ -4518,8 +4584,59 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { peaksSec: [], peaksIdx: [], candidatesCount: 0 };
   }
 
+  /**
+   * Unified tap-peak detector shared across BOTH NANOdaw Sync modes (Track Sync & Metronome Synth Beats)
+   * and across BOTH early live verification and stop-time alignment.
+   */
+  function detectSyncTapPeaks(pcm, sampleRate, expFirstSec, dt, numBeats, thresholdLinear) {
+    const seqRes = findBestTapSequence(pcm, sampleRate, expFirstSec, dt, numBeats, thresholdLinear);
+    if (seqRes.peaksSec.length === numBeats) {
+      return {
+        peaksSec: seqRes.peaksSec.slice(),
+        candidatesCount: seqRes.candidatesCount,
+        method: 'sequence_lock'
+      };
+    }
+
+    // Fallback: anchored claimed-range transient search respecting user sensitivity threshold
+    const peaksSec = [];
+    const claimedRanges = [];
+    const exclRadius = Math.round(0.25 * dt * sampleRate);
+    const fallbackMinPeak = Math.max(0.006, thresholdLinear * 0.60);
+    let lastPeakSample = null;
+
+    for (let k = 0; k < numBeats; k++) {
+      let s0, s1;
+      if (lastPeakSample === null) {
+        s0 = Math.max(0, Math.round((expFirstSec - 0.75 * dt) * sampleRate));
+        s1 = Math.min(pcm.length, Math.round((expFirstSec + 1.25 * dt) * sampleRate));
+      } else {
+        const center = lastPeakSample + Math.round(dt * sampleRate);
+        s0 = Math.max(lastPeakSample + Math.round(0.38 * dt * sampleRate), center - Math.round(0.45 * dt * sampleRate));
+        s1 = Math.min(pcm.length, center + Math.round(0.45 * dt * sampleRate));
+      }
+      if (s0 >= s1) continue;
+
+      const pk = findTransientPeak(pcm, s0, s1, claimedRanges);
+      if (pk.found && pk.peakAbs >= fallbackMinPeak && pk.crest >= 1.75) {
+        peaksSec.push(pk.idx / sampleRate);
+        lastPeakSample = pk.idx;
+        claimedRanges.push({
+          start: Math.max(0, pk.idx - exclRadius),
+          end: Math.min(pcm.length - 1, pk.idx + exclRadius)
+        });
+      }
+    }
+
+    return {
+      peaksSec,
+      candidatesCount: seqRes.candidatesCount,
+      method: 'anchored_fallback'
+    };
+  }
+
   function playSynthBeep(time, freq = 900, dur = 0.08, destNode = null, volume = 0.8) {
-    if (!recAudioCtx) return;
+    if (!recAudioCtx) return null;
     try {
       const osc = recAudioCtx.createOscillator();
       const g = recAudioCtx.createGain();
@@ -4533,8 +4650,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       g.connect(destNode || recAudioCtx.destination);
       osc.start(playTime);
       osc.stop(playTime + dur + 0.02);
+      return osc;
     } catch (e) {
       console.warn('Synth beep error:', e);
+      return null;
     }
   }
 
@@ -4568,9 +4687,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     }, 100);
   }
 
+  function clearActiveSyncTimers() {
+    if (activeSyncSession && Array.isArray(activeSyncSession.scheduledTimerIds)) {
+      for (const tid of activeSyncSession.scheduledTimerIds) {
+        clearTimeout(tid);
+      }
+      activeSyncSession.scheduledTimerIds = [];
+    }
+  }
+
   function cleanupRecordingNodes() {
     stopRecordingWatchdog();
     stopLiveMetronome();
+    clearActiveSyncTimers();
+    clearHudSyncFeedback();
     if (recDiagCleanupTrackListeners) {
       try { recDiagCleanupTrackListeners(); } catch (_) {}
       recDiagCleanupTrackListeners = null;
@@ -4578,14 +4708,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (hudLatencyText) {
       hudLatencyText.textContent = '';
       hudLatencyText.style.display = 'none';
-    }
-    if (pass1TimeoutId) {
-      clearTimeout(pass1TimeoutId);
-      pass1TimeoutId = null;
-    }
-    if (pass1PostWaitTimeoutId) {
-      clearTimeout(pass1PostWaitTimeoutId);
-      pass1PostWaitTimeoutId = null;
     }
     if (hudTimerIntervalId) {
       clearInterval(hudTimerIntervalId);
@@ -4647,8 +4769,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTransportRecordingUI(false);
     pass2StreamStartTime = null;
     pass2DownbeatScheduledTime = null;
-    isTrackSyncTake = false;
-    trackSyncGuideIndex = null;
+    activeSyncSession = null;
 
     audio.isRecording = false;
     audio.isRecordingMode = false;
@@ -4659,12 +4780,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     recDiag('REC_CANCELLED', {
       reason,
       recordingState,
-      pass1Samples: totalPass1Samples,
-      pass2Samples: totalPass2Samples,
+      capturedSamples: totalPass2Samples,
       chunksTotal: recChunksReceivedTotal
     }, { level: 'warn', forcePersist: true });
     if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
-      window.zoomProfiler.endRecSession('cancelled', { reason, pass1Samples: totalPass1Samples, pass2Samples: totalPass2Samples });
+      window.zoomProfiler.endRecSession('cancelled', { reason, capturedSamples: totalPass2Samples });
     }
     audio.isRecording = false;
     audio.isRecordingMode = false;
@@ -4678,11 +4798,132 @@ document.addEventListener('DOMContentLoaded', async () => {
     showToast('Recording cancelled', 'info');
   }
 
-  // --- Track-Based Sync Recording (Immediate take start, no prelude/countdown) ---
-  async function startTrackSyncRecording(guideTrackIdx) {
-    isTrackSyncTake = true;
-    trackSyncGuideIndex = guideTrackIdx;
-    recordingState = 'recording_take';
+  /**
+   * Resolves the N reference sync beat timeline timestamps (in seconds) for a Guide Track.
+   * Shared by both live early-warning verification and stop-time alignment.
+   */
+  async function resolveGuideSyncTimelinePeaks(guideIdx, firstBeat, numBeats, fallbackTempo, startPlayhead) {
+    const guideTrack = audio.tracks[guideIdx];
+    if (!guideTrack) {
+      return { ok: false, peaksTimelineSec: [], tempo: fallbackTempo, dt: 60 / fallbackTempo, guideName: 'Guide' };
+    }
+    const guideName = guideTrack.name || 'Guide';
+    const guideOffset = Number(guideTrack.offset) || 0;
+    const guideIsMetro = Boolean(
+      guideTrack.isMetronome ||
+      state.project?.tracks?.[guideIdx]?.isMetronome ||
+      /^metronome/i.test(guideName)
+    );
+    const tempo = guideTrack.tempo || state.project?.tracks?.[guideIdx]?.tempo || state.project?.tempo || state.project?.bpm || fallbackTempo || 90;
+    const dt = 60 / Math.max(30, tempo);
+
+    if (guideIsMetro) {
+      const peaksTimelineSec = [];
+      const startBeatIdx = Math.max(0, Math.ceil((startPlayhead - guideOffset - 0.02) / dt));
+      for (let k = 0; k < numBeats; k++) {
+        const beatIdx = startBeatIdx + (firstBeat - 1) + k;
+        peaksTimelineSec.push(guideOffset + beatIdx * dt);
+      }
+      return { ok: peaksTimelineSec.length === numBeats, peaksTimelineSec, tempo, dt, guideName, guideIsMetro: true };
+    }
+
+    let guideBuffer = null;
+    try {
+      guideBuffer = await audio.getTrackAudioBuffer(guideIdx);
+    } catch (e) {
+      console.warn('Could not load guide track audio buffer for sync:', e);
+    }
+    if (!guideBuffer) {
+      return { ok: false, peaksTimelineSec: [], tempo, dt, guideName, guideIsMetro: false };
+    }
+
+    const guidePCM = guideBuffer.numberOfChannels > 1
+      ? combineStereoForPeakDetection(guideBuffer.getChannelData(0), guideBuffer.getChannelData(1))
+      : guideBuffer.getChannelData(0);
+    const guideSR = guideBuffer.sampleRate;
+    const peaksTimelineSec = [];
+
+    const expGuideFirstSec = Math.max(0, (startPlayhead + (firstBeat - 1) * dt) - guideOffset);
+    const guideSeq = findBestTapSequence(guidePCM, guideSR, expGuideFirstSec, dt, numBeats, Math.min(0.025, getPeakThresholdLinear() * 0.6));
+    if (guideSeq.peaksSec.length === numBeats) {
+      for (let k = 0; k < numBeats; k++) {
+        peaksTimelineSec.push(guideOffset + guideSeq.peaksSec[k]);
+      }
+    } else {
+      const guideClaimedRanges = [];
+      const exclRadiusGuide = Math.round(0.25 * dt * guideSR);
+      const searchWinSecGuide = 0.70 * dt;
+      let lastMetroPeakSample = null;
+      for (let k = 0; k < numBeats; k++) {
+        let s0, s1;
+        if (lastMetroPeakSample === null) {
+          const expTimelineSec = startPlayhead + (firstBeat - 1) * dt;
+          const expGuideRelSec = expTimelineSec - guideOffset;
+          if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) continue;
+          s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
+          s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
+        } else {
+          const center = lastMetroPeakSample + Math.round(dt * guideSR);
+          s0 = Math.max(lastMetroPeakSample + Math.round(0.35 * dt * guideSR), center - Math.round(0.45 * dt * guideSR));
+          s1 = Math.min(guidePCM.length, center + Math.round(0.45 * dt * guideSR));
+        }
+        if (s0 >= s1) continue;
+
+        const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
+        if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
+          peaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
+          lastMetroPeakSample = pk.idx;
+          guideClaimedRanges.push({
+            start: Math.max(0, pk.idx - exclRadiusGuide),
+            end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
+          });
+        }
+      }
+    }
+
+    return { ok: peaksTimelineSec.length === numBeats, peaksTimelineSec, tempo, dt, guideName, guideIsMetro: false };
+  }
+
+  /**
+   * Unified Single-Pass NANOdaw Sync Recording Flow.
+   * Handles BOTH:
+   *  - mode === 'track': Backing Track / Metronome Sync (with a Guide Track)
+   *  - mode === 'synth': Metronome Synth Beats (just-in-time metronome, no guide track required;
+   *    records F + N - 1 pre-take beats for peak sync, then begins real take at downbeat of F + N)
+   * Includes live per-beat and post-sync-window early warnings for missed peaks.
+   */
+  async function startNanodawSyncRecording({ mode, guideTrackIdx = null }) {
+    const firstBeat = Math.max(1, Math.min(64, parseInt(syncTrackFirstBeat?.value, 10) || 5));
+    const numBeats = Math.max(1, Math.min(16, parseInt(syncTrackNumBeats?.value, 10) || 4));
+    const preTakeBeats = (firstBeat - 1) + numBeats;
+    const synthTempoInput = Math.max(40, Math.min(240, parseInt(syncSynthTempo?.value, 10) || state.project?.tempo || 90));
+
+    let tempo = synthTempoInput;
+    let dt = 60 / tempo;
+    let guideName = 'Synth Metronome';
+    let refTimelineSec = [];
+    let guideMissingError = null;
+
+    if (mode === 'track') {
+      const guideRes = await resolveGuideSyncTimelinePeaks(guideTrackIdx, firstBeat, numBeats, synthTempoInput, recordingStartPlayhead);
+      if (!isRecording) return;
+      tempo = guideRes.tempo;
+      dt = guideRes.dt;
+      guideName = guideRes.guideName;
+      refTimelineSec = guideRes.peaksTimelineSec;
+      if (!guideRes.ok) {
+        guideMissingError = `⚠️ Guide "${guideName}" has ${refTimelineSec.length}/${numBeats} beats at beats ${firstBeat}–${firstBeat + numBeats - 1}! Stop & choose a rhythmic guide.`;
+      }
+    } else {
+      // Option 2 (Metronome Synth Beats): beat F + N coincides with recordingStartPlayhead,
+      // so sync beat k (0..N-1) corresponds to virtual timeline position recordingStartPlayhead - (N - k) * dt.
+      for (let k = 0; k < numBeats; k++) {
+        refTimelineSec.push(recordingStartPlayhead - (numBeats - k) * dt);
+      }
+    }
+
+    detectedIntervalSec = dt;
+
     pass2AudioStore.reset();
     pass2AudioStore.prepareAheadOfTime(4);
     pass2AudioStoreR.reset();
@@ -4692,82 +4933,426 @@ document.addEventListener('DOMContentLoaded', async () => {
     pass2ClickEvents = [];
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
-    resetClickBeads();
+    pass2DownbeatScheduledTime = null;
+    recordingState = (mode === 'synth') ? 'sync_preroll' : 'recording_take';
 
-    const guideTrack = audio.tracks[guideTrackIdx];
-    const trackName = guideTrack ? (guideTrack.name || 'Guide') : 'Guide';
-    const firstBeat = Math.max(1, parseInt(syncTrackFirstBeat?.value, 10) || 5);
-    const numBeats = Math.max(1, parseInt(syncTrackNumBeats?.value, 10) || 4);
-
-    recDiag('REC_TRACK_SYNC_TAKE_BEGIN', {
-      guideTrackIdx,
-      guideTrackName: trackName,
-      firstBeat,
-      numBeats,
-      channelConfig: activeRecordingChannelConfig,
-      playhead: recordingStartPlayhead,
-      ctx: inspectAudioCtx(recAudioCtx)
-    }, {
-      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
-      extraData: guideTrackIdx,
-      forcePersist: true
-    });
-
-    if (hudRecStatusText) hudRecStatusText.textContent = 'TRACK SYNC TAKE';
-    if (hudInstruction) hudInstruction.textContent = `Sync with "${trackName}"! Tap beats ${firstBeat}–${firstBeat + numBeats - 1}...`;
+    const beadEls = resetClickBeads(numBeats);
     if (hudClickBeads) {
       hudClickBeads.classList.remove('hidden');
       hudClickBeads.style.display = 'flex';
     }
+    if (hudLatencyText) {
+      hudLatencyText.textContent = '';
+      hudLatencyText.style.display = 'none';
+    }
 
-    const estTempo = (guideTrack && guideTrack.tempo) || state.project?.tracks?.[guideTrackIdx]?.tempo || state.project?.tempo || state.project?.bpm || parseInt(syncSynthTempo?.value, 10) || 90;
-    const estDt = 60 / Math.max(30, estTempo);
-    const minTapAcceptSec = Math.max(0, (firstBeat - 1) * estDt - 0.85 * estDt);
+    const session = {
+      mode,
+      guideTrackIdx: mode === 'track' ? guideTrackIdx : null,
+      guideName,
+      tempo,
+      dt,
+      firstBeat,
+      numBeats,
+      preTakeBeats,
+      streamStartTime: pass2StreamStartTime || 0,
+      beat1CtxTime: 0,
+      downbeatCtxTime: null,
+      expSyncBufferSec: new Array(numBeats).fill(0),
+      refTimelineSec,
+      guideMissingError,
+      liveTapMatched: new Array(numBeats).fill(false),
+      liveTapTimesSec: [],
+      warnedMissedBeat: false,
+      earlyVerifiedResult: null,
+      scheduledTimerIds: []
+    };
+    activeSyncSession = session;
+
+    const scheduleSessionTimer = (fn, delayMs) => {
+      const tid = setTimeout(() => {
+        if (!isRecording || activeSyncSession !== session) return;
+        fn();
+      }, Math.max(0, delayMs));
+      session.scheduledTimerIds.push(tid);
+      return tid;
+    };
+
+    const markBeadMatched = (beatIdx) => {
+      session.liveTapMatched[beatIdx] = true;
+      const bEl = beadEls[beatIdx];
+      if (bEl) {
+        bEl.className = 'click-bead active';
+        bEl.textContent = String(beatIdx + 1);
+      }
+    };
+
+    const markBeadMissed = (beatIdx) => {
+      const bEl = beadEls[beatIdx];
+      if (bEl && !session.liveTapMatched[beatIdx]) {
+        bEl.className = 'click-bead missed';
+        bEl.textContent = '!';
+      }
+    };
 
     await attachRecordingPipeline({
       detectTransients: true,
       targetStore: pass2AudioStore,
       targetStoreR: pass2AudioStoreR,
       onTransient: (now, samplePos) => {
-        if (recordingState !== 'recording_take' || !isTrackSyncTake) return;
+        if (!isRecording || activeSyncSession !== session) return;
         const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-        const secInTake = samplePos / sr;
-        if (secInTake < minTapAcceptSec) return;
+        const secInBuf = samplePos / sr;
+        const firstExp = session.expSyncBufferSec[0] || 0;
+        const lastExp = session.expSyncBufferSec[numBeats - 1] || (firstExp + (numBeats - 1) * dt);
+        if (secInBuf < Math.max(0, firstExp - 0.65 * dt)) return;
+        if (secInBuf > lastExp + 1.45 * dt + 0.35) return;
+
         pass2ClickEvents.push({ ctxTime: now, samplePos });
-        const count = pass2ClickEvents.length;
-        const beadIdx = Math.min(3, count - 1);
-        const beadEl = [bead1, bead2, bead3, bead4][beadIdx];
-        if (beadEl) beadEl.classList.add('active');
-        recDiag('REC_TRACK_SYNC_LIVE_TAP', {
-          tapNum: count,
-          secInTake: Number(secInTake.toFixed(3)),
+        session.liveTapTimesSec.push(secInBuf);
+
+        // Match transient to nearest unmatched sync beat within generous hardware-latency window
+        let bestK = -1;
+        let bestDist = Infinity;
+        for (let k = 0; k < numBeats; k++) {
+          if (session.liveTapMatched[k]) continue;
+          const expK = session.expSyncBufferSec[k];
+          const minK = expK - 0.42 * dt;
+          const maxK = expK + 0.68 * dt + 0.25;
+          if (secInBuf >= minK && secInBuf <= maxK) {
+            // Bias slightly toward causal (+latency) arrival after the beat
+            const delta = secInBuf - expK;
+            const dist = Math.abs(delta - 0.06);
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestK = k;
+            }
+          }
+        }
+        if (bestK >= 0) {
+          markBeadMatched(bestK);
+        }
+        recDiag('REC_NANODAW_SYNC_LIVE_TAP', {
+          mode,
+          matchedBeatIdx: bestK,
+          secInBuf: Number(secInBuf.toFixed(3)),
           samplePos
         });
-        if (count === numBeats) {
-          if (hudInstruction) hudInstruction.textContent = 'Sync taps captured! Sing or play along...';
-        } else if (count >= numBeats + 2 && recWorkletNode) {
-          try { recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false }); } catch (_) {}
-        }
       }
     });
 
     window.__nanodaw_stream = recStream;
     window.__nanodaw_mic = recMicSource;
 
-    // Start playback immediately from playhead (No countdown/prelude)
-    if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
-      audio.seek(recordingStartPlayhead);
+    const nowAfterAttach = recAudioCtx ? recAudioCtx.currentTime : 0;
+    if (pass2StreamStartTime === null) {
+      pass2StreamStartTime = nowAfterAttach;
     }
-    recDiag('REC_BACKING_PLAY_CALL', {
-      mode: 'track_sync',
-      playhead: audio.playheadPosition,
-      ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null
-    }, { forcePersist: true });
-    audio.play();
+    session.streamStartTime = pass2StreamStartTime;
 
-    takeStartTime = performance.now();
-    startHudTimer();
+    if (mode === 'track') {
+      session.beat1CtxTime = nowAfterAttach;
+      for (let k = 0; k < numBeats; k++) {
+        session.expSyncBufferSec[k] = refTimelineSec[k] !== undefined
+          ? Math.max(0, refTimelineSec[k] - recordingStartPlayhead)
+          : ((firstBeat - 1) + k) * dt;
+      }
+
+      if (hudRecStatusText) hudRecStatusText.textContent = 'TRACK SYNC';
+      if (hudInstruction) {
+        hudInstruction.textContent = firstBeat > 1
+          ? `Sync with "${guideName}": wait beats 1–${firstBeat - 1}, tap beats ${firstBeat}–${firstBeat + numBeats - 1}...`
+          : `Sync with "${guideName}": tap beats 1–${numBeats} now!`;
+      }
+
+      if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+        audio.seek(recordingStartPlayhead);
+      }
+      recDiag('REC_NANODAW_SYNC_BEGIN', {
+        mode: 'track',
+        guideTrackIdx,
+        guideName,
+        tempo,
+        firstBeat,
+        numBeats,
+        playhead: recordingStartPlayhead,
+        channelConfig: activeRecordingChannelConfig,
+        ctx: inspectAudioCtx(recAudioCtx)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
+        extraData: guideTrackIdx,
+        forcePersist: true
+      });
+      audio.play();
+      takeStartTime = performance.now();
+      startHudTimer();
+
+      if (guideMissingError) {
+        session.warnedMissedBeat = true;
+        setHudSyncWarning(guideMissingError, true);
+        showToast(guideMissingError, 'warning', 7000);
+      }
+    } else {
+      // Option 2: Metronome Synth Beats (Just-In-Time Metronome, single-pass, no guide track required)
+      const beat1CtxTime = nowAfterAttach + 0.12;
+      const downbeatCtxTime = beat1CtxTime + preTakeBeats * dt; // Beat F + N downbeat!
+      session.beat1CtxTime = beat1CtxTime;
+      session.downbeatCtxTime = downbeatCtxTime;
+      pass2DownbeatScheduledTime = downbeatCtxTime;
+
+      for (let k = 0; k < numBeats; k++) {
+        session.expSyncBufferSec[k] = Math.max(0, (beat1CtxTime - session.streamStartTime) + ((firstBeat - 1) + k) * dt);
+      }
+
+      const takeMetroEnabled = Boolean(syncMetronomeOn && syncMetronomeOn.checked);
+      const takeMetroVol = parseDbToLinear(syncMetronomeVolume ? syncMetronomeVolume.value : '0dB');
+
+      // Early beats (1 .. F + N - 1) ALWAYS play the just-in-time metronome;
+      // from beat F + N onwards, metronome continues ONLY if takeMetroEnabled is true (at takeMetroVol).
+      startLiveMetronome(beat1CtxTime, tempo, takeMetroVol, {
+        preTakeBeats,
+        firstSyncBeatIdx: firstBeat - 1,
+        takeEnabled: takeMetroEnabled
+      });
+
+      // Start any existing project tracks right at the Beat F + N downbeat (recordingStartPlayhead)!
+      if (audio.tracks && audio.tracks.length > 0) {
+        if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+          audio.seek(recordingStartPlayhead);
+        }
+        audio.play(downbeatCtxTime);
+      }
+
+      if (hudRecStatusText) {
+        hudRecStatusText.textContent = firstBeat > 1 ? 'SYNC COUNT-IN' : 'TAP SYNC BEATS';
+      }
+      if (hudTimer) {
+        hudTimer.textContent = `Beat 1/${preTakeBeats}`;
+      }
+      if (hudInstruction) {
+        hudInstruction.textContent = firstBeat > 1
+          ? `Listen beats 1–${firstBeat - 1} (${tempo} BPM), tap beats ${firstBeat}–${preTakeBeats}...`
+          : `Tap along on beats 1–${numBeats} (${tempo} BPM)!`;
+      }
+
+      recDiag('REC_NANODAW_SYNC_BEGIN', {
+        mode: 'synth',
+        tempo,
+        firstBeat,
+        numBeats,
+        preTakeBeats,
+        takeStartBeat: preTakeBeats + 1,
+        takeMetroEnabled,
+        playhead: recordingStartPlayhead,
+        channelConfig: activeRecordingChannelConfig,
+        ctx: inspectAudioCtx(recAudioCtx)
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
+        forcePersist: true
+      });
+
+      // Count-in beat HUD updates prior to First Beat to Sync (beats 1 .. F - 1)
+      for (let b = 0; b < firstBeat - 1; b++) {
+        const beatCtx = beat1CtxTime + b * dt;
+        const delayMs = (beatCtx - (recAudioCtx ? recAudioCtx.currentTime : nowAfterAttach)) * 1000;
+        scheduleSessionTimer(() => {
+          if (hudTimer && recordingState === 'sync_preroll') {
+            hudTimer.textContent = `Beat ${b + 1}/${preTakeBeats}`;
+          }
+          if (!session.warnedMissedBeat && hudInstruction) {
+            hudInstruction.textContent = `Count-in beat ${b + 1} of ${firstBeat - 1} — tap on beats ${firstBeat}–${preTakeBeats}`;
+          }
+        }, delayMs);
+      }
+
+      // Transition to live take recording on the downbeat of Beat F + N!
+      const downbeatDelayMs = (downbeatCtxTime - (recAudioCtx ? recAudioCtx.currentTime : nowAfterAttach)) * 1000;
+      scheduleSessionTimer(() => {
+        recordingState = 'recording_take';
+        takeStartTime = performance.now();
+        startHudTimer();
+        if (!session.warnedMissedBeat) {
+          if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
+          if (hudInstruction) hudInstruction.textContent = `Beat ${preTakeBeats + 1} downbeat — recording take!`;
+        }
+        recDiag('REC_SYNTH_SYNC_TAKE_DOWNBEAT', {
+          takeStartBeat: preTakeBeats + 1,
+          ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null,
+          scheduledDownbeatTime: Number(downbeatCtxTime.toFixed(4)),
+          prerollSamples: pass2AudioStore.totalSamples
+        }, { forcePersist: true });
+      }, downbeatDelayMs);
+    }
+
     startRecordingWatchdog();
+
+    // --- Unified Sync Beat Cues & Per-Beat Early Missed-Peak Warnings (shared by BOTH modes) ---
+    const refNowCtx = recAudioCtx ? recAudioCtx.currentTime : nowAfterAttach;
+    for (let k = 0; k < numBeats; k++) {
+      const beatNumber = firstBeat + k;
+      const beatStreamTime = session.streamStartTime + session.expSyncBufferSec[k];
+      const cueDelayMs = (beatStreamTime - refNowCtx) * 1000;
+
+      scheduleSessionTimer(() => {
+        if (mode === 'synth' && recordingState === 'sync_preroll' && hudTimer) {
+          hudTimer.textContent = `Sync ${k + 1}/${numBeats}`;
+        }
+        if (!session.warnedMissedBeat) {
+          if (hudRecStatusText && mode === 'synth') hudRecStatusText.textContent = 'TAP SYNC BEATS';
+          if (hudInstruction) {
+            hudInstruction.textContent = `Tap sync beat ${k + 1} of ${numBeats}! (Beat ${beatNumber})`;
+          }
+        }
+        const bEl = beadEls[k];
+        if (bEl && !session.liveTapMatched[k]) {
+          bEl.classList.add('beep');
+          scheduleSessionTimer(() => {
+            if (bEl && !session.liveTapMatched[k] && !bEl.classList.contains('missed')) {
+              bEl.classList.remove('beep');
+            }
+          }, dt * 450);
+        }
+      }, cueDelayMs);
+
+      // Per-beat early warning check right after beat k's arrival + roundtrip latency window
+      const missWindowSec = Math.min(0.88 * dt, 0.52 * dt + 0.24);
+      const flushBeforeCheckMs = Math.max(0, ((beatStreamTime + missWindowSec) - refNowCtx) * 1000 - 25);
+      scheduleSessionTimer(() => {
+        if (!session.liveTapMatched[k] && recWorkletNode) {
+          try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
+        }
+      }, flushBeforeCheckMs);
+
+      const missCheckDelayMs = ((beatStreamTime + missWindowSec) - refNowCtx) * 1000;
+      scheduleSessionTimer(() => {
+        if (session.guideMissingError) return;
+        if (!session.liveTapMatched[k]) {
+          // Double-check the actual captured PCM slice around beat k before warning (avoids false alarms)
+          const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+          const expK = session.expSyncBufferSec[k];
+          const s0 = Math.max(0, Math.round((expK - 0.38 * dt) * sr));
+          const s1 = Math.min(pass2AudioStore.totalSamples, Math.round((expK + 0.65 * dt + 0.24) * sr));
+          if (s1 > s0 + 32) {
+            const subL = pass2AudioStore.toFlatArray(s0, s1);
+            const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples >= s1);
+            const subPCM = isSt ? combineStereoForPeakDetection(subL, pass2AudioStoreR.toFlatArray(s0, s1)) : subL;
+            const minPk = Math.max(0.006, getPeakThresholdLinear() * 0.60);
+            const pk = findTransientPeak(subPCM, 0, subPCM.length);
+            if (pk.found && pk.peakAbs >= minPk && pk.crest >= 1.75) {
+              markBeadMatched(k);
+              return;
+            }
+          }
+
+          markBeadMissed(k);
+          const heardSoFar = session.liveTapMatched.slice(0, k + 1).filter(Boolean).length;
+          const warnMsg = `⚠️ Missed peak on beat ${beatNumber} (${heardSoFar}/${k + 1} heard) — Stop to retry!`;
+          const firstWarning = !session.warnedMissedBeat;
+          session.warnedMissedBeat = true;
+          setHudSyncWarning(warnMsg, firstWarning);
+          if (firstWarning) {
+            showToast(`⚠️ Missed sync tap on beat ${beatNumber}! Stop now to retry or lower threshold.`, 'warning', 5500);
+          }
+          recDiag('REC_SYNC_EARLY_BEAT_MISSED', {
+            mode,
+            missedBeatNumber: beatNumber,
+            syncIndex: k,
+            heardSoFar,
+            peakSensDb
+          }, { level: 'warn', forcePersist: true });
+        }
+      }, missCheckDelayMs);
+    }
+
+    // --- Authoritative Post-Sync-Window Verification on Raw Captured PCM ---
+    const lastSyncStreamSec = session.streamStartTime + (session.expSyncBufferSec[numBeats - 1] || ((preTakeBeats - 1) * dt));
+    const postVerifyWaitSec = Math.max(0.40, 0.68 * dt + 0.22);
+    const verifyFlushDelayMs = Math.max(0, ((lastSyncStreamSec + postVerifyWaitSec) - refNowCtx) * 1000 - 30);
+    scheduleSessionTimer(() => {
+      if (recWorkletNode) {
+        try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
+      }
+    }, verifyFlushDelayMs);
+
+    const verifyDelayMs = ((lastSyncStreamSec + postVerifyWaitSec) - refNowCtx) * 1000;
+    scheduleSessionTimer(() => {
+      if (recWorkletNode) {
+        try { recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false }); } catch (_) {}
+      }
+      if (session.guideMissingError) return;
+
+      const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+      const expFirstSec = session.expSyncBufferSec[0] || 0;
+      const maxWindowSample = Math.min(
+        pass2AudioStore.totalSamples,
+        Math.round((expFirstSec + (numBeats + 2.0) * dt) * sr)
+      );
+      const sliceL = pass2AudioStore.toFlatArray(0, maxWindowSample);
+      const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples > 0);
+      const sliceR = isSt ? pass2AudioStoreR.toFlatArray(0, Math.min(maxWindowSample, pass2AudioStoreR.totalSamples)) : null;
+      const detectPCM = sliceR ? combineStereoForPeakDetection(sliceL, sliceR) : sliceL;
+
+      const res = detectSyncTapPeaks(detectPCM, sr, expFirstSec, dt, numBeats, getPeakThresholdLinear());
+      if (res.peaksSec.length === numBeats) {
+        const estLatMs = Math.round((res.peaksSec[0] - expFirstSec) * 1000);
+        session.earlyVerifiedResult = {
+          ok: true,
+          foundCount: numBeats,
+          peaksSec: res.peaksSec,
+          estLatencyMs: estLatMs,
+          reason: null
+        };
+        session.warnedMissedBeat = false;
+        for (let k = 0; k < numBeats; k++) {
+          markBeadMatched(k);
+        }
+        clearHudSyncFeedback();
+        if (recordingHUD) recordingHUD.classList.add('sync-locked');
+        if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
+        if (hudInstruction) hudInstruction.textContent = `✓ Sync locked (${numBeats}/${numBeats})! Sing or play along...`;
+        if (hudLatencyText) {
+          hudLatencyText.textContent = `Est. Latency: ${estLatMs >= 0 ? '+' : ''}${estLatMs}ms`;
+          hudLatencyText.style.display = 'block';
+        }
+        scheduleSessionTimer(() => {
+          if (recordingHUD) recordingHUD.classList.remove('sync-locked');
+          if (hudClickBeads) {
+            hudClickBeads.classList.add('hidden');
+            hudClickBeads.style.display = 'none';
+          }
+        }, 1400);
+        recDiag('REC_SYNC_EARLY_VERIFY_LOCKED', {
+          mode,
+          numBeats,
+          method: res.method,
+          estLatencyMs: estLatMs,
+          peaksSec: res.peaksSec.map(v => Number(v.toFixed(4)))
+        }, { forcePersist: true });
+      } else {
+        const foundCount = res.peaksSec.length;
+        const failMsg = `⚠️ Sync missed (${foundCount}/${numBeats} peaks detected) — Stop & retry!`;
+        session.earlyVerifiedResult = {
+          ok: false,
+          foundCount,
+          peaksSec: res.peaksSec,
+          estLatencyMs: null,
+          reason: failMsg
+        };
+        for (let k = 0; k < numBeats; k++) {
+          if (!session.liveTapMatched[k]) markBeadMissed(k);
+        }
+        session.warnedMissedBeat = true;
+        setHudSyncWarning(failMsg, true);
+        showToast(`⚠️ Sync incomplete: only ${foundCount} of ${numBeats} tap peaks detected! Stop now to retry.`, 'warning', 8000);
+        recDiag('REC_SYNC_EARLY_VERIFY_FAILED', {
+          mode,
+          foundCount,
+          numBeats,
+          peakSensDb,
+          peaksSec: res.peaksSec.map(v => Number(v.toFixed(4)))
+        }, { level: 'warn', forcePersist: true });
+      }
+    }, verifyDelayMs);
   }
 
   async function startRecordingFlow() {
@@ -4782,7 +5367,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       ? recordDeviceSelect.selectedOptions[0].textContent
       : rawDeviceLabel;
     activeRecordingChannelConfig = parseChannelSelection(recordChannelSelect ? recordChannelSelect.value : 'mono:0');
-    const use2PassSync = record2PassSync ? record2PassSync.checked : true;
+    const useNanodawSync = record2PassSync ? record2PassSync.checked : true;
     const isTrackGuide = guideModeTrack ? guideModeTrack.checked : false;
     const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
     let useAutoGain = recordAutoGain ? recordAutoGain.checked : (isIOSorIPad() && !classifyInputDeviceLabel(rawDeviceLabel || selectedOptionText).isUsb);
@@ -4803,8 +5388,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         channelSelection: activeRecordingChannelConfig,
         useAutoGain,
         useInternalGain,
-        use2PassSync,
-        guideMode: use2PassSync ? (isTrackGuide ? 'track_sync' : 'synth_beeps') : 'single_pass',
+        useNanodawSync,
+        guideMode: useNanodawSync ? (isTrackGuide ? 'track_sync' : 'synth_beats_sync') : 'no_sync',
         selectedGuideTrackIdx,
         startPlayhead: Number((audio.playheadPosition || 0).toFixed(3)),
         hadPrewarmedStream: Boolean(recStream && recStream.active)
@@ -4917,28 +5502,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         recordingHUD.style.display = 'flex';
       }
 
-      if (use2PassSync && isTrackGuide) {
-        if (selectedGuideTrackIdx !== '') {
-          await startTrackSyncRecording(parseInt(selectedGuideTrackIdx, 10));
+      if (useNanodawSync) {
+        if (isTrackGuide) {
+          if (selectedGuideTrackIdx !== '') {
+            await startNanodawSyncRecording({ mode: 'track', guideTrackIdx: parseInt(selectedGuideTrackIdx, 10) });
+          } else {
+            recDiag('REC_ABORT_NO_GUIDE_TRACK', {}, { level: 'warn', forcePersist: true });
+            if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+              window.zoomProfiler.endRecSession('aborted', { reason: 'no_guide_track_selected' });
+            }
+            audio.isRecording = false;
+            audio.isRecordingMode = false;
+            audio.setPlaybackAudioSession();
+            cleanupRecordingNodes();
+            showToast('Please select a guide track, generate a Metronome track, or choose Metronome Synth Beats.', 'warning', 4500);
+            return;
+          }
         } else {
-          recDiag('REC_ABORT_NO_GUIDE_TRACK', {}, { level: 'warn', forcePersist: true });
-          if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
-            window.zoomProfiler.endRecSession('aborted', { reason: 'no_guide_track_selected' });
-          }
-          audio.isRecording = false;
-          audio.isRecordingMode = false;
-          audio.setPlaybackAudioSession();
-          cleanupRecordingNodes();
-          if (btnRecord) btnRecord.classList.remove('recording');
-          if (recordingHUD) {
-            recordingHUD.classList.add('hidden');
-            recordingHUD.style.display = 'none';
-          }
-          showToast('Please select a guide track or generate a Metronome track first.', 'warning', 4000);
-          return;
+          await startNanodawSyncRecording({ mode: 'synth' });
         }
-      } else if (use2PassSync) {
-        await startPass1Calibration();
       } else {
         await startStandardPrelude();
       }
@@ -4969,617 +5551,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // --- Pass 1: Guide Beat & Calibration (Synth Beeps or Backing Track) ---
-  async function startPass1Calibration() {
-    recordingState = 'pass1';
-    pass1AudioStore.reset();
-    pass1AudioStore.prepareAheadOfTime(4);
-    pass1AudioStoreR.reset();
-    if (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo') {
-      pass1AudioStoreR.prepareAheadOfTime(4);
-    }
-    pass1ClickEvents = [];
-    totalPass1Samples = 0;
-    pass1StreamStartTime = null;
-    resetClickBeads();
-
-    if (hudLatencyText) {
-      hudLatencyText.textContent = '';
-      hudLatencyText.style.display = 'none';
-    }
-
-    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : false;
-
-    let lastTransientTime = 0;
-    const minRefractorySec = 0.14; // Refractory debounce window between clicks
-
-    function registerClick(now, samplePos) {
-      if (recordingState !== 'pass1') return;
-      // In synth guide mode, ignore speaker audio during count-in beeps (Beeps 1 to 4)
-      if (isSynthGuide && pass1GuideStartTime && now < pass1GuideStartTime + (3.75 * (detectedIntervalSec || 0.5))) return;
-      lastTransientTime = now;
-      pass1ClickEvents.push({ ctxTime: now, samplePos: samplePos });
-
-      const count = pass1ClickEvents.length;
-      recDiag('REC_PASS1_CLICK_REGISTERED', {
-        clickNum: count,
-        ctxTime: Number(now.toFixed(4)),
-        samplePos
-      });
-      if (count >= 1 && bead1) bead1.classList.add('active');
-      if (count >= 2 && bead2) bead2.classList.add('active');
-      if (count >= 3 && bead3) bead3.classList.add('active');
-      if (count >= 4 && bead4) bead4.classList.add('active');
-
-      if (!isSynthGuide && count === 4) {
-        recordingState = 'pass1_done';
-        if (pass1TimeoutId) {
-          clearTimeout(pass1TimeoutId);
-          pass1TimeoutId = null;
-        }
-        if (hudInstruction) hudInstruction.textContent = '4 clicks calibrated! Starting count-in...';
-
-        // Wait ~1.5 beats after 4th click to ensure full ringout is recorded, then stop backing music and finish Pass 1
-        const waitTailMs = Math.max(900, Math.round(1.5 * (detectedIntervalSec || 0.67) * 1000));
-        pass1PostWaitTimeoutId = setTimeout(async () => {
-          audio.stop();
-          await finishPass1TrackGuide();
-        }, waitTailMs);
-      }
-    }
-    registerClickGlobal = registerClick;
-
-    await attachRecordingPipeline({
-      detectTransients: true,
-      targetStore: pass1AudioStore,
-      targetStoreR: pass1AudioStoreR,
-      onTransient: registerClick
-    });
-
-    window.__nanodaw_stream = recStream;
-    window.__nanodaw_mic = recMicSource;
-
-    if (pass1StreamStartTime === null) {
-      pass1StreamStartTime = recAudioCtx.currentTime;
-    }
-
-    startRecordingWatchdog();
-
-    recDiag('REC_PASS1_START', {
-      isSynthGuide,
-      channelConfig: activeRecordingChannelConfig,
-      streamStartTime: pass1StreamStartTime,
-      ctx: inspectAudioCtx(recAudioCtx)
-    }, {
-      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS1_START : undefined,
-      forcePersist: true
-    });
-
-    if (isSynthGuide) {
-      // --- Option 1: Metronome Synth Beeps Mode ---
-      const tempo = Math.max(40, Math.min(240, parseInt(syncSynthTempo?.value, 10) || 90));
-      const dt = 60 / tempo;
-      detectedIntervalSec = dt; // Authoritative tempo, do NOT guess/estimate!
-
-      if (hudRecStatusText) hudRecStatusText.textContent = 'PASS 1: COUNT-IN';
-      if (hudInstruction) hudInstruction.textContent = `Get ready: 4 count-in beeps at ${tempo} BPM...`;
-      if (hudClickBeads) {
-        hudClickBeads.classList.remove('hidden');
-        hudClickBeads.style.display = 'flex';
-      }
-      if (hudTimer) hudTimer.textContent = 'Pass 1 Guide';
-
-      pass1GuideStartTime = recAudioCtx.currentTime + 0.150;
-
-      // Schedule 8 beeps: 4 count-in + 4 user tap-along
-      for (let i = 0; i < 8; i++) {
-        const beatTime = pass1GuideStartTime + i * dt;
-        const isCountIn = i < 4;
-        const freq = isCountIn ? (i === 3 ? 1800 : 900) : (i === 7 ? 1800 : 1000);
-        playSynthBeep(beatTime, freq, 0.08);
-
-        const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
-        setTimeout(() => {
-          if (recordingState !== 'pass1') return;
-          if (isCountIn) {
-            if (hudInstruction) hudInstruction.textContent = `Count-in beep ${i + 1} of 4 (${tempo} BPM)`;
-            const bead = [bead1, bead2, bead3, bead4][i];
-            if (bead) {
-              bead.className = 'click-bead beep';
-              setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
-            }
-          } else {
-            const tapIdx = i - 4;
-            if (hudRecStatusText) hudRecStatusText.textContent = 'PASS 1: TAP 4 CLICKS';
-            if (hudInstruction) hudInstruction.textContent = `Tap along with beeps! Click ${tapIdx + 1} of 4`;
-            const bead = [bead1, bead2, bead3, bead4][tapIdx];
-            if (bead) {
-              bead.className = 'click-bead beep';
-              setTimeout(() => {
-                if (bead && !bead.classList.contains('active')) bead.className = 'click-bead';
-              }, dt * 450);
-            }
-          }
-        }, delayMs);
-      }
-
-      // Schedule completion of Pass 1 after Beep 8 finishes + extra recording buffer so 4th tap decay is never cut off
-      const pass1EndTime = pass1GuideStartTime + (9.2 * dt) + 0.350;
-      const finishDelayMs = Math.max(0, (pass1EndTime - recAudioCtx.currentTime) * 1000);
-
-      pass1PostWaitTimeoutId = setTimeout(async () => {
-        if (recordingState !== 'pass1') return;
-        recordingState = 'pass1_done';
-        if (hudInstruction) hudInstruction.textContent = 'Pass 1 complete! Preparing Pass 2 count-in...';
-        await finishPass1SynthGuide(dt);
-      }, finishDelayMs);
-
-    } else {
-      // --- Option 2: Backing Track Mode ---
-      if (hudRecStatusText) hudRecStatusText.textContent = 'PASS 1: TAP 4 CLICKS';
-      if (hudInstruction) hudInstruction.textContent = 'Tap 4 sharp clicks / snaps with the rhythm...';
-      if (hudClickBeads) {
-        hudClickBeads.classList.remove('hidden');
-        hudClickBeads.style.display = 'flex';
-      }
-      if (hudTimer) hudTimer.textContent = '15s limit';
-
-      // Start music playback from recordingStartPlayhead
-      if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
-        audio.seek(recordingStartPlayhead);
-      }
-      audio.play();
-
-      // 15-second safety timeout
-      pass1TimeoutId = setTimeout(() => {
-        if (recordingState === 'pass1' && pass1ClickEvents.length < 4) {
-          recDiag('REC_PASS1_TIMEOUT_15S', {
-            clicksDetected: pass1ClickEvents.length,
-            totalSamples: pass1AudioStore.totalSamples,
-            ctx: inspectAudioCtx(recAudioCtx)
-          }, { level: 'warn', forcePersist: true });
-          cancelRecording();
-          showToast('4 clicks were not detected within 15 seconds. You can tap screen or tap louder.', 'error', 4500);
-        }
-      }, 15000);
-    }
-  }
-
-  // --- Finish Pass 1: Metronome Synth Guide Mode ---
-  async function finishPass1SynthGuide(dt) {
-    if (!isRecording) return;
-    const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-    const dtSamples = Math.round(dt * sampleRate);
-
-    // Concatenate all Pass 1 recorded PCM in one batched operation (detect peaks on raw audio BEFORE gain/noise filtering).
-    // In stereo mode, combine L & R via max-signed-amplitude so tapping into EITHER mic calibrates Pass 1 cleanly.
-    const rawP1L = pass1AudioStore.toFlatArray();
-    const rawP1R = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass1AudioStoreR.totalSamples > 0)
-      ? pass1AudioStoreR.toFlatArray()
-      : null;
-    const rawP1 = rawP1R ? combineStereoForPeakDetection(rawP1L, rawP1R) : rawP1L;
-    const totalP1 = rawP1.length;
-
-    const searchWin = Math.round(0.22 * dtSamples);
-    const detectedTapPeaks = [];
-
-    // Nominal arrival of Beep 5 in mic recording (assuming 0 latency from stream start)
-    const streamStart = pass1StreamStartTime ?? (pass1GuideStartTime - 0.150);
-    const nominalBeep5Sec = (pass1GuideStartTime - streamStart) + 4 * dt;
-    const nominalBeep5Sample = Math.round(nominalBeep5Sec * sampleRate);
-
-    // Prefer global 4-beat sequence lock on raw Pass 1 audio
-    const seqRes = findBestTapSequence(rawP1, sampleRate, nominalBeep5Sec, dt, 4, getPeakThresholdLinear());
-    if (seqRes.peaksIdx.length === 4) {
-      detectedTapPeaks.push(...seqRes.peaksIdx);
-    } else {
-      const minTapFloor = Math.min(0.008, getPeakThresholdLinear() * 0.5);
-      // 1. Locate User Tap 1 peak (on Beep 5)
-      let roughTap1 = nominalBeep5Sample;
-      if (pass1ClickEvents.length > 0) {
-        roughTap1 = pass1ClickEvents[0].samplePos;
-      }
-      let pk1 = findTransientPeak(rawP1, roughTap1 - searchWin, roughTap1 + searchWin);
-      if (pk1.peakAbs < minTapFloor * 1.25 && pass1ClickEvents.length === 0) {
-        // If no click event registered, search wider forward window (accounting for hardware roundtrip latency)
-        pk1 = findTransientPeak(rawP1, nominalBeep5Sample - Math.round(0.05 * sampleRate), nominalBeep5Sample + Math.round(1.10 * dtSamples));
-      }
-      const tap1Peak = (pk1.peakAbs >= minTapFloor) ? pk1.idx : roughTap1;
-      detectedTapPeaks.push(tap1Peak);
-
-      // 2. Locate User Taps 2, 3, 4 peaks (on Beeps 6, 7, 8)
-      for (let k = 1; k < 4; k++) {
-        const expectedK = tap1Peak + k * dtSamples;
-        let roughK = expectedK;
-        if (pass1ClickEvents[k] && Math.abs(pass1ClickEvents[k].samplePos - expectedK) < 0.35 * dtSamples) {
-          roughK = pass1ClickEvents[k].samplePos;
-        }
-        const pkK = findTransientPeak(rawP1, roughK - searchWin, roughK + searchWin);
-        const tapKPeak = (pkK.peakAbs >= minTapFloor) ? pkK.idx : roughK;
-        detectedTapPeaks.push(tapKPeak);
-      }
-    }
-
-    const tap1Peak = detectedTapPeaks[0];
-    let p1Full = rawP1;
-    if (recordInternalGain && recordInternalGain.checked) {
-      p1Full = processInternalGainAndNoiseSuppression(rawP1, sampleRate, 0.75);
-    }
-
-    // Ensure strictly ascending peaks with valid intervals
-    for (let k = 1; k < 4; k++) {
-      if (detectedTapPeaks[k] <= detectedTapPeaks[k - 1] + Math.round(0.20 * dtSamples)) {
-        detectedTapPeaks[k] = detectedTapPeaks[k - 1] + dtSamples;
-      }
-    }
-
-    // Estimated roundtrip latency readout (informational)
-    const estLatencyMs = Math.round(((tap1Peak / sampleRate) - nominalBeep5Sec) * 1000);
-    if (hudLatencyText) {
-      hudLatencyText.textContent = `Est. Latency: ${estLatencyMs >= 0 ? '+' : ''}${estLatencyMs}ms`;
-      hudLatencyText.style.display = 'block';
-    }
-    console.log(`[Pass 1 Synth Guide] Authoritative tempo: ${dt.toFixed(4)}s (${Math.round(60 / dt)} BPM), Est. Latency: ${estLatencyMs}ms, Tap peaks: [${detectedTapPeaks.join(', ')}]`);
-    recDiag('REC_PASS1_SYNTH_FINISH', {
-      totalSamples: totalP1,
-      tempoBpm: Math.round(60 / dt),
-      dtSec: Number(dt.toFixed(4)),
-      estLatencyMs,
-      detectedTapPeaks,
-      clickEventsCount: pass1ClickEvents.length
-    }, {
-      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS1_FINISH : undefined,
-      extraData: estLatencyMs,
-      forcePersist: true
-    });
-
-    // 3. Extract continuous waveform recorded from Phase 1 exactly as the user tapped them:
-    // User Tap 1 peak is positioned at preLeadSamples so it sounds exactly 1 beat after the 4th beep.
-    const preLeadSamples = Math.min(detectedTapPeaks[0], Math.round(0.040 * sampleRate));
-    const startSlice = Math.max(0, detectedTapPeaks[0] - preLeadSamples);
-    const postRingoutSamples = Math.min(totalP1 - detectedTapPeaks[3], Math.round(1.50 * dtSamples));
-    const endSlice = Math.min(totalP1, detectedTapPeaks[3] + postRingoutSamples);
-
-    const calibPCM = p1Full.slice(startSlice, endSlice);
-
-    // Apply gentle 3ms cosine fade-in and 25ms fade-out
-    const fadeInSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.003));
-    for (let i = 0; i < fadeInSamples; i++) {
-      calibPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeInSamples)));
-    }
-    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.025));
-    for (let i = 0; i < fadeOutSamples; i++) {
-      const idx = calibPCM.length - 1 - i;
-      calibPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeOutSamples)));
-    }
-
-    // Normalize calibration audio
-    let maxCalibAmp = 0;
-    for (let i = 0; i < calibPCM.length; i++) {
-      const a = Math.abs(calibPCM[i]);
-      if (a > maxCalibAmp) maxCalibAmp = a;
-    }
-    const calibGainVal = maxCalibAmp > 0.01 ? Math.min(3.0, 0.90 / maxCalibAmp) : 2.0;
-    for (let i = 0; i < calibPCM.length; i++) {
-      calibPCM[i] *= calibGainVal;
-    }
-
-    const calibBuffer = recAudioCtx.createBuffer(1, calibPCM.length, sampleRate);
-    calibBuffer.getChannelData(0).set(calibPCM);
-
-    await startPass2Flow(calibBuffer, dt, preLeadSamples);
-  }
-
-  // --- Finish Pass 1: Backing Track Guide Mode ---
-  async function finishPass1TrackGuide() {
-    if (!isRecording) return;
-    const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-
-    // 1. Gather all recorded PCM from Pass 1 in one batched operation (detect peaks on raw audio first)
-    const rawP1L = pass1AudioStore.toFlatArray();
-    const rawP1R = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass1AudioStoreR.totalSamples > 0)
-      ? pass1AudioStoreR.toFlatArray()
-      : null;
-    const rawP1 = rawP1R ? combineStereoForPeakDetection(rawP1L, rawP1R) : rawP1L;
-    const totalP1 = rawP1.length;
-
-    // 2. High-precision transient peak detection for all 4 taps in rawP1
-    const exactPeaks = [];
-    const searchWindowSamples = Math.round(0.12 * sampleRate);
-
-    for (let k = 0; k < 4; k++) {
-      const roughPos = pass1ClickEvents[k]?.samplePos ?? Math.round(k * (totalP1 / 4));
-      const peakInfo = findTransientPeak(rawP1, roughPos - searchWindowSamples, roughPos + searchWindowSamples);
-      exactPeaks.push(peakInfo.idx);
-    }
-
-    let p1Full = rawP1;
-    if (recordInternalGain && recordInternalGain.checked) {
-      p1Full = processInternalGainAndNoiseSuppression(rawP1, sampleRate, 0.75);
-    }
-
-    // 3. Compute tempo using all 4 taps via linear regression & robust outlier-rejected median
-    const intervals = [
-      (exactPeaks[1] - exactPeaks[0]) / sampleRate,
-      (exactPeaks[2] - exactPeaks[1]) / sampleRate,
-      (exactPeaks[3] - exactPeaks[2]) / sampleRate
-    ];
-
-    const slopeSamples = (3 * (exactPeaks[3] - exactPeaks[0]) + (exactPeaks[2] - exactPeaks[1])) / 10;
-    const dtReg = slopeSamples / sampleRate;
-
-    const sortedInts = [...intervals].sort((a, b) => a - b);
-    const medianInt = sortedInts[1];
-    const consistentInts = intervals.filter(v => Math.abs(v - medianInt) / medianInt < 0.30);
-    const avgConsistent = consistentInts.length > 0
-      ? (consistentInts.reduce((a, b) => a + b, 0) / consistentInts.length)
-      : dtReg;
-
-    let dt = 0.60 * avgConsistent + 0.40 * dtReg;
-    if (isNaN(dt) || dt < 0.25 || dt > 1.8) {
-      dt = 60 / (state.project?.tempo || 78);
-    }
-    detectedIntervalSec = dt;
-    console.log(`[Pass 1 Track Guide] Detected tempo: ${dt.toFixed(4)}s (${(60 / dt).toFixed(1)} BPM), Tap intervals: ${intervals.map(v => v.toFixed(3)).join(', ')}s`);
-    recDiag('REC_PASS1_TRACK_FINISH', {
-      totalSamples: totalP1,
-      tempoBpm: Number((60 / dt).toFixed(1)),
-      dtSec: Number(dt.toFixed(4)),
-      exactPeaks,
-      intervals: intervals.map(v => Number(v.toFixed(4)))
-    }, {
-      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS1_FINISH : undefined,
-      forcePersist: true
-    });
-
-    // Latency readout if guide track is selected and not "None"
-    const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
-    if (selectedGuideTrackIdx !== '') {
-      try {
-        const guideTrack = audio.tracks[parseInt(selectedGuideTrackIdx, 10)];
-        if (guideTrack && guideTrack.audioBuffer) {
-          const trackChan = guideTrack.audioBuffer.numberOfChannels > 1
-            ? combineStereoForPeakDetection(guideTrack.audioBuffer.getChannelData(0), guideTrack.audioBuffer.getChannelData(1))
-            : guideTrack.audioBuffer.getChannelData(0);
-          const trackSR = guideTrack.audioBuffer.sampleRate;
-          const latencies = [];
-          for (let k = 0; k < 4; k++) {
-            const clickTimelineSec = recordingStartPlayhead + (exactPeaks[k] / sampleRate);
-            const clickTrackSample = Math.round((clickTimelineSec - (guideTrack.offset || 0)) * trackSR);
-            const searchWin = Math.round(0.25 * dt * trackSR);
-            const pk = findTransientPeak(trackChan, clickTrackSample - searchWin, clickTrackSample + searchWin);
-            if (pk.peakAbs > 0.01) {
-              const peakTimelineSec = (pk.idx / trackSR) + (guideTrack.offset || 0);
-              latencies.push((clickTimelineSec - peakTimelineSec) * 1000);
-            }
-          }
-          if (latencies.length > 0) {
-            const avgLat = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
-            if (hudLatencyText) {
-              hudLatencyText.textContent = `Est. Latency: ${avgLat >= 0 ? '+' : ''}${avgLat}ms`;
-              hudLatencyText.style.display = 'block';
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Track guide latency diffing failed:', err);
-      }
-    } else {
-      if (hudLatencyText) {
-        hudLatencyText.textContent = '';
-        hudLatencyText.style.display = 'none';
-      }
-    }
-
-    // 4. Extract continuous user calibration audio slice
-    const preLeadSamples = Math.min(exactPeaks[0], Math.round(0.040 * sampleRate));
-    const startSlice = exactPeaks[0] - preLeadSamples;
-    const postRingoutSamples = Math.min(totalP1 - exactPeaks[3], Math.round(1.50 * dt * sampleRate));
-    const endSlice = Math.min(totalP1, exactPeaks[3] + postRingoutSamples);
-
-    const calibPCM = p1Full.slice(startSlice, endSlice);
-
-    const fadeInSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.003));
-    for (let i = 0; i < fadeInSamples; i++) {
-      calibPCM[i] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeInSamples)));
-    }
-    const fadeOutSamples = Math.min(calibPCM.length, Math.round(sampleRate * 0.025));
-    for (let i = 0; i < fadeOutSamples; i++) {
-      const idx = calibPCM.length - 1 - i;
-      calibPCM[idx] *= 0.5 * (1 - Math.cos(Math.PI * (i / fadeOutSamples)));
-    }
-
-    let maxCalibAmp = 0;
-    for (let i = 0; i < calibPCM.length; i++) {
-      const a = Math.abs(calibPCM[i]);
-      if (a > maxCalibAmp) maxCalibAmp = a;
-    }
-    const calibGainVal = maxCalibAmp > 0.01 ? Math.min(3.0, 0.90 / maxCalibAmp) : 2.0;
-    for (let i = 0; i < calibPCM.length; i++) {
-      calibPCM[i] *= calibGainVal;
-    }
-
-    const calibBuffer = recAudioCtx.createBuffer(1, calibPCM.length, sampleRate);
-    calibBuffer.getChannelData(0).set(calibPCM);
-
-    await startPass2Flow(calibBuffer, dt, preLeadSamples);
-  }
-
-  // --- Pass 2: 8-Click Prelude & Live Recording ---
-  async function startPass2Flow(calibBuffer, dt, preLeadSamples) {
-    if (!isRecording) return;
-
-    // CRITICAL: Ensure audio context is running and NOT suspended!
-    if (!recAudioCtx || recAudioCtx.state === 'closed') {
-      recAudioCtx = audio.getOrCreateAudioContext();
-    }
-    if (recAudioCtx.state === 'suspended' || recAudioCtx.state === 'interrupted') {
-      await recAudioCtx.resume();
-    }
-
-    const sampleRate = recAudioCtx.sampleRate;
-
-    // Prepare Pass 2 recording pipeline
-    pass2AudioStore.reset();
-    pass2AudioStore.prepareAheadOfTime(4);
-    pass2AudioStoreR.reset();
-    if (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo') {
-      pass2AudioStoreR.prepareAheadOfTime(4);
-    }
-    pass2ClickEvents = [];
-    totalPass2Samples = 0;
-    pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
-    recordingState = 'pass2_prelude';
-    resetClickBeads();
-
-    if (hudRecStatusText) hudRecStatusText.textContent = 'PASS 2: COUNT-IN (8 BEATS)';
-    if (hudInstruction) hudInstruction.textContent = 'Count-in: 4 beeps + 4 of your clicks...';
-    if (hudClickBeads) {
-      hudClickBeads.classList.remove('hidden');
-      hudClickBeads.style.display = 'flex';
-    }
-
-    await attachRecordingPipeline({
-      detectTransients: true,
-      targetStore: pass2AudioStore,
-      targetStoreR: pass2AudioStoreR,
-      onTransient: (now, samplePos) => {
-        if (recordingState === 'pass2_prelude') {
-          pass2ClickEvents.push({ ctxTime: now, samplePos });
-        }
-      }
-    });
-
-    startRecordingWatchdog();
-
-    // Schedule the 8-beat prelude in Web Audio
-    const startPreludeTime = recAudioCtx.currentTime + 0.15;
-    recDiag('REC_PASS2_PRELUDE_START', {
-      dtSec: Number(dt.toFixed(4)),
-      tempoBpm: Math.round(60 / dt),
-      startPreludeTime: Number(startPreludeTime.toFixed(4)),
-      calibFrames: calibBuffer ? calibBuffer.length : 0,
-      ctx: inspectAudioCtx(recAudioCtx)
-    }, {
-      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PASS2_START : undefined,
-      forcePersist: true
-    });
-
-    // Beats 1 to 4: Synthesized beeps
-    for (let i = 0; i < 4; i++) {
-      const beatTime = startPreludeTime + i * dt;
-      playSynthBeep(beatTime, i === 3 ? 1800 : 900, 0.08);
-
-      const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
-      setTimeout(() => {
-        if (recordingState !== 'pass2_prelude') return;
-        if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4 (${Math.round(60 / dt)} BPM)`;
-        const bead = [bead1, bead2, bead3, bead4][i];
-        if (bead) {
-          bead.className = 'click-bead beep';
-          setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
-        }
-      }, delayMs);
-    }
-
-    // Beats 5 to 8: Continuous user calibration audio (time-fitted)
-    const preLeadSec = preLeadSamples / sampleRate;
-    const userAudioStartTime = (startPreludeTime + 4 * dt) - preLeadSec;
-
-    try {
-      const calibSrc = recAudioCtx.createBufferSource();
-      calibSrc.buffer = calibBuffer;
-      const calibGainNode = recAudioCtx.createGain();
-      calibGainNode.gain.setValueAtTime(1.2, userAudioStartTime);
-      calibSrc.connect(calibGainNode);
-      calibGainNode.connect(recAudioCtx.destination);
-      calibSrc.start(userAudioStartTime);
-    } catch (e) {
-      console.warn('Error playing calibration buffer:', e);
-    }
-
-    // In 2-pass-mode with synth beeps: MIX Guide 1 beeps 5-8 at -4dB softly in background of user taps
-    const isSynthGuide = guideModeSynth ? guideModeSynth.checked : false;
-    if (isSynthGuide) {
-      const softBeepVol = 0.8 * Math.pow(10, -4 / 20); // 4dB lower than standard beep volume 0.8
-      for (let i = 0; i < 4; i++) {
-        const beatTime = startPreludeTime + (4 + i) * dt;
-        const freq = (i === 3 ? 1800 : 1000); // 1800 Hz on 8th beat before downbeat
-        playSynthBeep(beatTime, freq, 0.08, null, softBeepVol);
-      }
-    }
-
-    // UI bead feedback for Beats 5 to 8
-    for (let i = 0; i < 4; i++) {
-      const beatTime = startPreludeTime + (4 + i) * dt;
-      const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
-      setTimeout(() => {
-        if (recordingState !== 'pass2_prelude') return;
-        if (hudInstruction) hudInstruction.textContent = isSynthGuide
-          ? `Your Tap ${i + 1} of 4 (with guide beep)`
-          : `Your Click ${i + 1} of 4 (calibrating...)`;
-        const bead = [bead1, bead2, bead3, bead4][i];
-        if (bead) {
-          bead.className = 'click-bead active';
-          setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
-        }
-      }, delayMs);
-    }
-
-    // Beat 9: DOWNBEAT!
-    // Backing music starts playback from recordingStartPlayhead at exact downbeat timestamp
-    const downbeatTime = startPreludeTime + 8 * dt;
-    pass2DownbeatScheduledTime = downbeatTime;
-
-    if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
-      audio.seek(recordingStartPlayhead);
-    }
-    audio.play(downbeatTime);
-
-    // Live metronome during take if requested
-    const shouldMetronome = (syncMetronomeOn && syncMetronomeOn.checked);
-    if (shouldMetronome) {
-      const metroVol = parseDbToLinear(syncMetronomeVolume ? syncMetronomeVolume.value : '0dB');
-      const metroTempo = Math.round(60 / dt);
-      startLiveMetronome(downbeatTime, metroTempo, metroVol);
-    }
-
-    // UI update when downbeat arrives
-    const downbeatDelay = Math.max(0, (downbeatTime - recAudioCtx.currentTime) * 1000);
-    setTimeout(() => {
-      if (recordingState !== 'pass2_prelude') return;
-      recordingState = 'recording_take';
-      recDiag('REC_TAKE_LIVE_DOWNBEAT', {
-        mode: '2pass',
-        ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null,
-        scheduledDownbeatTime: Number(downbeatTime.toFixed(4)),
-        preludeSamplesCaptured: pass2AudioStore.totalSamples
-      }, {
-        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
-        forcePersist: true
-      });
-      if (recWorkletNode) {
-        recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false });
-      }
-      if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
-      if (hudInstruction) hudInstruction.textContent = 'Recording live... Sing or play along!';
-      if (hudClickBeads) {
-        hudClickBeads.classList.add('hidden');
-        hudClickBeads.style.display = 'none';
-      }
-      takeStartTime = performance.now();
-      startHudTimer();
-
-      // Ensure live metronome is actively running if enabled
-      if (shouldMetronome && !liveMetronomeIntervalId) {
-        const metroVol = parseDbToLinear(syncMetronomeVolume ? syncMetronomeVolume.value : '0dB');
-        const metroTempo = Math.round(60 / dt);
-        startLiveMetronome(recAudioCtx.currentTime, metroTempo, metroVol);
-      }
-    }, downbeatDelay);
-  }
-
-  // --- Standard Recording Mode (Single-Pass with 4 synth beeps) ---
+  // --- Standard Recording Mode (Without NANOdaw Sync: 4 count-in synth clicks, system-latency placement) ---
   async function startStandardPrelude() {
     if (!recAudioCtx || recAudioCtx.state === 'closed') {
       recAudioCtx = audio.getOrCreateAudioContext();
@@ -5588,7 +5560,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       await recAudioCtx.resume();
     }
 
-    const sampleRate = recAudioCtx.sampleRate;
     const tempo = Math.max(40, Math.min(240, parseInt(singleMetronomeTempo?.value, 10) || state.project?.tempo || 90));
     const dt = 60 / tempo;
     detectedIntervalSec = dt;
@@ -5603,7 +5574,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
     recordingState = 'pass2_prelude';
-    resetClickBeads();
+    const beadEls = resetClickBeads(4);
 
     if (hudRecStatusText) hudRecStatusText.textContent = 'COUNT-IN (4 BEATS)';
     if (hudInstruction) hudInstruction.textContent = `Count-in at ${tempo} BPM...`;
@@ -5641,7 +5612,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       setTimeout(() => {
         if (recordingState !== 'pass2_prelude') return;
         if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4`;
-        const bead = [bead1, bead2, bead3, bead4][i];
+        const bead = beadEls[i];
         if (bead) {
           bead.className = 'click-bead beep';
           setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
@@ -5652,12 +5623,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     const downbeatTime = startPreludeTime + 4 * dt;
     pass2DownbeatScheduledTime = downbeatTime;
 
-    if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
-      audio.seek(recordingStartPlayhead);
+    if (audio.tracks && audio.tracks.length > 0) {
+      if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
+        audio.seek(recordingStartPlayhead);
+      }
+      audio.play(downbeatTime);
     }
-    audio.play(downbeatTime);
 
-    // Live metronome during take if requested in single-pass mode
+    // Live metronome during take if requested in non-sync mode
     const shouldSingleMetro = (singleMetronomeOn && singleMetronomeOn.checked);
     if (shouldSingleMetro) {
       const metroVol = parseDbToLinear(singleMetronomeVolume ? singleMetronomeVolume.value : '0dB');
@@ -5669,7 +5642,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
       recDiag('REC_TAKE_LIVE_DOWNBEAT', {
-        mode: 'single_pass',
+        mode: 'no_sync',
         ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null,
         scheduledDownbeatTime: Number(downbeatTime.toFixed(4)),
         preludeSamplesCaptured: pass2AudioStore.totalSamples
@@ -5700,7 +5673,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const stateAtStop = recordingState;
     recDiag('REC_STOP_BEGIN', {
       stateAtStop,
-      pass1Samples: pass1AudioStore.totalSamples,
       pass2Samples: pass2AudioStore.totalSamples,
       pass2SamplesR: pass2AudioStoreR.totalSamples,
       channelConfig: activeRecordingChannelConfig,
@@ -5720,6 +5692,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.setPlaybackAudioSession();
 
     stopLiveMetronome();
+    clearActiveSyncTimers();
 
     // 1. Immediately hide all recording overlays and stop timer
     if (recordingHUD) {
@@ -5732,11 +5705,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       hudTimerIntervalId = null;
     }
 
-    // 2. Snapshot timing references, channel config, and sync flags BEFORE calling cleanupRecordingNodes()
+    // 2. Snapshot timing references, channel config, and unified NANOdaw Sync session BEFORE cleanupRecordingNodes()
     const scheduledDownbeatTime = pass2DownbeatScheduledTime;
     const streamStartTime = pass2StreamStartTime;
-    const wasTrackSync = isTrackSyncTake;
-    const syncGuideIdx = trackSyncGuideIndex;
+    const syncSessionSnapshot = activeSyncSession ? { ...activeSyncSession } : null;
     const recChCfg = { ...(activeRecordingChannelConfig || { raw: 'mono:0', mode: 'mono', ch: 0, left: 0, right: 0, neededChannels: 1 }) };
     const isStereoTake = (recChCfg.mode === 'stereo');
 
@@ -5749,7 +5721,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     await new Promise(r => setTimeout(r, 20));
     recDiag('REC_STOP_FLUSHED', {
-      pass1SamplesAfterFlush: pass1AudioStore.totalSamples,
       pass2SamplesAfterFlush: pass2AudioStore.totalSamples,
       pass2SamplesRAfterFlush: pass2AudioStoreR.totalSamples,
       chunksReceived: recChunksReceivedTotal,
@@ -5762,138 +5733,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 4. Stop audio playback
     audio.stop();
 
+    // If user stopped during Option 2's pre-take count-in/sync beats (before Beat F + N downbeat), discard cleanly
+    if (syncSessionSnapshot && syncSessionSnapshot.mode === 'synth' && stateAtStop === 'sync_preroll') {
+      const startBeatNum = syncSessionSnapshot.preTakeBeats + 1;
+      recDiag('REC_SYNTH_STOPPED_BEFORE_TAKE_DOWNBEAT', {
+        takeStartBeat: startBeatNum,
+        capturedSamples: pass2AudioStore.totalSamples
+      }, { level: 'info', forcePersist: true });
+      if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+        window.zoomProfiler.endRecSession('stopped_during_preroll', { takeStartBeat: startBeatNum });
+      }
+      audio.seek(recordingStartPlayhead);
+      showToast(`Stopped before beat ${startBeatNum} downbeat — take discarded.`, 'info', 3500);
+      return;
+    }
+
     // 5. Process audio and create the new track
     const sampleRate = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-
-    let takePCM = null;
-    let takePCMR = null;
 
     if (pass2AudioStore.totalSamples > 0) {
       // CRITICAL: Extract raw captured audio FIRST and run all sync tap peak detection BEFORE
       // suppressAudioGlitches / processInternalGainAndNoiseSuppression, which otherwise shave sharp transients!
-      const rawPass2L = pass2AudioStore.toFlatArray();
-      const rawPass2R = (isStereoTake && pass2AudioStoreR.totalSamples > 0) ? pass2AudioStoreR.toFlatArray() : null;
-      const rawPass2 = rawPass2R ? combineStereoForPeakDetection(rawPass2L, rawPass2R) : rawPass2L;
-      const totalSamples = rawPass2L.length;
+      const rawTakeL = pass2AudioStore.toFlatArray();
+      const rawTakeR = (isStereoTake && pass2AudioStoreR.totalSamples > 0) ? pass2AudioStoreR.toFlatArray() : null;
 
-      // If this was a Track Sync take, process it using raw-PCM peak alignment first
-      if (wasTrackSync && syncGuideIdx !== null) {
-        await processTrackSyncTake(syncGuideIdx, rawPass2L, rawPass2R, isStereoTake, sampleRate);
+      if (syncSessionSnapshot) {
+        await processNanodawSyncTake(syncSessionSnapshot, rawTakeL, rawTakeR, isStereoTake, sampleRate, stopStartPerf);
         return;
       }
 
-      const is2Pass = record2PassSync ? record2PassSync.checked : true;
-      const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 78));
-      const dtSamples = Math.round(dt * sampleRate);
-
-      let projected5thTapSample = 0;
-
-      if (is2Pass) {
-        // Alignment specification:
-        // The projected location for the peak of the 9th tap (which is the projected location
-        // of the 5th user tap in the 2nd recording, preceded by the calibration taps) must coincide
-        // exactly with the location of the playhead on the timeline (at the start of recording).
-        // This projected location for the 5th tap on the 2nd recording must be the first sample
-        // of the newly-recorded track. Timing fit is completely independent of system latency.
-
-        let expectedUser1Sample = 0;
-        if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
-          expectedUser1Sample = Math.round((scheduledDownbeatTime - (4 * dt) - streamStartTime) * sampleRate);
-        } else {
-          expectedUser1Sample = Math.round((0.150 + 4 * dt) * sampleRate);
-        }
-
-        // Search for the 4 user calibration tap peaks (Beats 5, 6, 7, 8) on rawPass2 (L/R max-combined in stereo mode)
-        const detectedPeaks = [];
-        const seqRes = findBestTapSequence(rawPass2, sampleRate, expectedUser1Sample / sampleRate, dt, 4, getPeakThresholdLinear());
-        if (seqRes.peaksIdx.length === 4) {
-          detectedPeaks.push(...seqRes.peaksIdx);
-        } else {
-          const winSamples = Math.round(Math.min(0.220 * sampleRate, 0.42 * dtSamples));
-          const preludeClicks = pass2ClickEvents.filter(ev => {
-            const s = ev.samplePos;
-            return s >= expectedUser1Sample - winSamples && s < expectedUser1Sample + 4.5 * dtSamples;
-          });
-
-          let rough1 = expectedUser1Sample;
-          if (preludeClicks.length > 0) {
-            rough1 = preludeClicks[0].samplePos;
-          }
-          const minFloor = Math.min(0.012, getPeakThresholdLinear() * 0.5);
-          const p1 = findTransientPeak(rawPass2, rough1 - winSamples, rough1 + winSamples);
-
-          if (p1.peakAbs >= minFloor && p1.crest >= 1.6) {
-            detectedPeaks.push(p1.idx);
-            for (let k = 1; k < 4; k++) {
-              const roughK = detectedPeaks[k - 1] + dtSamples;
-              const pk = findTransientPeak(rawPass2, roughK - winSamples, roughK + winSamples);
-              if (pk.peakAbs >= minFloor * 0.85 && pk.crest >= 1.5) {
-                detectedPeaks.push(pk.idx);
-              } else {
-                detectedPeaks.push(roughK);
-              }
-            }
-          } else if (preludeClicks.length >= 3) {
-            for (let k = 0; k < Math.min(4, preludeClicks.length); k++) {
-              detectedPeaks.push(preludeClicks[k].samplePos);
-            }
-            while (detectedPeaks.length < 4) {
-              detectedPeaks.push(detectedPeaks[detectedPeaks.length - 1] + dtSamples);
-            }
-          }
-        }
-
-        if (detectedPeaks.length === 4) {
-          // Linear regression across the 4 calibration taps in the 2nd recording:
-          const slope = (3 * (detectedPeaks[3] - detectedPeaks[0]) + (detectedPeaks[2] - detectedPeaks[1])) / 10;
-          const centroid = (detectedPeaks[0] + detectedPeaks[1] + detectedPeaks[2] + detectedPeaks[3]) / 4;
-          // Projected 5th user tap (Beat 9 downbeat):
-          projected5thTapSample = Math.round(centroid + 2.5 * slope);
-          console.log(`[nanodaw-2-pass-sync] Calib peaks in Pass 2: [${detectedPeaks.join(', ')}], slope: ${slope.toFixed(1)}, projected 5th tap (Beat 9): ${projected5thTapSample}`);
-        } else {
-          // Nominal projection from prelude start time
-          if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
-            projected5thTapSample = Math.round((scheduledDownbeatTime - streamStartTime) * sampleRate);
-          } else {
-            projected5thTapSample = Math.round((0.150 + 8 * dt) * sampleRate);
-          }
-          console.log(`[nanodaw-2-pass-sync] Nominal projected 5th tap (Beat 9): ${projected5thTapSample}`);
-        }
+      // Non-sync mode: single-pass 4-beep count-in using system-reported audio latency
+      const totalSamples = rawTakeL.length;
+      const dt = detectedIntervalSec > 0 ? detectedIntervalSec : (60 / (state.project?.tempo || 90));
+      const sysLatency = (recAudioCtx?.baseLatency || 0.010) + (recAudioCtx?.outputLatency || 0.040);
+      let projectedDownbeatSample = 0;
+      if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
+        projectedDownbeatSample = Math.round((scheduledDownbeatTime - streamStartTime + sysLatency) * sampleRate);
       } else {
-        // Single-pass count-in (4 synth beeps): downbeat is Beat 5
-        // Relies on system-reported audio latency for placement
-        const sysLatency = (recAudioCtx?.baseLatency || 0.010) + (recAudioCtx?.outputLatency || 0.040);
-        if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
-          projected5thTapSample = Math.round((scheduledDownbeatTime - streamStartTime + sysLatency) * sampleRate);
-        } else {
-          projected5thTapSample = Math.round((0.150 + 4 * dt + sysLatency) * sampleRate);
-        }
-        console.log(`[Single-Pass] Downbeat trim with sysLatency ${(sysLatency * 1000).toFixed(1)}ms: sample ${projected5thTapSample}`);
+        projectedDownbeatSample = Math.round((0.150 + 4 * dt + sysLatency) * sampleRate);
       }
 
-      const trimSamples = Math.max(0, projected5thTapSample);
-      console.log(`[Recording Trim] total: ${totalSamples}, projected5thTapSample: ${projected5thTapSample}, trimSamples: ${trimSamples}, stereo: ${isStereoTake}`);
-
-      const ppStart = performance.now();
-      recDiag('REC_POST_PROCESS_START', {
-        source: 'pass2',
-        samples: totalSamples,
-        trimSamples,
-        sampleRate,
-        isStereoTake,
-        internalGain: Boolean(recordInternalGain && recordInternalGain.checked)
-      }, {
-        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
-        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
-        forcePersist: true
-      });
-
+      const trimSamples = Math.max(0, projectedDownbeatSample);
       const doSlice = (totalSamples > trimSamples + Math.round(sampleRate * 0.05));
-      const trimmedRawL = doSlice ? rawPass2L.slice(trimSamples) : rawPass2L.slice();
-      const trimmedRawR = rawPass2R
-        ? (doSlice ? rawPass2R.slice(Math.min(trimSamples, rawPass2R.length)) : rawPass2R.slice())
+      const trimmedRawL = doSlice ? rawTakeL.slice(trimSamples) : rawTakeL.slice();
+      const trimmedRawR = rawTakeR
+        ? (doSlice ? rawTakeR.slice(Math.min(trimSamples, rawTakeR.length)) : rawTakeR.slice())
         : null;
 
+      let takePCM = null;
+      let takePCMR = null;
       if (isStereoTake && trimmedRawR) {
         if (recordInternalGain && recordInternalGain.checked) {
           const stereoProc = processStereoInternalGainAndNoiseSuppression(trimmedRawL, trimmedRawR, sampleRate, 0.75);
@@ -5910,231 +5798,113 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
-      const ppDur = Number((performance.now() - ppStart).toFixed(2));
-      recDiag('REC_POST_PROCESS_DONE', {
-        durationMs: ppDur,
-        samples: takePCM.length,
-        isStereoTake
-      }, {
-        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_POST_PROCESS : undefined,
-        phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
-        duration: ppDur,
-        forcePersist: true
-      });
-    } else if (pass1AudioStore.totalSamples > 0) {
-      // Stopped during Pass 1: keep all audio captured in Pass 1
-      const rawP1L = pass1AudioStore.toFlatArray();
-      const rawP1R = (isStereoTake && pass1AudioStoreR.totalSamples > 0) ? pass1AudioStoreR.toFlatArray() : null;
-      if (isStereoTake && rawP1R) {
-        if (recordInternalGain && recordInternalGain.checked) {
-          const stereoProc = processStereoInternalGainAndNoiseSuppression(rawP1L, rawP1R, sampleRate, 0.75);
-          takePCM = stereoProc.left;
-          takePCMR = stereoProc.right;
-        } else {
-          takePCM = suppressAudioGlitches(rawP1L, sampleRate);
-          takePCMR = suppressAudioGlitches(rawP1R, sampleRate);
-        }
-      } else {
-        takePCM = suppressAudioGlitches(rawP1L, sampleRate);
-        if (recordInternalGain && recordInternalGain.checked) {
-          takePCM = processInternalGainAndNoiseSuppression(takePCM, sampleRate, 0.75);
-        }
-      }
-    }
+      const ctx = audio.getOrCreateAudioContext() || recAudioCtx;
+      const takeBuffer = buildRecordedTakeAudioBuffer(ctx, takePCM, takePCMR, isStereoTake, sampleRate);
 
-    const ctx = audio.getOrCreateAudioContext() || recAudioCtx;
-    const takeBuffer = buildRecordedTakeAudioBuffer(ctx, takePCM, takePCMR, isStereoTake, sampleRate);
+      recordedTakesCount++;
+      const takeName = `Recorded Take ${recordedTakesCount}`;
+      audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444');
 
-    recordedTakesCount++;
-    const takeName = `Recorded Take ${recordedTakesCount}`;
-    // The first sample of takeBuffer corresponds to the projected 5th tap,
-    // which coincides exactly with the playhead at the start of recording!
-    audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444');
-
-    const totalStopDur = Number((performance.now() - stopStartPerf).toFixed(2));
-    const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
-    recDiag('REC_STOP_COMPLETE', {
-      takeName,
-      takeDurationSec,
-      channels: takeBuffer.numberOfChannels,
-      channelConfig: recChCfg,
-      sampleRate,
-      offsetSec: recordingStartPlayhead,
-      stopProcessingMs: totalStopDur
-    }, {
-      stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_COMPLETE : undefined,
-      duration: totalStopDur,
-      forcePersist: true
-    });
-    if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
-      window.zoomProfiler.endRecSession('completed', {
+      const totalStopDur = Number((performance.now() - stopStartPerf).toFixed(2));
+      const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
+      recDiag('REC_STOP_COMPLETE', {
         takeName,
         takeDurationSec,
         channels: takeBuffer.numberOfChannels,
+        channelConfig: recChCfg,
         sampleRate,
+        offsetSec: recordingStartPlayhead,
         stopProcessingMs: totalStopDur
+      }, {
+        stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_COMPLETE : undefined,
+        duration: totalStopDur,
+        forcePersist: true
       });
-    }
+      if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
+        window.zoomProfiler.endRecSession('completed', {
+          takeName,
+          takeDurationSec,
+          channels: takeBuffer.numberOfChannels,
+          sampleRate,
+          stopProcessingMs: totalStopDur
+        });
+      }
 
-    const chTag = takeBuffer.numberOfChannels === 2 ? ' · Stereo' : '';
-    showToast(`Added "${takeName}" (${(takeBuffer.length / sampleRate).toFixed(1)}s${chTag}) to project!`, 'success', 4000);
-    audio.seek(recordingStartPlayhead);
-    timeline.render();
-    timeline.renderWaveforms();
-    timeline.updateInspectorPane();
-    if (timeline.scrollToStart) timeline.scrollToStart();
+      const chTag = takeBuffer.numberOfChannels === 2 ? ' · Stereo' : '';
+      showToast(`Added "${takeName}" (${(takeBuffer.length / sampleRate).toFixed(1)}s${chTag}) to project!`, 'success', 4000);
+      audio.seek(recordingStartPlayhead);
+      timeline.render();
+      timeline.renderWaveforms();
+      timeline.updateInspectorPane();
+      if (timeline.scrollToStart) timeline.scrollToStart();
+    }
   }
 
-  // --- Track-Based Sync Take Processing ---
-  async function processTrackSyncTake(guideIdx, fullPass2L, fullPass2R, isStereoTake, sampleRate) {
-    const guideTrack = audio.tracks[guideIdx];
-    if (!guideTrack || fullPass2L.length < Math.round(sampleRate * 0.1)) {
-      fallbackAddTrack(fullPass2L, fullPass2R, isStereoTake, sampleRate, guideIdx);
-      return;
-    }
+  /**
+   * Unified Single-Pass NANOdaw Sync Take Alignment & Post-Processing.
+   * Shared by BOTH:
+   *  - Option 1 ('track'): Backing Track / Metronome Sync
+   *  - Option 2 ('synth'): Metronome Synth Beats (discards synchronization samples prior to beat F + N downbeat,
+   *    filing the synchronized recording starting at beat F + N right onto recordingStartPlayhead)
+   */
+  async function processNanodawSyncTake(syncSession, fullRawL, fullRawR, isStereoTake, sampleRate, stopStartPerf = performance.now()) {
+    const { mode, guideTrackIdx, firstBeat, numBeats, preTakeBeats } = syncSession;
+    const isTrackMode = (mode === 'track');
 
-    let guideBuffer = null;
-    const guideLoadStart = performance.now();
-    recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_START', {
-      guideIdx,
-      guideName: guideTrack.name,
-      takeSamples: fullPass2L.length,
-      isStereoTake,
-      sampleRate
-    }, { forcePersist: true });
-    try {
-      guideBuffer = await audio.getTrackAudioBuffer(guideIdx);
-      recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_OK', {
-        durationMs: Number((performance.now() - guideLoadStart).toFixed(2)),
-        guideSR: guideBuffer ? guideBuffer.sampleRate : null,
-        guideChannels: guideBuffer ? guideBuffer.numberOfChannels : null,
-        guideDurationSec: guideBuffer ? Number(guideBuffer.duration.toFixed(3)) : null
-      }, { forcePersist: true });
-    } catch (e) {
-      console.warn('Could not load guide track audio buffer for sync:', e);
-      recDiag('REC_TRACK_SYNC_GUIDE_BUFFER_FAILED', {
-        error: e && e.message ? e.message : String(e)
-      }, { level: 'error', forcePersist: true });
-    }
-
-    if (!guideBuffer) {
-      fallbackAddTrack(fullPass2L, fullPass2R, isStereoTake, sampleRate, guideIdx);
-      return;
-    }
-
-    const guidePCM = guideBuffer.numberOfChannels > 1
-      ? combineStereoForPeakDetection(guideBuffer.getChannelData(0), guideBuffer.getChannelData(1))
-      : guideBuffer.getChannelData(0);
-    const guideSR = guideBuffer.sampleRate;
-    const guideOffset = Number(guideTrack.offset) || 0;
-
-    const guideIsMetro = guideTrack.isMetronome || state.project?.tracks?.[guideIdx]?.isMetronome || /^metronome/i.test(guideTrack.name || '');
-    const tempo = guideTrack.tempo || state.project?.tracks?.[guideIdx]?.tempo || state.project?.tempo || state.project?.bpm || parseInt(syncSynthTempo?.value, 10) || 90;
-    const dt = 60 / tempo;
-    const firstBeat = Math.max(1, parseInt(syncTrackFirstBeat?.value, 10) || 5);
-    const numBeats = Math.max(1, parseInt(syncTrackNumBeats?.value, 10) || 4);
-
-    // 1. Locate N peaks in the Guide Track
-    const metroPeaksTimelineSec = [];
-    const guideClaimedRanges = [];
-    const exclRadiusGuide = Math.round(0.25 * dt * guideSR);
-    let lastMetroPeakSample = null;
-
-    if (guideIsMetro) {
-      // For generated metronome tracks, clicks occur at exact grid positions guideOffset + m * dt.
-      // Anchor relative to recordingStartPlayhead so syncing works from t=0 OR any later playhead position!
-      const startBeatIdx = Math.max(0, Math.ceil((recordingStartPlayhead - guideOffset - 0.02) / dt));
-      for (let k = 0; k < numBeats; k++) {
-        const beatIdx = startBeatIdx + (firstBeat - 1) + k;
-        const beatTimeSec = guideOffset + (beatIdx * dt);
-        metroPeaksTimelineSec.push(beatTimeSec);
-      }
-    } else {
-      // For general audio/backing tracks: try global rhythmic sequence lock first, then fallback to anchored window search
-      const expGuideFirstSec = Math.max(0, (recordingStartPlayhead + (firstBeat - 1) * dt) - guideOffset);
-      const guideSeq = findBestTapSequence(guidePCM, guideSR, expGuideFirstSec, dt, numBeats, Math.min(0.025, getPeakThresholdLinear() * 0.6));
-      if (guideSeq.peaksSec.length === numBeats) {
-        for (let k = 0; k < numBeats; k++) {
-          metroPeaksTimelineSec.push(guideOffset + guideSeq.peaksSec[k]);
-        }
+    if (fullRawL.length < Math.round(sampleRate * 0.1)) {
+      if (isTrackMode) {
+        fallbackAddTrack(fullRawL, fullRawR, isStereoTake, sampleRate, guideTrackIdx);
       } else {
-        const searchWinSecGuide = 0.70 * dt;
-        for (let k = 0; k < numBeats; k++) {
-          let s0, s1;
-          if (lastMetroPeakSample === null) {
-            const expTimelineSec = recordingStartPlayhead + (firstBeat - 1) * dt;
-            const expGuideRelSec = expTimelineSec - guideOffset;
-            if (expGuideRelSec < -0.2 || expGuideRelSec > guideBuffer.duration + 0.2) continue;
-            s0 = Math.max(0, Math.round((expGuideRelSec - searchWinSecGuide) * guideSR));
-            s1 = Math.min(guidePCM.length, Math.round((expGuideRelSec + searchWinSecGuide) * guideSR));
-          } else {
-            const center = lastMetroPeakSample + Math.round(dt * guideSR);
-            s0 = Math.max(lastMetroPeakSample + Math.round(0.35 * dt * guideSR), center - Math.round(0.45 * dt * guideSR));
-            s1 = Math.min(guidePCM.length, center + Math.round(0.45 * dt * guideSR));
-          }
-          if (s0 >= s1) continue;
-
-          const pk = findTransientPeak(guidePCM, s0, s1, guideClaimedRanges);
-          if (pk.found && pk.peakAbs >= 0.008 && pk.crest >= 1.2) {
-            metroPeaksTimelineSec.push(guideOffset + (pk.idx / guideSR));
-            lastMetroPeakSample = pk.idx;
-            guideClaimedRanges.push({
-              start: Math.max(0, pk.idx - exclRadiusGuide),
-              end: Math.min(guidePCM.length - 1, pk.idx + exclRadiusGuide)
-            });
-          }
-        }
+        showToast('Recording was too short to save.', 'info', 3500);
       }
+      return;
     }
 
-    // 2. Detect N peaks in the newly-recorded take directly from raw captured system audio (BEFORE glitch/gain filtering).
-    // For stereo takes, max-signed combine L & R so tapping into EITHER mic triggers clean peak detection!
-    const detectTakePCM = (isStereoTake && fullPass2R && fullPass2R.length > 0)
-      ? combineStereoForPeakDetection(fullPass2L, fullPass2R)
-      : fullPass2L;
-    const takePeaksSec = [];
-    const userThreshLinear = getPeakThresholdLinear();
-    const expFirstTakeSec = metroPeaksTimelineSec.length > 0
-      ? Math.max(0, metroPeaksTimelineSec[0] - recordingStartPlayhead)
-      : ((firstBeat - 1) * dt);
+    let tempo = syncSession.tempo || 90;
+    let dt = syncSession.dt || (60 / tempo);
+    let guideName = syncSession.guideName || 'Synth Metronome';
+    let refTimelineSec = [];
+    let guideOk = true;
 
-    const takeSeq = findBestTapSequence(detectTakePCM, sampleRate, expFirstTakeSec, dt, numBeats, userThreshLinear);
-    if (takeSeq.peaksSec.length === numBeats) {
-      takePeaksSec.push(...takeSeq.peaksSec);
+    if (isTrackMode) {
+      const guideRes = await resolveGuideSyncTimelinePeaks(guideTrackIdx, firstBeat, numBeats, tempo, recordingStartPlayhead);
+      tempo = guideRes.tempo;
+      dt = guideRes.dt;
+      guideName = guideRes.guideName;
+      refTimelineSec = guideRes.peaksTimelineSec;
+      guideOk = guideRes.ok;
     } else {
-      // Fallback: claimed-range anchored search respecting user sensitivity threshold
-      const takeClaimedRanges = [];
-      const exclRadiusTake = Math.round(0.25 * dt * sampleRate);
-      const fallbackMinPeak = Math.max(0.008, userThreshLinear * 0.50);
-      let lastTakePeakSample = null;
-
+      // Option 2 ('synth'): beat F + N is anchored at recordingStartPlayhead,
+      // so sync beat k (0..N-1) sits at recordingStartPlayhead - (N - k) * dt on the timeline.
       for (let k = 0; k < numBeats; k++) {
-        let s0, s1;
-        if (lastTakePeakSample === null) {
-          s0 = Math.max(0, Math.round((expFirstTakeSec - 0.85 * dt) * sampleRate));
-          s1 = Math.min(detectTakePCM.length, Math.round((expFirstTakeSec + 1.35 * dt) * sampleRate));
-        } else {
-          const center = lastTakePeakSample + Math.round(dt * sampleRate);
-          s0 = Math.max(lastTakePeakSample + Math.round(0.35 * dt * sampleRate), center - Math.round(0.48 * dt * sampleRate));
-          s1 = Math.min(detectTakePCM.length, center + Math.round(0.48 * dt * sampleRate));
-        }
-        if (s0 >= s1) continue;
-
-        const pk = findTransientPeak(detectTakePCM, s0, s1, takeClaimedRanges);
-        if (pk.found && pk.peakAbs >= fallbackMinPeak && pk.crest >= 1.2) {
-          takePeaksSec.push(pk.idx / sampleRate);
-          lastTakePeakSample = pk.idx;
-          takeClaimedRanges.push({
-            start: Math.max(0, pk.idx - exclRadiusTake),
-            end: Math.min(detectTakePCM.length - 1, pk.idx + exclRadiusTake)
-          });
-        }
+        refTimelineSec.push(recordingStartPlayhead - (numBeats - k) * dt);
       }
     }
 
-    console.log(`[Track Sync] Guide peaks found (${metroPeaksTimelineSec.length}/${numBeats}):`, metroPeaksTimelineSec);
-    console.log(`[Track Sync] Take peaks found (${takePeaksSec.length}/${numBeats}):`, takePeaksSec);
-    recDiag('REC_TRACK_SYNC_PEAKS', {
+    const expFirstTakeSec = isTrackMode
+      ? (refTimelineSec.length > 0 ? Math.max(0, refTimelineSec[0] - recordingStartPlayhead) : ((firstBeat - 1) * dt))
+      : (syncSession.expSyncBufferSec && syncSession.expSyncBufferSec.length > 0
+          ? syncSession.expSyncBufferSec[0]
+          : (0.12 + (firstBeat - 1) * dt));
+
+    // Combine stereo channels via max-signed-amplitude so tapping into EITHER mic triggers peak lock,
+    // and bound the sync search slice to the sync window so later musical transients never interfere.
+    const combinedRaw = (isStereoTake && fullRawR && fullRawR.length > 0)
+      ? combineStereoForPeakDetection(fullRawL, fullRawR)
+      : fullRawL;
+    const maxSyncSearchSamples = Math.min(
+      combinedRaw.length,
+      Math.round((expFirstTakeSec + (numBeats + 1.95) * dt) * sampleRate)
+    );
+    const detectSlicePCM = combinedRaw.subarray(0, maxSyncSearchSamples);
+    const userThreshLinear = getPeakThresholdLinear();
+
+    const detRes = detectSyncTapPeaks(detectSlicePCM, sampleRate, expFirstTakeSec, dt, numBeats, userThreshLinear);
+    const takePeaksSec = detRes.peaksSec;
+    const takeOk = (takePeaksSec.length === numBeats);
+
+    recDiag('REC_NANODAW_SYNC_PEAKS', {
+      mode,
       tempo,
       dtSec: Number(dt.toFixed(4)),
       firstBeat,
@@ -6143,57 +5913,93 @@ document.addEventListener('DOMContentLoaded', async () => {
       peakSensDb,
       thresholdLinear: Number(userThreshLinear.toFixed(5)),
       expFirstTakeSec: Number(expFirstTakeSec.toFixed(3)),
-      candidatesCount: takeSeq.candidatesCount,
-      metroPeaksSec: metroPeaksTimelineSec.map(v => Number(v.toFixed(4))),
+      method: detRes.method,
+      candidatesCount: detRes.candidatesCount,
+      refTimelineSec: refTimelineSec.map(v => Number(v.toFixed(4))),
       takePeaksSec: takePeaksSec.map(v => Number(v.toFixed(4)))
     }, { forcePersist: true });
 
-    // 3. Failure Handling:
-    // "If N distinct peaks are missing in the newly-recorded track, metronome track, or both, do not shift and show a specific popup message explaining the exact reason."
-    const metroOk = (metroPeaksTimelineSec.length === numBeats);
-    const takeOk = (takePeaksSec.length === numBeats);
-
-    if (!metroOk || !takeOk) {
+    // Failure Handling if N distinct sync peaks were not detected
+    if (!guideOk || !takeOk) {
       let reason = '';
-      if (!metroOk && !takeOk) {
-        reason = `Could not detect all ${numBeats} required sync peaks in BOTH guide track "${guideTrack.name}" (detected ${metroPeaksTimelineSec.length} of ${numBeats}) and your recording (detected ${takePeaksSec.length} of ${numBeats}).`;
-      } else if (!metroOk) {
-        reason = `Could not detect all ${numBeats} distinct peaks in guide track "${guideTrack.name}" at beats ${firstBeat}–${firstBeat + numBeats - 1} (detected ${metroPeaksTimelineSec.length} of ${numBeats}). Make sure the guide track has clear beats at those positions.`;
+      if (isTrackMode && !guideOk && !takeOk) {
+        reason = `Could not detect all ${numBeats} required sync peaks in BOTH guide track "${guideName}" (detected ${refTimelineSec.length} of ${numBeats}) and your recording (detected ${takePeaksSec.length} of ${numBeats}).`;
+      } else if (isTrackMode && !guideOk) {
+        reason = `Could not detect all ${numBeats} distinct peaks in guide track "${guideName}" at beats ${firstBeat}–${firstBeat + numBeats - 1} (detected ${refTimelineSec.length} of ${numBeats}). Make sure the guide track has clear beats at those positions.`;
       } else {
         reason = `Could not detect all ${numBeats} distinct tap peaks in your recording (detected ${takePeaksSec.length} of ${numBeats} around beats ${firstBeat}–${firstBeat + numBeats - 1} at ${peakSensDb} dB threshold). Try lowering the sensitivity slider on the VU meter or tapping closer to the mic.`;
       }
 
-      const alertMsg = `NANOdaw Track Sync Notice:\n\n${reason}\n\nThe track has been added directly below "${guideTrack.name}" at playhead (${recordingStartPlayhead.toFixed(2)}s) without alignment shift.`;
-
-      fallbackAddTrack(fullPass2L, fullPass2R, isStereoTake, sampleRate, guideIdx);
-
-      setTimeout(() => {
-        alert(alertMsg);
-      }, 50);
-      showToast('Sync incomplete: track placed without shift', 'warning', 6000);
+      if (isTrackMode) {
+        const alertMsg = `NANOdaw Sync Notice:\n\n${reason}\n\nThe track has been added directly below "${guideName}" at playhead (${recordingStartPlayhead.toFixed(2)}s) without alignment shift.`;
+        fallbackAddTrack(fullRawL, fullRawR, isStereoTake, sampleRate, guideTrackIdx);
+        setTimeout(() => { alert(alertMsg); }, 50);
+        showToast('Sync incomplete: track placed without shift', 'warning', 6000);
+      } else {
+        // Option 2 ('synth'): discard pre-take beats up to nominal beat F + N using system latency fallback
+        const sysLatency = (recAudioCtx?.baseLatency || 0.010) + (recAudioCtx?.outputLatency || 0.040);
+        const nominalDownbeatSec = (syncSession.downbeatCtxTime && syncSession.streamStartTime !== null)
+          ? Math.max(0, (syncSession.downbeatCtxTime - syncSession.streamStartTime) + sysLatency)
+          : ((0.12 + preTakeBeats * dt) + sysLatency);
+        const fbTrim = Math.min(fullRawL.length, Math.max(0, Math.round(nominalDownbeatSec * sampleRate)));
+        if (fullRawL.length <= fbTrim + Math.round(0.05 * sampleRate)) {
+          showToast(`Sync missed (${takePeaksSec.length}/${numBeats}) and no audio recorded after beat ${preTakeBeats + 1}.`, 'warning', 5500);
+          return;
+        }
+        const fbL = fullRawL.slice(fbTrim);
+        const fbR = (isStereoTake && fullRawR) ? fullRawR.slice(Math.min(fbTrim, fullRawR.length)) : null;
+        const alertMsg = `NANOdaw Sync Notice:\n\n${reason}\n\nPre-roll beats 1–${preTakeBeats} were trimmed using system latency and the take (from beat ${preTakeBeats + 1}) was placed at playhead (${recordingStartPlayhead.toFixed(2)}s).`;
+        fallbackAddTrack(fbL, fbR, isStereoTake, sampleRate, null);
+        setTimeout(() => { alert(alertMsg); }, 50);
+        showToast('Sync incomplete: placed using system-latency fallback', 'warning', 6000);
+      }
       return;
     }
 
-    // 4. Success Alignment:
-    // Align Peak 1 (anchor) exactly with Peak 1 in the metronome track
-    // targetOffset + takePeaksSec[0] = metroPeaksTimelineSec[0]
-    const targetOffset = metroPeaksTimelineSec[0] - takePeaksSec[0];
-
-    // Trim the prelude calibration taps so they don't pollute the newly-recorded track:
-    const lastTapSec = takePeaksSec[numBeats - 1];
-    const tapDecayMargin = Math.min(0.20, 0.35 * dt);
-    const calibEndSec = lastTapSec + tapDecayMargin;
+    // Unified Success Alignment across ALL N detected sync beats:
+    // targetOffset slides sample 0 of the raw recording onto the timeline so all N sync taps align with refTimelineSec[0..N-1].
+    let offsetSum = 0;
+    for (let k = 0; k < numBeats; k++) {
+      offsetSum += (refTimelineSec[k] - takePeaksSec[k]);
+    }
+    const targetOffset = offsetSum / numBeats;
 
     let trimSamples = 0;
-    if (fullPass2L.length / sampleRate > calibEndSec + 0.1) {
-      trimSamples = Math.round(calibEndSec * sampleRate);
+    let trimmedSec = 0;
+    let finalOffset = 0;
+
+    if (isTrackMode) {
+      // Option 1 ('track'): trim prelude sync taps + brief decay margin so taps don't pollute the track
+      const lastTapSec = takePeaksSec[numBeats - 1];
+      const tapDecayMargin = Math.min(0.20, 0.35 * dt);
+      const calibEndSec = lastTapSec + tapDecayMargin;
+      if (fullRawL.length / sampleRate > calibEndSec + 0.1) {
+        trimSamples = Math.round(calibEndSec * sampleRate);
+      }
+      trimmedSec = trimSamples / sampleRate;
+      finalOffset = targetOffset + trimmedSec;
+    } else {
+      // Option 2 ('synth'): throw away all synchronization samples prior to the synchronized downbeat of beat F + N!
+      // Because refTimelineSec[k] = recordingStartPlayhead - (N - k) * dt,
+      // downbeatTakeSec = recordingStartPlayhead - targetOffset = mean_k(takePeaksSec[k] + (N - k) * dt).
+      const downbeatTakeSec = recordingStartPlayhead - targetOffset;
+      trimSamples = Math.max(0, Math.round(downbeatTakeSec * sampleRate));
+      if (fullRawL.length <= trimSamples + Math.round(0.05 * sampleRate)) {
+        audio.seek(recordingStartPlayhead);
+        showToast(`Stopped before recording past beat ${preTakeBeats + 1} downbeat — nothing saved.`, 'info', 4000);
+        return;
+      }
+      trimmedSec = trimSamples / sampleRate;
+      finalOffset = targetOffset + trimmedSec;
+      if (Math.abs(finalOffset - recordingStartPlayhead) < (1.5 / sampleRate)) {
+        finalOffset = recordingStartPlayhead;
+      }
     }
-    let trimmedSec = trimSamples / sampleRate;
-    let finalPCML = trimSamples > 0 ? fullPass2L.slice(trimSamples) : fullPass2L.slice();
-    let finalPCMR = (isStereoTake && fullPass2R)
-      ? (trimSamples > 0 ? fullPass2R.slice(Math.min(trimSamples, fullPass2R.length)) : fullPass2R.slice())
+
+    let finalPCML = trimSamples > 0 ? fullRawL.slice(trimSamples) : fullRawL.slice();
+    let finalPCMR = (isStereoTake && fullRawR)
+      ? (trimSamples > 0 ? fullRawR.slice(Math.min(trimSamples, fullRawR.length)) : fullRawR.slice())
       : null;
-    let finalOffset = targetOffset + trimmedSec;
 
     if (finalOffset < 0) {
       const extraTrim = Math.min(finalPCML.length, Math.round(-finalOffset * sampleRate));
@@ -6225,42 +6031,54 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     recordedTakesCount++;
     const takeName = `Recorded Take ${recordedTakesCount}`;
-    // Insert directly below the chosen guide track!
-    const insertIdx = guideIdx + 1;
+    const insertIdx = isTrackMode ? (guideTrackIdx + 1) : null;
     audio.addRecordedTrack(takeName, takeBuffer, finalOffset, '#ef4444', insertIdx);
-
-    // Calculate timeline positions of recorded peaks for SVG dotted lines
-    const recPeaksTimelineSec = takePeaksSec.map(tSec => finalOffset + (tSec - trimmedSec));
 
     audio.seek(recordingStartPlayhead);
     timeline.render();
     timeline.renderWaveforms();
-    timeline.setSyncLines({
-      metroTrackIndex: guideIdx,
-      recTrackIndex: insertIdx,
-      metroPeaksTimelineSec,
-      recPeaksTimelineSec
-    });
+
+    if (isTrackMode) {
+      const recPeaksTimelineSec = takePeaksSec.map(tSec => finalOffset + (tSec - trimmedSec));
+      timeline.setSyncLines({
+        metroTrackIndex: guideTrackIdx,
+        recTrackIndex: insertIdx,
+        metroPeaksTimelineSec: refTimelineSec,
+        recPeaksTimelineSec
+      });
+    } else {
+      timeline.clearSyncLines();
+    }
+
     timeline.updateInspectorPane();
     if (timeline.scrollToStart) timeline.scrollToStart();
 
     const chTag = takeBuffer.numberOfChannels === 2 ? ' (Stereo)' : '';
-    showToast(`Sync locked! "${takeName}"${chTag} placed below "${guideTrack.name}" with Peak 1 anchor aligned!`, 'success', 5000);
+    if (isTrackMode) {
+      showToast(`Sync locked! "${takeName}"${chTag} aligned with "${guideName}" (${numBeats} beats)!`, 'success', 5000);
+    } else {
+      showToast(`Sync locked! "${takeName}"${chTag} synchronized at beat ${preTakeBeats + 1} downbeat!`, 'success', 5000);
+    }
+
     const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
-    recDiag('REC_TRACK_SYNC_COMPLETE', {
+    const totalStopDur = Number((performance.now() - stopStartPerf).toFixed(2));
+    recDiag('REC_NANODAW_SYNC_COMPLETE', {
+      mode,
       takeName,
       takeDurationSec,
       channels: takeBuffer.numberOfChannels,
       sampleRate,
       finalOffset: Number(finalOffset.toFixed(4)),
-      metroPeaksCount: metroPeaksTimelineSec.length,
-      takePeaksCount: takePeaksSec.length
+      trimmedSec: Number(trimmedSec.toFixed(4)),
+      syncBeats: numBeats,
+      stopProcessingMs: totalStopDur
     }, {
       stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_STOP_COMPLETE : undefined,
+      duration: totalStopDur,
       forcePersist: true
     });
     if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
-      window.zoomProfiler.endRecSession('completed_track_sync', {
+      window.zoomProfiler.endRecSession(`completed_${mode}_sync`, {
         takeName,
         takeDurationSec,
         channels: takeBuffer.numberOfChannels,
@@ -6297,7 +6115,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     audio.addRecordedTrack(takeName, takeBuffer, recordingStartPlayhead, '#ef4444', insertIdx);
 
     const takeDurationSec = Number((takeBuffer.length / sampleRate).toFixed(3));
-    recDiag('REC_TRACK_SYNC_FALLBACK_ADDED', {
+    recDiag('REC_NANODAW_SYNC_FALLBACK_ADDED', {
       takeName,
       takeDurationSec,
       channels: takeBuffer.numberOfChannels,
@@ -6352,8 +6170,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // Proactively pre-allocate standby buffers and pre-warm AudioWorklet ahead of time!
-        pass1AudioStore.prepareAheadOfTime(4);
-        pass1AudioStoreR.prepareAheadOfTime(2);
         pass2AudioStore.prepareAheadOfTime(4);
         pass2AudioStoreR.prepareAheadOfTime(2);
         const preCtx = audio.getOrCreateAudioContext();
@@ -6462,9 +6278,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Auto-finish take when backing audio reaches the end
+  // Auto-finish take when backing audio reaches the end (except in synth-metronome mode, where take length is unconstrained)
   audio.on('playback_stopped', () => {
     if (isRecording && recordingState === 'recording_take') {
+      if (activeSyncSession && activeSyncSession.mode === 'synth') {
+        return;
+      }
       stopRecording();
     }
   });

@@ -2531,4 +2531,105 @@ dialog::backdrop {
   border-color: #b91c1c;
 }
 
+/* Visually hidden utility (accessible to assistive technologies) */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* Shared NANOdaw Sync controls & semantic fieldset */
+.sync-common-beats-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sync-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-inline-field label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.sync-mode-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* Dynamic N-beat HUD beads & Early Missed-Peak Warning states */
+.click-beads-wrap {
+  flex-wrap: wrap;
+  max-width: 260px;
+}
+
+.click-beads-wrap[data-compact="true"] {
+  gap: 3px;
+}
+
+.click-beads-wrap[data-compact="true"] .click-bead {
+  width: 14px;
+  height: 14px;
+  font-size: 8px;
+}
+
+.click-bead.missed {
+  background: rgba(245, 158, 11, 0.24);
+  border-color: #f59e0b;
+  color: #fde68a;
+  box-shadow: 0 0 9px rgba(245, 158, 11, 0.75);
+  transform: scale(1.1);
+}
+
+.recording-hud.sync-warning {
+  border-color: rgba(245, 158, 11, 0.92);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75), 0 0 22px rgba(245, 158, 11, 0.45);
+}
+
+.recording-hud.sync-warning .hud-rec-badge {
+  background: rgba(245, 158, 11, 0.22);
+  border-color: rgba(245, 158, 11, 0.65);
+  color: #fbbf24;
+}
+
+.recording-hud.sync-warning .hud-rec-dot {
+  background: #f59e0b;
+}
+
+.recording-hud.sync-warning .hud-instruction {
+  color: #fde68a;
+  font-weight: 600;
+}
+
+.recording-hud.sync-locked {
+  border-color: rgba(16, 185, 129, 0.75);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7), 0 0 18px rgba(16, 185, 129, 0.35);
+}
+
+.recording-hud.sync-locked .hud-instruction {
+  color: #6ee7b7;
+  font-weight: 600;
+}
+
+
 
