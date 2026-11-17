@@ -692,12 +692,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   const syncSynthTempo = document.getElementById('syncSynthTempo');
   const syncMetronomeOn = document.getElementById('syncMetronomeOn');
   const syncMetronomeVolume = document.getElementById('syncMetronomeVolume');
+  const syncGuideTrackRow = document.getElementById('syncGuideTrackRow');
+  const syncGuideTrackLabel = document.getElementById('syncGuideTrackLabel');
   const syncGuideTrackSelect = document.getElementById('syncGuideTrackSelect');
   const singleMetronomeOn = document.getElementById('singleMetronomeOn');
   const singleMetronomeSubOptions = document.getElementById('singleMetronomeSubOptions');
   const singleMetronomeTempo = document.getElementById('singleMetronomeTempo');
   const singleMetronomeVolume = document.getElementById('singleMetronomeVolume');
+  const startRecBtnWrap = document.getElementById('startRecBtnWrap');
   const btnStartRecordingAction = document.getElementById('btnStartRecordingAction');
+  const guideTrackEmptyHintPopup = document.getElementById('guideTrackEmptyHintPopup');
 
   // Metronome Tab Elements
   const tabBtnRecord = document.getElementById('tabBtnRecord');
@@ -1648,15 +1652,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=82', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=83', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=82');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=83');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=82');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=83');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -2512,6 +2516,134 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  const GUIDE_HINT_DURATION_MS = 3600;
+  let guideHintTimerId = null;
+  let supportsDiscreteDisplayTransition;
+
+  function canTransitionDisplay() {
+    if (supportsDiscreteDisplayTransition !== undefined) return supportsDiscreteDisplayTransition;
+    if (typeof window === 'undefined' || !window.CSS?.supports?.('transition-behavior', 'allow-discrete') || !document.body) {
+      return false;
+    }
+    const probe = document.createElement('div');
+    probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+    document.body.appendChild(probe);
+    getComputedStyle(probe).display;
+    probe.style.display = 'none';
+    supportsDiscreteDisplayTransition = getComputedStyle(probe).display === 'block';
+    probe.remove();
+    return supportsDiscreteDisplayTransition;
+  }
+
+  function hasOnlyNoneGuideOption() {
+    return !syncGuideTrackSelect || syncGuideTrackSelect.options.length <= 1;
+  }
+
+  function canStartRecordingFromModal() {
+    const isNanodawSync = record2PassSync ? record2PassSync.checked : true;
+    const isTrackOption = guideModeTrack ? guideModeTrack.checked : false;
+    if (!(isNanodawSync && isTrackOption)) return true;
+    const gVal = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
+    if (gVal === '') return false;
+    const gIdx = parseInt(gVal, 10);
+    return Number.isInteger(gIdx) && gIdx >= 0 && Boolean(audio.tracks && audio.tracks[gIdx]);
+  }
+
+  function syncStartRecordingButtonState() {
+    if (!btnStartRecordingAction || isRecording) return;
+    const canStart = canStartRecordingFromModal();
+    btnStartRecordingAction.disabled = !canStart;
+    btnStartRecordingAction.title = canStart
+      ? ''
+      : 'Select or generate a Guide Track first, or choose Metronome Synth Beats';
+  }
+
+  function positionGuideTrackEmptyHintPopup() {
+    if (!guideTrackEmptyHintPopup) return;
+    const anchor = syncGuideTrackSelect || syncGuideTrackRow;
+    const vw = window.innerWidth || 360;
+    const vh = window.innerHeight || 640;
+    const popupW = guideTrackEmptyHintPopup.offsetWidth || Math.min(280, vw - 24);
+    if (!anchor || typeof anchor.getBoundingClientRect !== 'function') {
+      guideTrackEmptyHintPopup.dataset.placement = 'top';
+      guideTrackEmptyHintPopup.style.left = `${Math.max(12, Math.round((vw - popupW) * 0.5))}px`;
+      guideTrackEmptyHintPopup.style.top = '120px';
+      guideTrackEmptyHintPopup.style.bottom = 'auto';
+      return;
+    }
+    const rect = anchor.getBoundingClientRect();
+    const minLeft = 12;
+    const maxLeft = Math.max(minLeft, vw - popupW - 12);
+    const left = Math.max(minLeft, Math.min(maxLeft, Math.round(rect.left)));
+    const anchorCenterX = rect.left + Math.max(24, rect.width) * 0.5;
+    const arrowX = Math.max(16, Math.min(popupW - 16, Math.round(anchorCenterX - left)));
+
+    guideTrackEmptyHintPopup.style.left = `${left}px`;
+    guideTrackEmptyHintPopup.style.setProperty('--hint-arrow-x', `${arrowX}px`);
+
+    if (rect.top < 96) {
+      guideTrackEmptyHintPopup.dataset.placement = 'bottom';
+      guideTrackEmptyHintPopup.style.top = `${Math.round(rect.bottom + 8)}px`;
+      guideTrackEmptyHintPopup.style.bottom = 'auto';
+    } else {
+      guideTrackEmptyHintPopup.dataset.placement = 'top';
+      guideTrackEmptyHintPopup.style.bottom = `${Math.round(vh - rect.top + 8)}px`;
+      guideTrackEmptyHintPopup.style.top = 'auto';
+    }
+  }
+
+  async function hideGuideTrackEmptyHintPopup(immediate = false) {
+    if (guideHintTimerId) {
+      clearTimeout(guideHintTimerId);
+      guideHintTimerId = null;
+    }
+    if (!guideTrackEmptyHintPopup || guideTrackEmptyHintPopup.hidden) {
+      if (guideTrackEmptyHintPopup) guideTrackEmptyHintPopup.removeAttribute('data-closing');
+      return;
+    }
+    if (immediate) {
+      guideTrackEmptyHintPopup.removeAttribute('data-closing');
+      guideTrackEmptyHintPopup.hidden = true;
+      return;
+    }
+
+    if (canTransitionDisplay()) {
+      guideTrackEmptyHintPopup.hidden = true;
+    } else {
+      guideTrackEmptyHintPopup.setAttribute('data-closing', '');
+    }
+
+    const animations = typeof guideTrackEmptyHintPopup.getAnimations === 'function'
+      ? guideTrackEmptyHintPopup.getAnimations()
+      : [];
+    if (animations.length > 0) {
+      await Promise.race([
+        Promise.allSettled(animations.map((a) => a.finished)),
+        new Promise((r) => setTimeout(r, 400))
+      ]);
+    }
+
+    if (guideTrackEmptyHintPopup.hasAttribute('data-closing')) {
+      guideTrackEmptyHintPopup.removeAttribute('data-closing');
+      guideTrackEmptyHintPopup.hidden = true;
+    }
+  }
+
+  function showGuideTrackEmptyHintPopup() {
+    if (!guideTrackEmptyHintPopup) return;
+    if (guideHintTimerId) {
+      clearTimeout(guideHintTimerId);
+      guideHintTimerId = null;
+    }
+    guideTrackEmptyHintPopup.removeAttribute('data-closing');
+    guideTrackEmptyHintPopup.hidden = false;
+    positionGuideTrackEmptyHintPopup();
+    guideHintTimerId = setTimeout(() => {
+      guideHintTimerId = null;
+      hideGuideTrackEmptyHintPopup(false);
+    }, GUIDE_HINT_DURATION_MS);
+  }
+
   function updateRecordModalToggles() {
     const isNanodawSync = record2PassSync ? record2PassSync.checked : true;
     if (container2PassSync) container2PassSync.style.display = isNanodawSync ? 'flex' : 'none';
@@ -2521,11 +2653,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isSynth = guideModeSynth ? guideModeSynth.checked : false;
       if (guideSynthSubOptions) guideSynthSubOptions.style.display = isSynth ? 'flex' : 'none';
       if (guideTrackSubOptions) guideTrackSubOptions.style.display = isSynth ? 'none' : 'flex';
+      if (isSynth) {
+        hideGuideTrackEmptyHintPopup(true);
+      }
       const takeMetroOn = syncMetronomeOn ? syncMetronomeOn.checked : true;
       if (syncMetronomeVolume) syncMetronomeVolume.disabled = !takeMetroOn;
       const volWrap = document.getElementById('syncMetronomeVolWrap');
       if (volWrap) volWrap.style.opacity = takeMetroOn ? '1' : '0.45';
     } else {
+      hideGuideTrackEmptyHintPopup(true);
       const isSingleMetro = singleMetronomeOn ? singleMetronomeOn.checked : false;
       if (singleMetronomeSubOptions) singleMetronomeSubOptions.style.display = isSingleMetro ? 'flex' : 'none';
     }
@@ -2535,10 +2671,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof updatePeakSensitivityUI === 'function') {
       updatePeakSensitivityUI();
     }
+    syncStartRecordingButtonState();
   }
 
   function switchRecordModalTab(tab) {
     activeRecordModalTab = tab;
+    hideGuideTrackEmptyHintPopup(true);
     if (tab === 'metronome') {
       if (tabBtnRecord) {
         tabBtnRecord.style.background = 'transparent';
@@ -2699,12 +2837,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (metroTempo && (!metroTempo.value || metroTempo.value === '90')) {
       metroTempo.value = defaultTempo;
     }
+    if (!hasOnlyNoneGuideOption()) {
+      hideGuideTrackEmptyHintPopup(true);
+    }
+    syncStartRecordingButtonState();
   }
 
   if (syncGuideTrackSelect) {
+    const interceptEmptyGuideSelect = (e) => {
+      if (hasOnlyNoneGuideOption()) {
+        e.preventDefault();
+        if (typeof syncGuideTrackSelect.focus === 'function') {
+          try { syncGuideTrackSelect.focus({ preventScroll: true }); } catch (_) { syncGuideTrackSelect.focus(); }
+        }
+        showGuideTrackEmptyHintPopup();
+      }
+    };
+
+    syncGuideTrackSelect.addEventListener('mousedown', interceptEmptyGuideSelect);
+    syncGuideTrackSelect.addEventListener('touchstart', interceptEmptyGuideSelect, { passive: false });
+    syncGuideTrackSelect.addEventListener('click', interceptEmptyGuideSelect);
+    syncGuideTrackSelect.addEventListener('keydown', (e) => {
+      if (hasOnlyNoneGuideOption() && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        showGuideTrackEmptyHintPopup();
+      }
+    });
+
     syncGuideTrackSelect.addEventListener('change', () => {
       const gIdx = parseInt(syncGuideTrackSelect.value, 10);
       if (!isNaN(gIdx) && audio.tracks[gIdx]) {
+        hideGuideTrackEmptyHintPopup(true);
         const trk = audio.tracks[gIdx];
         const trkTempo = trk.tempo || state.project?.tracks?.[gIdx]?.tempo;
         if (trkTempo) {
@@ -2717,8 +2880,37 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
       }
+      syncStartRecordingButtonState();
     });
   }
+
+  if (syncGuideTrackLabel) {
+    syncGuideTrackLabel.addEventListener('click', (e) => {
+      if (hasOnlyNoneGuideOption()) {
+        e.preventDefault();
+        if (syncGuideTrackSelect && typeof syncGuideTrackSelect.focus === 'function') {
+          try { syncGuideTrackSelect.focus({ preventScroll: true }); } catch (_) { syncGuideTrackSelect.focus(); }
+        }
+        showGuideTrackEmptyHintPopup();
+      }
+    });
+  }
+
+  if (startRecBtnWrap) {
+    startRecBtnWrap.addEventListener('pointerdown', () => {
+      if (btnStartRecordingAction && btnStartRecordingAction.disabled && !canStartRecordingFromModal() && hasOnlyNoneGuideOption()) {
+        showGuideTrackEmptyHintPopup();
+      }
+    });
+  }
+
+  document.addEventListener('pointerdown', (e) => {
+    if (!guideTrackEmptyHintPopup || guideTrackEmptyHintPopup.hidden) return;
+    const target = e.target;
+    if (syncGuideTrackRow && typeof syncGuideTrackRow.contains === 'function' && syncGuideTrackRow.contains(target)) return;
+    if (startRecBtnWrap && typeof startRecBtnWrap.contains === 'function' && startRecBtnWrap.contains(target)) return;
+    hideGuideTrackEmptyHintPopup(true);
+  });
 
   if (record2PassSync) record2PassSync.addEventListener('change', updateRecordModalToggles);
   if (guideModeSynth) guideModeSynth.addEventListener('change', updateRecordModalToggles);
@@ -2737,6 +2929,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (btnCancelMetronome && recordSetupModal) {
     btnCancelMetronome.addEventListener('click', () => {
+      hideGuideTrackEmptyHintPopup(true);
       stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
@@ -2793,6 +2986,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       resetPreRecTapTest();
       switchRecordModalTab('record');
+      syncStartRecordingButtonState();
       startVUMonitor();
 
       const m = Math.floor(durSec / 60);
@@ -3316,22 +3510,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (sensLine) sensLine.classList.remove('detected');
       vuFlashTimerId = null;
     }, 260);
-  }
-
-  let supportsDiscreteDisplayTransition;
-  function canTransitionDisplay() {
-    if (supportsDiscreteDisplayTransition !== undefined) return supportsDiscreteDisplayTransition;
-    if (typeof window === 'undefined' || !window.CSS?.supports?.('transition-behavior', 'allow-discrete') || !document.body) {
-      return false;
-    }
-    const probe = document.createElement('div');
-    probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
-    document.body.appendChild(probe);
-    getComputedStyle(probe).display;
-    probe.style.display = 'none';
-    supportsDiscreteDisplayTransition = getComputedStyle(probe).display === 'block';
-    probe.remove();
-    return supportsDiscreteDisplayTransition;
   }
 
   function showThresholdDragLabel() {
@@ -4789,13 +4967,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
     }
+    hideGuideTrackEmptyHintPopup(true);
     if (btnRecord) btnRecord.classList.remove('recording');
-    if (btnStartRecordingAction) {
-      btnStartRecordingAction.textContent = 'Start Recording';
-      btnStartRecordingAction.disabled = false;
-    }
     isRecording = false;
     recordingState = 'idle';
+    if (btnStartRecordingAction) {
+      btnStartRecordingAction.textContent = 'Start Recording';
+      syncStartRecordingButtonState();
+    }
     setTransportRecordingUI(false);
     pass2StreamStartTime = null;
     pass2DownbeatScheduledTime = null;
@@ -5568,10 +5747,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (window.zoomProfiler && typeof window.zoomProfiler.endRecSession === 'function') {
         window.zoomProfiler.endRecSession('error', { error: err && err.message ? err.message : String(err) });
       }
-      if (btnStartRecordingAction) {
-        btnStartRecordingAction.textContent = 'Start Recording';
-        btnStartRecordingAction.disabled = false;
-      }
       audio.isRecording = false;
       audio.isRecordingMode = false;
       audio.setPlaybackAudioSession();
@@ -6180,11 +6355,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         initAutoGainDefault();
         switchRecordModalTab('record');
 
-        // Reset start recording button to default
+        // Reset start recording button label and sync enabled/disabled state with Guide Track selection
+        hideGuideTrackEmptyHintPopup(true);
         if (btnStartRecordingAction) {
           btnStartRecordingAction.textContent = 'Start Recording';
-          btnStartRecordingAction.disabled = false;
         }
+        syncStartRecordingButtonState();
 
         // Proactively pre-allocate standby buffers and pre-warm AudioWorklet ahead of time!
         pass2AudioStore.prepareAheadOfTime(4);
@@ -6212,6 +6388,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (btnCloseRecordSetupModal && recordSetupModal) {
     btnCloseRecordSetupModal.addEventListener('click', () => {
       recDiag('REC_MODAL_CLOSED', { via: 'close_btn' });
+      hideGuideTrackEmptyHintPopup(true);
       stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
@@ -6222,6 +6399,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (btnCancelRecordSetup && recordSetupModal) {
     btnCancelRecordSetup.addEventListener('click', () => {
       recDiag('REC_MODAL_CLOSED', { via: 'cancel_btn' });
+      hideGuideTrackEmptyHintPopup(true);
       stopVUMonitor();
       recordSetupModal.classList.add('hidden');
       recordSetupModal.style.display = 'none';
@@ -6231,6 +6409,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (btnStartRecordingAction) {
     btnStartRecordingAction.addEventListener('click', () => {
+      // Guard: In NANOdaw sync Option 1, never allow closing the dialog or starting without a valid reference track
+      if (!canStartRecordingFromModal()) {
+        if (hasOnlyNoneGuideOption()) {
+          showGuideTrackEmptyHintPopup();
+        }
+        syncStartRecordingButtonState();
+        return;
+      }
+
+      hideGuideTrackEmptyHintPopup(true);
+
       // 1. Immediate visual feedback on the button
       btnStartRecordingAction.textContent = '⏳ Initializing...';
       btnStartRecordingAction.disabled = true;
@@ -6288,6 +6477,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (recordSetupModal) {
     recordSetupModal.addEventListener('click', (e) => {
       if (e.target === recordSetupModal) {
+        hideGuideTrackEmptyHintPopup(true);
         stopVUMonitor();
         recordSetupModal.classList.add('hidden');
         recordSetupModal.style.display = 'none';

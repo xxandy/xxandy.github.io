@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=82">
+  <link rel="stylesheet" href="styles.css?v=83">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -25,7 +25,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v82</span>
+        <span class="version-badge" id="appVersionBadge">v83</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -531,8 +531,8 @@
                         <label for="guideModeTrack" style="cursor:pointer; margin:0;">Backing Track / Metronome Sync</label>
                       </div>
                       <div id="guideTrackSubOptions" style="margin-left:22px; display:flex; flex-direction:column; gap:6px; font-size:11.5px; color:var(--text-secondary);">
-                        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                          <label for="syncGuideTrackSelect" style="margin:0;">Guide Track:</label>
+                        <div id="syncGuideTrackRow" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                          <label for="syncGuideTrackSelect" id="syncGuideTrackLabel" style="margin:0;">Guide Track:</label>
                           <select id="syncGuideTrackSelect" name="syncGuideTrackSelect" class="input-styled" style="padding:3px 8px; font-size:12px; max-width:240px;">
                             <option value="">None</option>
                           </select>
@@ -656,10 +656,12 @@
           </div>
 
           <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
-            <button class="btn btn-secondary" id="btnCancelRecordSetup">Cancel</button>
-            <button class="btn btn-primary" id="btnStartRecordingAction" style="background:#ef4444; color:#fff; font-weight:600; box-shadow:0 0 12px rgba(239,68,68,0.4);">
-              Start Recording
-            </button>
+            <button type="button" class="btn btn-secondary" id="btnCancelRecordSetup">Cancel</button>
+            <span id="startRecBtnWrap" class="start-rec-btn-wrap">
+              <button type="button" class="btn btn-primary btn-start-record" id="btnStartRecordingAction">
+                Start Recording
+              </button>
+            </span>
           </div>
         </div>
 
@@ -759,17 +761,25 @@
     </div>
   </dialog>
 
+  <!-- Disappearing Guide Track Guidance Popup -->
+  <div id="guideTrackEmptyHintPopup" class="guide-track-hint-popup" role="status" aria-live="polite" hidden>
+    <div class="guide-track-hint-title">⏱️ Generate a Metronome Track first</div>
+    <div class="guide-track-hint-body">
+      Open the <strong>Metronome Track</strong> tab above to generate a reference track first.
+    </div>
+  </div>
+
   <!-- App Toast Notification -->
   <div class="app-toast" id="appToast"></div>
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=82"></script>
-  <script src="js/mp3-decoder.js?v=82"></script>
-  <script src="js/state-manager.js?v=82"></script>
-  <script src="js/waveform-cache.js?v=82"></script>
-  <script src="js/audio-engine.js?v=82"></script>
-  <script src="js/timeline-ui.js?v=82"></script>
-  <script src="js/app.js?v=82"></script>
+  <script src="js/profiler.js?v=83"></script>
+  <script src="js/mp3-decoder.js?v=83"></script>
+  <script src="js/state-manager.js?v=83"></script>
+  <script src="js/waveform-cache.js?v=83"></script>
+  <script src="js/audio-engine.js?v=83"></script>
+  <script src="js/timeline-ui.js?v=83"></script>
+  <script src="js/app.js?v=83"></script>
 </body>
 </html>
