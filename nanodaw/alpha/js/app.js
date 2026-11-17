@@ -1652,15 +1652,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=83', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=84', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=83');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=84');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=83');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=84');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -5149,6 +5149,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (hudTimer) hudTimer.textContent = '00:00.0';
     initHudPreSyncTriangles(firstBeat - 1);
 
+    // Beat F (k = 0) is the wide-window anchor beat so high playback/Bluetooth latency (e.g. 300–850ms on Android)
+    // is absorbed cleanly on Beat F; subsequent beats (F+1 .. F+N-1) use a tighter window anchored to Beat F's arrival.
+    const anchorEarlySec = Math.min(0.38 * dt, 0.22);
+    const anchorLateSec = Math.min(2.10 * dt, Math.max(0.85, 1.45 * dt));
+    const tightEarlySec = Math.min(0.40 * dt, 0.30);
+    const tightLateSec = Math.min(0.44 * dt, 0.30);
+
     const session = {
       mode,
       guideTrackIdx: mode === 'track' ? guideTrackIdx : null,
@@ -5164,9 +5171,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       expSyncBufferSec: new Array(numBeats).fill(0),
       refTimelineSec,
       guideMissingError,
+      anchorLatencySec: null,
       liveTapMatched: new Array(numBeats).fill(false),
       syncSlotStates: new Array(numBeats).fill('pending'), // 'pending' | 'detected' | 'missed'
       syncSlotEls: new Array(numBeats).fill(null),
+      beatFlushTimerIds: new Array(numBeats).fill(null),
+      beatMissTimerIds: new Array(numBeats).fill(null),
+      verifyFlushTimerId: null,
+      verifyTimerId: null,
       liveTapTimesSec: [],
       warnedMissedBeat: false,
       earlyVerifiedResult: null,
@@ -5181,6 +5193,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       }, Math.max(0, delayMs));
       session.scheduledTimerIds.push(tid);
       return tid;
+    };
+
+    const cancelBeatTimers = (k) => {
+      if (session.beatFlushTimerIds[k] !== null) {
+        clearTimeout(session.beatFlushTimerIds[k]);
+        session.beatFlushTimerIds[k] = null;
+      }
+      if (session.beatMissTimerIds[k] !== null) {
+        clearTimeout(session.beatMissTimerIds[k]);
+        session.beatMissTimerIds[k] = null;
+      }
     };
 
     const recordSyncBeatVisual = (beatIdx, status) => {
@@ -5227,6 +5250,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     };
 
+    let scheduleBeatMissCheck = () => {};
+    let schedulePostSyncVerification = () => {};
+
+    const lockRealtimeAnchor = (latencySec, anchorBeatIdx = 0) => {
+      if (session.anchorLatencySec !== null) return;
+      session.anchorLatencySec = latencySec;
+      recDiag('REC_NANODAW_SYNC_LIVE_ANCHOR', {
+        mode,
+        anchorBeatIdx,
+        anchorBeatNumber: firstBeat + anchorBeatIdx,
+        anchorLatencyMs: Math.round(latencySec * 1000)
+      });
+
+      // Tighten and anchor all remaining sync beats (anchorBeatIdx + 1 .. numBeats - 1) to Beat F's measured arrival latency
+      for (let k = anchorBeatIdx + 1; k < numBeats; k++) {
+        if (session.liveTapMatched[k]) continue;
+        const anchoredExpK = session.expSyncBufferSec[k] + latencySec;
+        scheduleBeatMissCheck(k, anchoredExpK, tightEarlySec, tightLateSec);
+      }
+
+      // Ensure authoritative post-sync verification waits until after the final anchored beat's window completes
+      schedulePostSyncVerification(Math.max(0, latencySec) + tightLateSec + 0.18);
+    };
+
     await attachRecordingPipeline({
       detectTransients: true,
       targetStore: pass2AudioStore,
@@ -5237,36 +5284,62 @@ document.addEventListener('DOMContentLoaded', async () => {
         const secInBuf = samplePos / sr;
         const firstExp = session.expSyncBufferSec[0] || 0;
         const lastExp = session.expSyncBufferSec[numBeats - 1] || (firstExp + (numBeats - 1) * dt);
-        if (secInBuf < Math.max(0, firstExp - 0.65 * dt)) return;
-        if (secInBuf > lastExp + 1.45 * dt + 0.35) return;
+        if (secInBuf < Math.max(0, firstExp - anchorEarlySec - 0.08)) return;
+        const maxTail = Math.max(anchorLateSec, session.anchorLatencySec !== null ? session.anchorLatencySec : 0) + tightLateSec + 0.30;
+        if (secInBuf > lastExp + maxTail) return;
 
         pass2ClickEvents.push({ ctxTime: now, samplePos });
         session.liveTapTimesSec.push(secInBuf);
 
-        // Match transient in realtime to nearest unmatched sync beat within hardware-latency window
         let bestK = -1;
-        let bestDist = Infinity;
-        for (let k = 0; k < numBeats; k++) {
-          if (session.liveTapMatched[k]) continue;
-          const expK = session.expSyncBufferSec[k];
-          const minK = expK - 0.42 * dt;
-          const maxK = expK + 0.68 * dt + 0.25;
-          if (secInBuf >= minK && secInBuf <= maxK) {
-            const delta = secInBuf - expK;
-            const dist = Math.abs(delta - 0.06);
-            if (dist < bestDist) {
-              bestDist = dist;
+
+        if (session.syncSlotStates[0] === 'pending') {
+          // Beat F (k = 0) is the anchor beat: seek across the full wide latency window without letting Beat F+1 steal it
+          const min0 = Math.max(0, firstExp - anchorEarlySec);
+          const max0 = firstExp + anchorLateSec;
+          if (secInBuf >= min0 && secInBuf <= max0) {
+            bestK = 0;
+          }
+        } else if (session.anchorLatencySec !== null) {
+          // Subsequent beats (F+1 .. F+N-1): tighter window anchored directly by Beat F's arrival latency
+          let bestDist = Infinity;
+          for (let k = 1; k < numBeats; k++) {
+            if (session.liveTapMatched[k]) continue;
+            const anchoredExpK = session.expSyncBufferSec[k] + session.anchorLatencySec;
+            const minK = anchoredExpK - tightEarlySec;
+            const maxK = anchoredExpK + tightLateSec;
+            if (secInBuf >= minK && secInBuf <= maxK) {
+              const dist = Math.abs(secInBuf - anchoredExpK);
+              if (dist < bestDist) {
+                bestDist = dist;
+                bestK = k;
+              }
+            }
+          }
+        } else {
+          // Fallback if Beat F timed out completely with zero tap: let the first heard beat establish the latency anchor
+          for (let k = 1; k < numBeats; k++) {
+            if (session.liveTapMatched[k] || session.syncSlotStates[k] !== 'pending') continue;
+            const expK = session.expSyncBufferSec[k];
+            if (secInBuf >= Math.max(0, expK - anchorEarlySec) && secInBuf <= expK + anchorLateSec) {
               bestK = k;
+              break;
             }
           }
         }
+
         if (bestK >= 0) {
+          cancelBeatTimers(bestK);
           recordSyncBeatVisual(bestK, 'detected');
+          if (session.anchorLatencySec === null) {
+            lockRealtimeAnchor(secInBuf - session.expSyncBufferSec[bestK], bestK);
+          }
         }
         recDiag('REC_NANODAW_SYNC_LIVE_TAP', {
           mode,
           matchedBeatIdx: bestK,
           secInBuf: Number(secInBuf.toFixed(3)),
+          anchorLatencySec: session.anchorLatencySec !== null ? Number(session.anchorLatencySec.toFixed(3)) : null,
           samplePos
         });
       }
@@ -5402,165 +5475,198 @@ document.addEventListener('DOMContentLoaded', async () => {
       }, preDelayMs);
     }
 
-    // --- Unified Sync Beat Cues & Realtime Green/Red Triangles (3.c) ---
-    for (let k = 0; k < numBeats; k++) {
+    // --- Unified Sync Beat Cues & Latency-Anchored Realtime Green/Red Triangles (3.c) ---
+    // Clear pre-sync countdown residue right when Beat F begins
+    const firstCueDelayMs = (firstSyncStreamTime - refNowCtx) * 1000;
+    scheduleSessionTimer(() => {
+      clearHudPreSyncResidue();
+    }, firstCueDelayMs);
+
+    scheduleBeatMissCheck = (k, centerBufSec, earlyHalfSec, lateHalfSec) => {
+      cancelBeatTimers(k);
       const beatNumber = firstBeat + k;
-      const beatStreamTime = session.streamStartTime + session.expSyncBufferSec[k];
-      const cueDelayMs = (beatStreamTime - refNowCtx) * 1000;
+      const nowCtx = recAudioCtx ? recAudioCtx.currentTime : refNowCtx;
+      const deadlineStreamTime = session.streamStartTime + centerBufSec + lateHalfSec;
+      const flushDelayMs = Math.max(0, (deadlineStreamTime - nowCtx) * 1000 - 25);
+      const checkDelayMs = Math.max(0, (deadlineStreamTime - nowCtx) * 1000);
 
-      scheduleSessionTimer(() => {
-        clearHudPreSyncResidue();
-        // Ensure any still-pending earlier beat (< k) is marked missed before beat k begins
-        for (let j = 0; j < k; j++) {
-          if (session.syncSlotStates[j] === 'pending') {
-            recordSyncBeatVisual(j, 'missed');
-          }
-        }
-      }, cueDelayMs);
-
-      // On-cue missed-beat check right after beat k's reaction + roundtrip window (so red triangle lands in rhythm)
-      const onCueMissSec = Math.min(0.46 * dt, 0.24);
-      const flushBeforeCheckMs = Math.max(0, ((beatStreamTime + onCueMissSec) - refNowCtx) * 1000 - 25);
-      scheduleSessionTimer(() => {
+      session.beatFlushTimerIds[k] = scheduleSessionTimer(() => {
         if (!session.liveTapMatched[k] && recWorkletNode) {
           try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
         }
-      }, flushBeforeCheckMs);
+      }, flushDelayMs);
 
-      const missCheckDelayMs = ((beatStreamTime + onCueMissSec) - refNowCtx) * 1000;
-      scheduleSessionTimer(() => {
+      session.beatMissTimerIds[k] = scheduleSessionTimer(() => {
+        session.beatFlushTimerIds[k] = null;
+        session.beatMissTimerIds[k] = null;
+        if (session.liveTapMatched[k]) return;
+
         if (session.guideMissingError) {
           recordSyncBeatVisual(k, 'missed');
           return;
         }
-        if (!session.liveTapMatched[k]) {
-          // Verify against captured raw PCM slice around beat k before showing red missed triangle
-          const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-          const expK = session.expSyncBufferSec[k];
-          const s0 = Math.max(0, Math.round((expK - 0.38 * dt) * sr));
-          const s1 = Math.min(pass2AudioStore.totalSamples, Math.round((expK + onCueMissSec + 0.04) * sr));
-          if (s1 > s0 + 32) {
-            const subL = pass2AudioStore.toFlatArray(s0, s1);
-            const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples >= s1);
-            const subPCM = isSt ? combineStereoForPeakDetection(subL, pass2AudioStoreR.toFlatArray(s0, s1)) : subL;
-            const minPk = Math.max(0.006, getPeakThresholdLinear() * 0.60);
-            const pk = findTransientPeak(subPCM, 0, subPCM.length);
-            if (pk.found && pk.peakAbs >= minPk && pk.crest >= 1.75) {
-              recordSyncBeatVisual(k, 'detected');
-              return;
+
+        // Verify against captured raw PCM slice around centerBufSec before declaring a missed beat
+        const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+        const s0 = Math.max(0, Math.round((centerBufSec - earlyHalfSec) * sr));
+        const s1 = Math.min(pass2AudioStore.totalSamples, Math.round((centerBufSec + lateHalfSec + 0.03) * sr));
+        if (s1 > s0 + 32) {
+          const subL = pass2AudioStore.toFlatArray(s0, s1);
+          const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples >= s1);
+          const subPCM = isSt ? combineStereoForPeakDetection(subL, pass2AudioStoreR.toFlatArray(s0, s1)) : subL;
+          const minPk = Math.max(0.006, getPeakThresholdLinear() * 0.60);
+          const pk = findTransientPeak(subPCM, 0, subPCM.length);
+          if (pk.found && pk.peakAbs >= minPk && pk.crest >= 1.75) {
+            const pkSec = (s0 + pk.idx) / sr;
+            recordSyncBeatVisual(k, 'detected');
+            if (session.anchorLatencySec === null) {
+              lockRealtimeAnchor(pkSec - session.expSyncBufferSec[k], k);
+            }
+            return;
+          }
+        }
+
+        recordSyncBeatVisual(k, 'missed');
+        const heardSoFar = session.liveTapMatched.slice(0, k + 1).filter(Boolean).length;
+        const warnMsg = `Missed sync tap on beat ${beatNumber} (${heardSoFar} of ${k + 1} detected).`;
+        const firstWarning = !session.warnedMissedBeat;
+        session.warnedMissedBeat = true;
+        setHudSyncWarning(warnMsg, firstWarning);
+        if (firstWarning) {
+          showToast(`⚠️ Missed sync tap on beat ${beatNumber}! Stop now to retry or lower threshold.`, 'warning', 5500);
+        }
+        recDiag('REC_SYNC_EARLY_BEAT_MISSED', {
+          mode,
+          missedBeatNumber: beatNumber,
+          syncIndex: k,
+          heardSoFar,
+          anchorLatencySec: session.anchorLatencySec !== null ? Number(session.anchorLatencySec.toFixed(3)) : null,
+          peakSensDb
+        }, { level: 'warn', forcePersist: true });
+
+        // If Beat F (k = 0) expired its entire wide window with zero tap, arm wide fallback checks for remaining beats
+        if (k === 0 && session.anchorLatencySec === null) {
+          for (let m = 1; m < numBeats; m++) {
+            if (!session.liveTapMatched[m] && session.beatMissTimerIds[m] === null) {
+              scheduleBeatMissCheck(m, session.expSyncBufferSec[m], anchorEarlySec, anchorLateSec);
             }
           }
-
-          recordSyncBeatVisual(k, 'missed');
-          const heardSoFar = session.liveTapMatched.slice(0, k + 1).filter(Boolean).length;
-          const warnMsg = `Missed sync tap on beat ${beatNumber} (${heardSoFar} of ${k + 1} detected).`;
-          const firstWarning = !session.warnedMissedBeat;
-          session.warnedMissedBeat = true;
-          setHudSyncWarning(warnMsg, firstWarning);
-          if (firstWarning) {
-            showToast(`⚠️ Missed sync tap on beat ${beatNumber}! Stop now to retry or lower threshold.`, 'warning', 5500);
-          }
-          recDiag('REC_SYNC_EARLY_BEAT_MISSED', {
-            mode,
-            missedBeatNumber: beatNumber,
-            syncIndex: k,
-            heardSoFar,
-            peakSensDb
-          }, { level: 'warn', forcePersist: true });
         }
-      }, missCheckDelayMs);
-    }
+      }, checkDelayMs);
+    };
 
     // --- Authoritative Post-Sync-Window Verification on Raw Captured PCM ---
     const lastSyncStreamSec = session.streamStartTime + (session.expSyncBufferSec[numBeats - 1] || ((preTakeBeats - 1) * dt));
-    const postVerifyWaitSec = Math.max(0.38, 0.65 * dt + 0.20);
-    const verifyFlushDelayMs = Math.max(0, ((lastSyncStreamSec + postVerifyWaitSec) - refNowCtx) * 1000 - 30);
-    scheduleSessionTimer(() => {
-      if (recWorkletNode) {
-        try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
+    schedulePostSyncVerification = (waitAfterLastSyncSec) => {
+      if (session.verifyFlushTimerId !== null) {
+        clearTimeout(session.verifyFlushTimerId);
+        session.verifyFlushTimerId = null;
       }
-    }, verifyFlushDelayMs);
-
-    const verifyDelayMs = ((lastSyncStreamSec + postVerifyWaitSec) - refNowCtx) * 1000;
-    scheduleSessionTimer(() => {
-      if (recWorkletNode) {
-        try { recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false }); } catch (_) {}
+      if (session.verifyTimerId !== null) {
+        clearTimeout(session.verifyTimerId);
+        session.verifyTimerId = null;
       }
-      if (session.guideMissingError) return;
 
-      const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
-      const expFirstSec = session.expSyncBufferSec[0] || 0;
-      const maxWindowSample = Math.min(
-        pass2AudioStore.totalSamples,
-        Math.round((expFirstSec + (numBeats + 2.0) * dt) * sr)
-      );
-      const sliceL = pass2AudioStore.toFlatArray(0, maxWindowSample);
-      const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples > 0);
-      const sliceR = isSt ? pass2AudioStoreR.toFlatArray(0, Math.min(maxWindowSample, pass2AudioStoreR.totalSamples)) : null;
-      const detectPCM = sliceR ? combineStereoForPeakDetection(sliceL, sliceR) : sliceL;
+      const nowCtx = recAudioCtx ? recAudioCtx.currentTime : refNowCtx;
+      const targetStreamSec = lastSyncStreamSec + waitAfterLastSyncSec;
+      const verifyFlushDelayMs = Math.max(0, (targetStreamSec - nowCtx) * 1000 - 30);
+      const verifyDelayMs = Math.max(0, (targetStreamSec - nowCtx) * 1000);
 
-      const res = detectSyncTapPeaks(detectPCM, sr, expFirstSec, dt, numBeats, getPeakThresholdLinear());
-      if (res.peaksSec.length === numBeats) {
-        const estLatMs = Math.round((res.peaksSec[0] - expFirstSec) * 1000);
-        session.earlyVerifiedResult = {
-          ok: true,
-          foundCount: numBeats,
-          peaksSec: res.peaksSec,
-          estLatencyMs: estLatMs,
-          reason: null
-        };
-        session.warnedMissedBeat = false;
-        for (let k = 0; k < numBeats; k++) {
-          recordSyncBeatVisual(k, 'detected');
+      session.verifyFlushTimerId = scheduleSessionTimer(() => {
+        if (recWorkletNode) {
+          try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
         }
-        clearHudSyncFeedback();
-        if (recordingHUD) recordingHUD.classList.add('sync-locked');
-        if (hudRecStatusText && recordingState === 'recording_take') {
-          hudRecStatusText.textContent = 'REC';
+      }, verifyFlushDelayMs);
+
+      session.verifyTimerId = scheduleSessionTimer(() => {
+        session.verifyFlushTimerId = null;
+        session.verifyTimerId = null;
+        if (recWorkletNode) {
+          try { recWorkletNode.port.postMessage({ type: 'set_config', detectTransients: false }); } catch (_) {}
         }
-        scheduleSessionTimer(() => {
-          if (recordingHUD) recordingHUD.classList.remove('sync-locked');
-          if (hudRecStatusText && !session.warnedMissedBeat) {
+        if (session.guideMissingError) return;
+
+        const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
+        const expFirstSec = session.expSyncBufferSec[0] || 0;
+        const maxWindowSample = Math.min(
+          pass2AudioStore.totalSamples,
+          Math.round((expFirstSec + (numBeats + 2.0) * dt) * sr)
+        );
+        const sliceL = pass2AudioStore.toFlatArray(0, maxWindowSample);
+        const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples > 0);
+        const sliceR = isSt ? pass2AudioStoreR.toFlatArray(0, Math.min(maxWindowSample, pass2AudioStoreR.totalSamples)) : null;
+        const detectPCM = sliceR ? combineStereoForPeakDetection(sliceL, sliceR) : sliceL;
+
+        const res = detectSyncTapPeaks(detectPCM, sr, expFirstSec, dt, numBeats, getPeakThresholdLinear());
+        if (res.peaksSec.length === numBeats) {
+          const estLatMs = Math.round((res.peaksSec[0] - expFirstSec) * 1000);
+          session.earlyVerifiedResult = {
+            ok: true,
+            foundCount: numBeats,
+            peaksSec: res.peaksSec,
+            estLatencyMs: estLatMs,
+            reason: null
+          };
+          session.warnedMissedBeat = false;
+          for (let k = 0; k < numBeats; k++) {
+            cancelBeatTimers(k);
+            recordSyncBeatVisual(k, 'detected');
+          }
+          clearHudSyncFeedback();
+          if (recordingHUD) recordingHUD.classList.add('sync-locked');
+          if (hudRecStatusText && recordingState === 'recording_take') {
             hudRecStatusText.textContent = 'REC';
           }
-        }, 1400);
-        recDiag('REC_SYNC_EARLY_VERIFY_LOCKED', {
-          mode,
-          numBeats,
-          method: res.method,
-          estLatencyMs: estLatMs,
-          peaksSec: res.peaksSec.map(v => Number(v.toFixed(4)))
-        }, { forcePersist: true });
-      } else {
-        const foundCount = res.peaksSec.length;
-        const failMsg = `Sync incomplete: ${foundCount} of ${numBeats} peaks detected.`;
-        session.earlyVerifiedResult = {
-          ok: false,
-          foundCount,
-          peaksSec: res.peaksSec,
-          estLatencyMs: null,
-          reason: failMsg
-        };
-        for (let k = 0; k < numBeats; k++) {
-          if (!session.liveTapMatched[k]) {
-            recordSyncBeatVisual(k, 'missed');
+          scheduleSessionTimer(() => {
+            if (recordingHUD) recordingHUD.classList.remove('sync-locked');
+            if (hudRecStatusText && !session.warnedMissedBeat) {
+              hudRecStatusText.textContent = 'REC';
+            }
+          }, 1400);
+          recDiag('REC_SYNC_EARLY_VERIFY_LOCKED', {
+            mode,
+            numBeats,
+            method: res.method,
+            estLatencyMs: estLatMs,
+            peaksSec: res.peaksSec.map(v => Number(v.toFixed(4)))
+          }, { forcePersist: true });
+        } else {
+          const foundCount = res.peaksSec.length;
+          const failMsg = `Sync incomplete: ${foundCount} of ${numBeats} peaks detected.`;
+          session.earlyVerifiedResult = {
+            ok: false,
+            foundCount,
+            peaksSec: res.peaksSec,
+            estLatencyMs: null,
+            reason: failMsg
+          };
+          for (let k = 0; k < numBeats; k++) {
+            cancelBeatTimers(k);
+            if (!session.liveTapMatched[k]) {
+              recordSyncBeatVisual(k, 'missed');
+            }
           }
+          const firstWarn = !session.warnedMissedBeat;
+          session.warnedMissedBeat = true;
+          setHudSyncWarning(failMsg, firstWarn);
+          if (firstWarn) {
+            showToast(`⚠️ Sync incomplete: only ${foundCount} of ${numBeats} tap peaks detected! Stop now to retry.`, 'warning', 8000);
+          }
+          recDiag('REC_SYNC_EARLY_VERIFY_FAILED', {
+            mode,
+            foundCount,
+            numBeats,
+            peakSensDb,
+            peaksSec: res.peaksSec.map(v => Number(v.toFixed(4)))
+          }, { level: 'warn', forcePersist: true });
         }
-        const firstWarn = !session.warnedMissedBeat;
-        session.warnedMissedBeat = true;
-        setHudSyncWarning(failMsg, firstWarn);
-        if (firstWarn) {
-          showToast(`⚠️ Sync incomplete: only ${foundCount} of ${numBeats} tap peaks detected! Stop now to retry.`, 'warning', 8000);
-        }
-        recDiag('REC_SYNC_EARLY_VERIFY_FAILED', {
-          mode,
-          foundCount,
-          numBeats,
-          peakSensDb,
-          peaksSec: res.peaksSec.map(v => Number(v.toFixed(4)))
-        }, { level: 'warn', forcePersist: true });
-      }
-    }, verifyDelayMs);
+      }, verifyDelayMs);
+    };
+
+    // Initially arm Beat F (k = 0) with the wide anchor window; once Beat F arrives, lockRealtimeAnchor()
+    // immediately schedules tighter anchored windows for F+1 .. F+N-1 and tightens post-sync verification!
+    scheduleBeatMissCheck(0, session.expSyncBufferSec[0] || 0, anchorEarlySec, anchorLateSec);
+    schedulePostSyncVerification(anchorLateSec + tightLateSec + 0.20);
   }
 
   async function startRecordingFlow() {
