@@ -14,7 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=80">
+  <link rel="stylesheet" href="styles.css?v=81">
 </head>
 <body>
   <!-- Top App Navigation -->
@@ -25,7 +25,7 @@
           <img src="nanodaw_logo.svg" alt="NANOdaw" class="app-logo-img">
         </div>
         <span class="app-title">NANOdaw</span>
-        <span class="version-badge" id="appVersionBadge">v80</span>
+        <span class="version-badge" id="appVersionBadge">v81</span>
       </div>
       <div class="project-title-badge" id="projectTitle">Loading...</div>
     </div>
@@ -710,36 +710,19 @@
     <div class="hud-left">
       <span class="hud-rec-badge" id="hudRecBadge">
         <span class="hud-rec-dot"></span>
-        <span id="hudRecStatusText">REC</span>
+        <span id="hudRecStatusText">SYNC</span>
       </span>
       <span class="hud-timer" id="hudTimer">00:00.0</span>
     </div>
 
-    <div class="hud-center" id="hudInstructionBox">
-      <div style="display:flex; flex-direction:column; align-items:center; gap:2px; width:100%;">
-        <span class="hud-instruction" id="hudInstruction">Tap 4 clicks with the rhythm...</span>
-        <span class="hud-latency-text" id="hudLatencyText" style="display:none; font-size:10px; color:rgba(255,255,255,0.65); font-family:monospace; line-height:1;"></span>
-      </div>
-      <div class="click-beads-wrap" id="hudClickBeads">
-        <span class="click-bead" id="bead1">1</span>
-        <span class="click-bead" id="bead2">2</span>
-        <span class="click-bead" id="bead3">3</span>
-        <span class="click-bead" id="bead4">4</span>
-      </div>
-      <span id="hudLiveAlert" class="visually-hidden" role="alert" aria-atomic="true"></span>
-    </div>
+    <div class="hud-triangles-strip" id="hudSyncTriangles" aria-hidden="true"></div>
+    <span id="hudLiveAlert" class="visually-hidden" role="alert" aria-atomic="true"></span>
 
     <div class="hud-right">
       <button type="button" class="btn btn-secondary btn-hud-log" id="btnHudGetLog" title="Download Realtime Diagnostic Log" aria-label="Download diagnostic log">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
         </svg>
-      </button>
-      <button class="btn btn-danger btn-stop-rec" id="btnStopRecordingAction" title="Stop recording and save new track">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <rect x="4" y="4" width="16" height="16"/>
-        </svg>
-        <span class="btn-stop-rec-text">Stop & Save</span>
       </button>
     </div>
   </div>
@@ -781,12 +764,12 @@
 
   <!-- Script Modules -->
   <script src="js/lame.min.js"></script>
-  <script src="js/profiler.js?v=80"></script>
-  <script src="js/mp3-decoder.js?v=80"></script>
-  <script src="js/state-manager.js?v=80"></script>
-  <script src="js/waveform-cache.js?v=80"></script>
-  <script src="js/audio-engine.js?v=80"></script>
-  <script src="js/timeline-ui.js?v=80"></script>
-  <script src="js/app.js?v=80"></script>
+  <script src="js/profiler.js?v=81"></script>
+  <script src="js/mp3-decoder.js?v=81"></script>
+  <script src="js/state-manager.js?v=81"></script>
+  <script src="js/waveform-cache.js?v=81"></script>
+  <script src="js/audio-engine.js?v=81"></script>
+  <script src="js/timeline-ui.js?v=81"></script>
+  <script src="js/app.js?v=81"></script>
 </body>
 </html>

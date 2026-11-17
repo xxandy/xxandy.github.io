@@ -957,14 +957,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   let activeSyncSession = null;
 
   const recordingHUD = document.getElementById('recordingHUD');
-  const hudInstructionBox = document.getElementById('hudInstructionBox');
   const hudRecStatusText = document.getElementById('hudRecStatusText');
   const hudTimer = document.getElementById('hudTimer');
-  const hudInstruction = document.getElementById('hudInstruction');
-  const hudLatencyText = document.getElementById('hudLatencyText');
-  const hudClickBeads = document.getElementById('hudClickBeads');
+  const hudSyncTriangles = document.getElementById('hudSyncTriangles');
   const hudLiveAlert = document.getElementById('hudLiveAlert');
-  const btnStopRecordingAction = document.getElementById('btnStopRecordingAction');
   const btnRecModalGetLog = document.getElementById('btnRecModalGetLog');
   const btnHudGetLog = document.getElementById('btnHudGetLog');
 
@@ -1652,15 +1648,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=80', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=81', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=80');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=81');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=80');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=81');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -4244,30 +4240,79 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  function renderHudSyncBeads(count = 4) {
-    const n = Math.max(1, Math.min(16, count | 0));
-    if (!hudClickBeads) return [];
-    hudClickBeads.innerHTML = '';
-    if (n > 8) {
-      hudClickBeads.setAttribute('data-compact', 'true');
-    } else {
-      hudClickBeads.removeAttribute('data-compact');
-    }
-    const els = [];
-    for (let i = 0; i < n; i++) {
-      const span = document.createElement('span');
-      span.className = 'click-bead';
-      span.dataset.beadIndex = String(i);
-      span.textContent = String(i + 1);
-      hudClickBeads.appendChild(span);
-      els.push(span);
-    }
-    return els;
+  // Maximum number of upside-down HUD sync triangles displayed horizontally (easy to adjust as HUD space evolves)
+  const MAX_HUD_SYNC_TRIANGLES = 8;
+
+  function createHudTriangleElement(kind = 'green', phase = 'sync') {
+    const span = document.createElement('span');
+    span.className = `hud-sync-tri ${kind === 'red' ? 'tri-red' : 'tri-green'}`;
+    span.dataset.phase = phase;
+    const strokeColor = kind === 'red' ? 'rgba(69, 10, 10, 0.9)' : 'rgba(2, 44, 34, 0.88)';
+    span.innerHTML = `<svg viewBox="0 0 12 10" width="12" height="10" aria-hidden="true" focusable="false"><polygon points="0.8,1.0 11.2,1.0 6.0,9.2" fill="currentColor" stroke="${strokeColor}" stroke-width="0.9" stroke-linejoin="round"/></svg>`;
+    return span;
   }
 
-  function getHudBeadElements() {
-    if (!hudClickBeads) return [];
-    return Array.from(hudClickBeads.querySelectorAll('.click-bead'));
+  function setHudTriangleKind(el, kind = 'green') {
+    if (!el) return;
+    el.classList.toggle('tri-red', kind === 'red');
+    el.classList.toggle('tri-green', kind !== 'red');
+    const poly = el.querySelector('polygon');
+    if (poly) {
+      poly.setAttribute('stroke', kind === 'red' ? 'rgba(69, 10, 10, 0.9)' : 'rgba(2, 44, 34, 0.88)');
+    }
+  }
+
+  async function removeHudTriangleSmooth(el) {
+    if (!el || !el.isConnected) return;
+    el.setAttribute('data-closing', '');
+    const anims = typeof el.getAnimations === 'function' ? el.getAnimations() : [];
+    if (anims.length > 0) {
+      await Promise.race([
+        Promise.allSettled(anims.map(a => a.finished)),
+        new Promise(r => setTimeout(r, 220))
+      ]);
+    }
+    if (el.isConnected) el.remove();
+  }
+
+  function clearHudTrianglesImmediate() {
+    if (hudSyncTriangles) {
+      hudSyncTriangles.innerHTML = '';
+    }
+  }
+
+  function initHudPreSyncTriangles(preSyncCount = 0) {
+    clearHudSyncFeedback();
+    if (!hudSyncTriangles) return;
+    hudSyncTriangles.innerHTML = '';
+    const visibleCount = Math.min(MAX_HUD_SYNC_TRIANGLES, Math.max(0, preSyncCount | 0));
+    for (let i = 0; i < visibleCount; i++) {
+      hudSyncTriangles.appendChild(createHudTriangleElement('green', 'presync'));
+    }
+  }
+
+  function syncHudPreSyncRemaining(remainingPreSyncBeats) {
+    if (!hudSyncTriangles) return;
+    const targetVisible = Math.min(MAX_HUD_SYNC_TRIANGLES, Math.max(0, remainingPreSyncBeats | 0));
+    const active = Array.from(hudSyncTriangles.querySelectorAll('.hud-sync-tri[data-phase="presync"]:not([data-closing])'));
+    while (active.length > targetVisible) {
+      const rightmost = active.pop();
+      removeHudTriangleSmooth(rightmost);
+    }
+  }
+
+  function clearHudPreSyncResidue() {
+    if (!hudSyncTriangles) return;
+    hudSyncTriangles.querySelectorAll('.hud-sync-tri[data-phase="presync"]').forEach(el => el.remove());
+  }
+
+  function enforceHudSyncTriangleCap() {
+    if (!hudSyncTriangles) return;
+    const syncEls = Array.from(hudSyncTriangles.querySelectorAll('.hud-sync-tri[data-phase="sync"]'));
+    while (syncEls.length > MAX_HUD_SYNC_TRIANGLES) {
+      const oldest = syncEls.shift();
+      if (oldest && oldest.isConnected) oldest.remove();
+    }
   }
 
   function clearHudSyncFeedback() {
@@ -4285,19 +4330,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       recordingHUD.classList.add('sync-warning');
     }
     if (hudRecStatusText) {
-      hudRecStatusText.textContent = '⚠️ SYNC WARNING';
-    }
-    if (hudInstruction && message) {
-      hudInstruction.textContent = message;
+      hudRecStatusText.textContent = 'SYNC';
     }
     if (announce && hudLiveAlert && message) {
       hudLiveAlert.textContent = message;
     }
-  }
-
-  function resetClickBeads(count = 4) {
-    clearHudSyncFeedback();
-    renderHudSyncBeads(count);
   }
 
   // High-precision transient peak finder with support for claimed beat exclusion
@@ -4697,13 +4734,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     stopLiveMetronome();
     clearActiveSyncTimers();
     clearHudSyncFeedback();
+    clearHudTrianglesImmediate();
     if (recDiagCleanupTrackListeners) {
       try { recDiagCleanupTrackListeners(); } catch (_) {}
       recDiagCleanupTrackListeners = null;
-    }
-    if (hudLatencyText) {
-      hudLatencyText.textContent = '';
-      hudLatencyText.style.display = 'none';
     }
     if (hudTimerIntervalId) {
       clearInterval(hudTimerIntervalId);
@@ -4932,15 +4966,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     pass2DownbeatScheduledTime = null;
     recordingState = (mode === 'synth') ? 'sync_preroll' : 'recording_take';
 
-    const beadEls = resetClickBeads(numBeats);
-    if (hudClickBeads) {
-      hudClickBeads.classList.remove('hidden');
-      hudClickBeads.style.display = 'flex';
-    }
-    if (hudLatencyText) {
-      hudLatencyText.textContent = '';
-      hudLatencyText.style.display = 'none';
-    }
+    if (hudRecStatusText) hudRecStatusText.textContent = 'SYNC';
+    if (hudTimer) hudTimer.textContent = '00:00.0';
+    initHudPreSyncTriangles(firstBeat - 1);
 
     const session = {
       mode,
@@ -4958,6 +4986,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       refTimelineSec,
       guideMissingError,
       liveTapMatched: new Array(numBeats).fill(false),
+      syncSlotStates: new Array(numBeats).fill('pending'), // 'pending' | 'detected' | 'missed'
+      syncSlotEls: new Array(numBeats).fill(null),
       liveTapTimesSec: [],
       warnedMissedBeat: false,
       earlyVerifiedResult: null,
@@ -4974,20 +5004,47 @@ document.addEventListener('DOMContentLoaded', async () => {
       return tid;
     };
 
-    const markBeadMatched = (beatIdx) => {
-      session.liveTapMatched[beatIdx] = true;
-      const bEl = beadEls[beatIdx];
-      if (bEl) {
-        bEl.className = 'click-bead active';
-        bEl.textContent = String(beatIdx + 1);
-      }
-    };
+    const recordSyncBeatVisual = (beatIdx, status) => {
+      if (beatIdx < 0 || beatIdx >= numBeats) return;
+      clearHudPreSyncResidue();
 
-    const markBeadMissed = (beatIdx) => {
-      const bEl = beadEls[beatIdx];
-      if (bEl && !session.liveTapMatched[beatIdx]) {
-        bEl.className = 'click-bead missed';
-        bEl.textContent = '!';
+      // Ensure any earlier pending sync beats (0 .. beatIdx - 1) are placed in their rightful slots as missed (red)
+      for (let j = 0; j < beatIdx; j++) {
+        if (session.syncSlotStates[j] === 'pending') {
+          session.syncSlotStates[j] = 'missed';
+          if (hudSyncTriangles) {
+            const missEl = createHudTriangleElement('red', 'sync');
+            missEl.dataset.syncSlot = String(j);
+            hudSyncTriangles.appendChild(missEl);
+            session.syncSlotEls[j] = missEl;
+          }
+        }
+      }
+
+      if (status === 'detected') {
+        session.liveTapMatched[beatIdx] = true;
+      }
+
+      const prevState = session.syncSlotStates[beatIdx];
+      if (prevState === 'pending') {
+        session.syncSlotStates[beatIdx] = status;
+        if (hudSyncTriangles) {
+          const triEl = createHudTriangleElement(status === 'detected' ? 'green' : 'red', 'sync');
+          triEl.dataset.syncSlot = String(beatIdx);
+          hudSyncTriangles.appendChild(triEl);
+          session.syncSlotEls[beatIdx] = triEl;
+          enforceHudSyncTriangleCap();
+        }
+      } else if (prevState === 'missed' && status === 'detected') {
+        session.syncSlotStates[beatIdx] = 'detected';
+        if (session.syncSlotEls[beatIdx]) {
+          setHudTriangleKind(session.syncSlotEls[beatIdx], 'green');
+        }
+      } else if (prevState === 'detected' && status === 'missed' && !session.liveTapMatched[beatIdx]) {
+        session.syncSlotStates[beatIdx] = 'missed';
+        if (session.syncSlotEls[beatIdx]) {
+          setHudTriangleKind(session.syncSlotEls[beatIdx], 'red');
+        }
       }
     };
 
@@ -5007,7 +5064,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         pass2ClickEvents.push({ ctxTime: now, samplePos });
         session.liveTapTimesSec.push(secInBuf);
 
-        // Match transient to nearest unmatched sync beat within generous hardware-latency window
+        // Match transient in realtime to nearest unmatched sync beat within hardware-latency window
         let bestK = -1;
         let bestDist = Infinity;
         for (let k = 0; k < numBeats; k++) {
@@ -5016,7 +5073,6 @@ document.addEventListener('DOMContentLoaded', async () => {
           const minK = expK - 0.42 * dt;
           const maxK = expK + 0.68 * dt + 0.25;
           if (secInBuf >= minK && secInBuf <= maxK) {
-            // Bias slightly toward causal (+latency) arrival after the beat
             const delta = secInBuf - expK;
             const dist = Math.abs(delta - 0.06);
             if (dist < bestDist) {
@@ -5026,7 +5082,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
         if (bestK >= 0) {
-          markBeadMatched(bestK);
+          recordSyncBeatVisual(bestK, 'detected');
         }
         recDiag('REC_NANODAW_SYNC_LIVE_TAP', {
           mode,
@@ -5054,12 +5110,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           : ((firstBeat - 1) + k) * dt;
       }
 
-      if (hudRecStatusText) hudRecStatusText.textContent = 'TRACK SYNC';
-      if (hudInstruction) {
-        hudInstruction.textContent = firstBeat > 1
-          ? `Sync with "${guideName}": wait beats 1–${firstBeat - 1}, tap beats ${firstBeat}–${firstBeat + numBeats - 1}...`
-          : `Sync with "${guideName}": tap beats 1–${numBeats} now!`;
-      }
+      if (hudRecStatusText) hudRecStatusText.textContent = 'SYNC';
 
       if (Math.abs((audio.playheadPosition || 0) - recordingStartPlayhead) > 0.001) {
         audio.seek(recordingStartPlayhead);
@@ -5090,7 +5141,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } else {
       // Option 2: Metronome Synth Beats (Just-In-Time Metronome, single-pass, no guide track required)
-      const beat1CtxTime = nowAfterAttach + 0.12;
+      const beat1CtxTime = nowAfterAttach + 0.35; // Brief lead-in so initial (F - 1) green triangles are visible before Beat 1
       const downbeatCtxTime = beat1CtxTime + preTakeBeats * dt; // Beat F + N downbeat!
       session.beat1CtxTime = beat1CtxTime;
       session.downbeatCtxTime = downbeatCtxTime;
@@ -5119,17 +5170,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         audio.play(downbeatCtxTime);
       }
 
-      if (hudRecStatusText) {
-        hudRecStatusText.textContent = firstBeat > 1 ? 'SYNC COUNT-IN' : 'TAP SYNC BEATS';
-      }
-      if (hudTimer) {
-        hudTimer.textContent = `Beat 1/${preTakeBeats}`;
-      }
-      if (hudInstruction) {
-        hudInstruction.textContent = firstBeat > 1
-          ? `Listen beats 1–${firstBeat - 1} (${tempo} BPM), tap beats ${firstBeat}–${preTakeBeats}...`
-          : `Tap along on beats 1–${numBeats} (${tempo} BPM)!`;
-      }
+      if (hudRecStatusText) hudRecStatusText.textContent = 'SYNC';
+      if (hudTimer) hudTimer.textContent = '00:00.0';
 
       recDiag('REC_NANODAW_SYNC_BEGIN', {
         mode: 'synth',
@@ -5147,29 +5189,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         forcePersist: true
       });
 
-      // Count-in beat HUD updates prior to First Beat to Sync (beats 1 .. F - 1)
-      for (let b = 0; b < firstBeat - 1; b++) {
-        const beatCtx = beat1CtxTime + b * dt;
-        const delayMs = (beatCtx - (recAudioCtx ? recAudioCtx.currentTime : nowAfterAttach)) * 1000;
-        scheduleSessionTimer(() => {
-          if (hudTimer && recordingState === 'sync_preroll') {
-            hudTimer.textContent = `Beat ${b + 1}/${preTakeBeats}`;
-          }
-          if (!session.warnedMissedBeat && hudInstruction) {
-            hudInstruction.textContent = `Count-in beat ${b + 1} of ${firstBeat - 1} — tap on beats ${firstBeat}–${preTakeBeats}`;
-          }
-        }, delayMs);
-      }
-
       // Transition to live take recording on the downbeat of Beat F + N!
       const downbeatDelayMs = (downbeatCtxTime - (recAudioCtx ? recAudioCtx.currentTime : nowAfterAttach)) * 1000;
       scheduleSessionTimer(() => {
         recordingState = 'recording_take';
         takeStartTime = performance.now();
         startHudTimer();
-        if (!session.warnedMissedBeat) {
-          if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
-          if (hudInstruction) hudInstruction.textContent = `Beat ${preTakeBeats + 1} downbeat — recording take!`;
+        if (!session.warnedMissedBeat && hudRecStatusText) {
+          hudRecStatusText.textContent = 'REC';
         }
         recDiag('REC_SYNTH_SYNC_TAKE_DOWNBEAT', {
           takeStartBeat: preTakeBeats + 1,
@@ -5182,52 +5209,57 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     startRecordingWatchdog();
 
-    // --- Unified Sync Beat Cues & Per-Beat Early Missed-Peak Warnings (shared by BOTH modes) ---
+    // --- Unified Pre-Sync Countdown (3.a & 3.b): (F - 1) green triangles, disappearing 1 per beat from the right down to 0 ---
     const refNowCtx = recAudioCtx ? recAudioCtx.currentTime : nowAfterAttach;
+    const firstSyncStreamTime = session.streamStartTime + (session.expSyncBufferSec[0] || ((firstBeat - 1) * dt));
+    for (let b = 0; b < firstBeat - 1; b++) {
+      const preSyncBeatStreamTime = firstSyncStreamTime - ((firstBeat - 1) - b) * dt;
+      const rawPreDelayMs = (preSyncBeatStreamTime - refNowCtx) * 1000;
+      // When Beat 1 is at t=0 in Track Sync mode, keep a brief 160ms visual beat so the initial count is seen before Beat 1 pops it
+      const preDelayMs = (b === 0 && rawPreDelayMs < 160) ? Math.min(160, Math.max(40, dt * 280)) : rawPreDelayMs;
+      const remainingAfterBeat = (firstBeat - 1) - (b + 1);
+      scheduleSessionTimer(() => {
+        syncHudPreSyncRemaining(remainingAfterBeat);
+      }, preDelayMs);
+    }
+
+    // --- Unified Sync Beat Cues & Realtime Green/Red Triangles (3.c) ---
     for (let k = 0; k < numBeats; k++) {
       const beatNumber = firstBeat + k;
       const beatStreamTime = session.streamStartTime + session.expSyncBufferSec[k];
       const cueDelayMs = (beatStreamTime - refNowCtx) * 1000;
 
       scheduleSessionTimer(() => {
-        if (mode === 'synth' && recordingState === 'sync_preroll' && hudTimer) {
-          hudTimer.textContent = `Sync ${k + 1}/${numBeats}`;
-        }
-        if (!session.warnedMissedBeat) {
-          if (hudRecStatusText && mode === 'synth') hudRecStatusText.textContent = 'TAP SYNC BEATS';
-          if (hudInstruction) {
-            hudInstruction.textContent = `Tap sync beat ${k + 1} of ${numBeats}! (Beat ${beatNumber})`;
+        clearHudPreSyncResidue();
+        // Ensure any still-pending earlier beat (< k) is marked missed before beat k begins
+        for (let j = 0; j < k; j++) {
+          if (session.syncSlotStates[j] === 'pending') {
+            recordSyncBeatVisual(j, 'missed');
           }
-        }
-        const bEl = beadEls[k];
-        if (bEl && !session.liveTapMatched[k]) {
-          bEl.classList.add('beep');
-          scheduleSessionTimer(() => {
-            if (bEl && !session.liveTapMatched[k] && !bEl.classList.contains('missed')) {
-              bEl.classList.remove('beep');
-            }
-          }, dt * 450);
         }
       }, cueDelayMs);
 
-      // Per-beat early warning check right after beat k's arrival + roundtrip latency window
-      const missWindowSec = Math.min(0.88 * dt, 0.52 * dt + 0.24);
-      const flushBeforeCheckMs = Math.max(0, ((beatStreamTime + missWindowSec) - refNowCtx) * 1000 - 25);
+      // On-cue missed-beat check right after beat k's reaction + roundtrip window (so red triangle lands in rhythm)
+      const onCueMissSec = Math.min(0.46 * dt, 0.24);
+      const flushBeforeCheckMs = Math.max(0, ((beatStreamTime + onCueMissSec) - refNowCtx) * 1000 - 25);
       scheduleSessionTimer(() => {
         if (!session.liveTapMatched[k] && recWorkletNode) {
           try { recWorkletNode.port.postMessage({ type: 'flush' }); } catch (_) {}
         }
       }, flushBeforeCheckMs);
 
-      const missCheckDelayMs = ((beatStreamTime + missWindowSec) - refNowCtx) * 1000;
+      const missCheckDelayMs = ((beatStreamTime + onCueMissSec) - refNowCtx) * 1000;
       scheduleSessionTimer(() => {
-        if (session.guideMissingError) return;
+        if (session.guideMissingError) {
+          recordSyncBeatVisual(k, 'missed');
+          return;
+        }
         if (!session.liveTapMatched[k]) {
-          // Double-check the actual captured PCM slice around beat k before warning (avoids false alarms)
+          // Verify against captured raw PCM slice around beat k before showing red missed triangle
           const sr = recAudioCtx ? recAudioCtx.sampleRate : 44100;
           const expK = session.expSyncBufferSec[k];
           const s0 = Math.max(0, Math.round((expK - 0.38 * dt) * sr));
-          const s1 = Math.min(pass2AudioStore.totalSamples, Math.round((expK + 0.65 * dt + 0.24) * sr));
+          const s1 = Math.min(pass2AudioStore.totalSamples, Math.round((expK + onCueMissSec + 0.04) * sr));
           if (s1 > s0 + 32) {
             const subL = pass2AudioStore.toFlatArray(s0, s1);
             const isSt = (activeRecordingChannelConfig && activeRecordingChannelConfig.mode === 'stereo' && pass2AudioStoreR.totalSamples >= s1);
@@ -5235,14 +5267,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             const minPk = Math.max(0.006, getPeakThresholdLinear() * 0.60);
             const pk = findTransientPeak(subPCM, 0, subPCM.length);
             if (pk.found && pk.peakAbs >= minPk && pk.crest >= 1.75) {
-              markBeadMatched(k);
+              recordSyncBeatVisual(k, 'detected');
               return;
             }
           }
 
-          markBeadMissed(k);
+          recordSyncBeatVisual(k, 'missed');
           const heardSoFar = session.liveTapMatched.slice(0, k + 1).filter(Boolean).length;
-          const warnMsg = `⚠️ Missed peak on beat ${beatNumber} (${heardSoFar}/${k + 1} heard) — Stop to retry!`;
+          const warnMsg = `Missed sync tap on beat ${beatNumber} (${heardSoFar} of ${k + 1} detected).`;
           const firstWarning = !session.warnedMissedBeat;
           session.warnedMissedBeat = true;
           setHudSyncWarning(warnMsg, firstWarning);
@@ -5262,7 +5294,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // --- Authoritative Post-Sync-Window Verification on Raw Captured PCM ---
     const lastSyncStreamSec = session.streamStartTime + (session.expSyncBufferSec[numBeats - 1] || ((preTakeBeats - 1) * dt));
-    const postVerifyWaitSec = Math.max(0.40, 0.68 * dt + 0.22);
+    const postVerifyWaitSec = Math.max(0.38, 0.65 * dt + 0.20);
     const verifyFlushDelayMs = Math.max(0, ((lastSyncStreamSec + postVerifyWaitSec) - refNowCtx) * 1000 - 30);
     scheduleSessionTimer(() => {
       if (recWorkletNode) {
@@ -5300,21 +5332,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
         session.warnedMissedBeat = false;
         for (let k = 0; k < numBeats; k++) {
-          markBeadMatched(k);
+          recordSyncBeatVisual(k, 'detected');
         }
         clearHudSyncFeedback();
         if (recordingHUD) recordingHUD.classList.add('sync-locked');
-        if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
-        if (hudInstruction) hudInstruction.textContent = `✓ Sync locked (${numBeats}/${numBeats})! Sing or play along...`;
-        if (hudLatencyText) {
-          hudLatencyText.textContent = `Est. Latency: ${estLatMs >= 0 ? '+' : ''}${estLatMs}ms`;
-          hudLatencyText.style.display = 'block';
+        if (hudRecStatusText && recordingState === 'recording_take') {
+          hudRecStatusText.textContent = 'REC';
         }
         scheduleSessionTimer(() => {
           if (recordingHUD) recordingHUD.classList.remove('sync-locked');
-          if (hudClickBeads) {
-            hudClickBeads.classList.add('hidden');
-            hudClickBeads.style.display = 'none';
+          if (hudRecStatusText && !session.warnedMissedBeat) {
+            hudRecStatusText.textContent = 'REC';
           }
         }, 1400);
         recDiag('REC_SYNC_EARLY_VERIFY_LOCKED', {
@@ -5326,7 +5354,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }, { forcePersist: true });
       } else {
         const foundCount = res.peaksSec.length;
-        const failMsg = `⚠️ Sync missed (${foundCount}/${numBeats} peaks detected) — Stop & retry!`;
+        const failMsg = `Sync incomplete: ${foundCount} of ${numBeats} peaks detected.`;
         session.earlyVerifiedResult = {
           ok: false,
           foundCount,
@@ -5335,11 +5363,16 @@ document.addEventListener('DOMContentLoaded', async () => {
           reason: failMsg
         };
         for (let k = 0; k < numBeats; k++) {
-          if (!session.liveTapMatched[k]) markBeadMissed(k);
+          if (!session.liveTapMatched[k]) {
+            recordSyncBeatVisual(k, 'missed');
+          }
         }
+        const firstWarn = !session.warnedMissedBeat;
         session.warnedMissedBeat = true;
-        setHudSyncWarning(failMsg, true);
-        showToast(`⚠️ Sync incomplete: only ${foundCount} of ${numBeats} tap peaks detected! Stop now to retry.`, 'warning', 8000);
+        setHudSyncWarning(failMsg, firstWarn);
+        if (firstWarn) {
+          showToast(`⚠️ Sync incomplete: only ${foundCount} of ${numBeats} tap peaks detected! Stop now to retry.`, 'warning', 8000);
+        }
         recDiag('REC_SYNC_EARLY_VERIFY_FAILED', {
           mode,
           foundCount,
@@ -5570,14 +5603,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     totalPass2Samples = 0;
     pass2StreamStartTime = recAudioCtx ? recAudioCtx.currentTime : null;
     recordingState = 'pass2_prelude';
-    const beadEls = resetClickBeads(4);
 
-    if (hudRecStatusText) hudRecStatusText.textContent = 'COUNT-IN (4 BEATS)';
-    if (hudInstruction) hudInstruction.textContent = `Count-in at ${tempo} BPM...`;
-    if (hudClickBeads) {
-      hudClickBeads.classList.remove('hidden');
-      hudClickBeads.style.display = 'flex';
-    }
+    if (hudRecStatusText) hudRecStatusText.textContent = 'REC';
+    if (hudTimer) hudTimer.textContent = '00:00.0';
+    initHudPreSyncTriangles(4);
 
     await attachRecordingPipeline({
       detectTransients: false,
@@ -5590,7 +5619,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     startRecordingWatchdog();
 
-    const startPreludeTime = recAudioCtx.currentTime + 0.15;
+    const startPreludeTime = recAudioCtx.currentTime + 0.35;
     recDiag('REC_STD_PRELUDE_START', {
       tempoBpm: tempo,
       dtSec: Number(dt.toFixed(4)),
@@ -5605,14 +5634,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       playSynthBeep(beatTime, i === 3 ? 1800 : 900, 0.08);
 
       const delayMs = Math.max(0, (beatTime - recAudioCtx.currentTime) * 1000);
+      const remaining = 4 - (i + 1);
       setTimeout(() => {
         if (recordingState !== 'pass2_prelude') return;
-        if (hudInstruction) hudInstruction.textContent = `Beep ${i + 1} of 4`;
-        const bead = beadEls[i];
-        if (bead) {
-          bead.className = 'click-bead beep';
-          setTimeout(() => { if (bead) bead.className = 'click-bead'; }, dt * 450);
-        }
+        syncHudPreSyncRemaining(remaining);
       }, delayMs);
     }
 
@@ -5637,6 +5662,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => {
       if (recordingState !== 'pass2_prelude') return;
       recordingState = 'recording_take';
+      clearHudPreSyncResidue();
       recDiag('REC_TAKE_LIVE_DOWNBEAT', {
         mode: 'no_sync',
         ctxTime: recAudioCtx ? Number(recAudioCtx.currentTime.toFixed(4)) : null,
@@ -5646,12 +5672,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_TAKE_START : undefined,
         forcePersist: true
       });
-      if (hudRecStatusText) hudRecStatusText.textContent = 'RECORDING TAKE';
-      if (hudInstruction) hudInstruction.textContent = 'Recording live to new track...';
-      if (hudClickBeads) {
-        hudClickBeads.classList.add('hidden');
-        hudClickBeads.style.display = 'none';
-      }
+      if (hudRecStatusText) hudRecStatusText.textContent = 'REC';
       takeStartTime = performance.now();
       startHudTimer();
 
@@ -5766,7 +5787,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (scheduledDownbeatTime && streamStartTime && scheduledDownbeatTime > streamStartTime) {
         projectedDownbeatSample = Math.round((scheduledDownbeatTime - streamStartTime + sysLatency) * sampleRate);
       } else {
-        projectedDownbeatSample = Math.round((0.150 + 4 * dt + sysLatency) * sampleRate);
+        projectedDownbeatSample = Math.round((0.35 + 4 * dt + sysLatency) * sampleRate);
       }
 
       const trimSamples = Math.max(0, projectedDownbeatSample);
@@ -5881,7 +5902,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       ? (refTimelineSec.length > 0 ? Math.max(0, refTimelineSec[0] - recordingStartPlayhead) : ((firstBeat - 1) * dt))
       : (syncSession.expSyncBufferSec && syncSession.expSyncBufferSec.length > 0
           ? syncSession.expSyncBufferSec[0]
-          : (0.12 + (firstBeat - 1) * dt));
+          : (0.35 + (firstBeat - 1) * dt));
 
     // Combine stereo channels via max-signed-amplitude so tapping into EITHER mic triggers peak lock,
     // and bound the sync search slice to the sync window so later musical transients never interfere.
@@ -5936,7 +5957,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const sysLatency = (recAudioCtx?.baseLatency || 0.010) + (recAudioCtx?.outputLatency || 0.040);
         const nominalDownbeatSec = (syncSession.downbeatCtxTime && syncSession.streamStartTime !== null)
           ? Math.max(0, (syncSession.downbeatCtxTime - syncSession.streamStartTime) + sysLatency)
-          : ((0.12 + preTakeBeats * dt) + sysLatency);
+          : ((0.35 + preTakeBeats * dt) + sysLatency);
         const fbTrim = Math.min(fullRawL.length, Math.max(0, Math.round(nominalDownbeatSec * sampleRate)));
         if (fullRawL.length <= fbTrim + Math.round(0.05 * sampleRate)) {
           showToast(`Sync missed (${takePeaksSec.length}/${numBeats}) and no audio recorded after beat ${preTakeBeats + 1}.`, 'warning', 5500);
@@ -6240,17 +6261,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         recordSetupModal.style.display = 'none';
       }
 
-      // 4. Immediate visual feedback: Show recording HUD with "INIT" status & expand Stop button right away!
+      // 4. Immediate visual feedback: Show recording HUD with SYNC/REC badge, initial (F - 1) green triangles & wide Stop button!
       setTransportRecordingUI(true);
       if (recordingHUD) {
         recordingHUD.classList.remove('hidden');
         recordingHUD.style.display = 'flex';
       }
-      if (hudRecStatusText) hudRecStatusText.textContent = 'INIT';
-      if (hudInstruction) hudInstruction.textContent = '⏳ Initializing recording...';
-      if (hudClickBeads) {
-        hudClickBeads.classList.add('hidden');
-        hudClickBeads.style.display = 'none';
+      const isSyncEnabled = record2PassSync ? record2PassSync.checked : true;
+      if (hudRecStatusText) {
+        hudRecStatusText.textContent = isSyncEnabled ? 'SYNC' : 'REC';
+      }
+      if (hudTimer) {
+        hudTimer.textContent = '00:00.0';
+      }
+      if (isSyncEnabled) {
+        const fInit = Math.max(1, Math.min(64, parseInt(syncTrackFirstBeat?.value, 10) || 5));
+        initHudPreSyncTriangles(fInit - 1);
+      } else {
+        initHudPreSyncTriangles(4);
       }
 
       // 5. Kick off recording flow
@@ -6266,11 +6294,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         audio.isRecordingMode = false;
         audio.setPlaybackAudioSession();
       }
-    });
-  }
-  if (btnStopRecordingAction) {
-    btnStopRecordingAction.addEventListener('click', () => {
-      stopRecording();
     });
   }
 

@@ -2284,81 +2284,101 @@ body.is-middle-panning * {
 
 .hud-timer {
   font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   font-weight: 600;
   color: #fff;
+  min-width: 54px;
   flex-shrink: 0;
 }
 
-.hud-center {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  flex: 1 1 auto;
-  min-width: 0; /* Critical: prevents text from forcing parent width beyond screen */
-  overflow: hidden;
-  text-align: center;
-  padding: 0 4px;
-}
-
-.hud-instruction {
-  font-size: 11px;
-  color: var(--text-primary);
-  font-weight: 500;
-  width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: center;
-}
-
-.click-beads-wrap {
+/* Horizontal upside-down sync triangles after the time display (consistent with VU meter triangles) */
+.hud-triangles-strip {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
-  flex-shrink: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 16px;
+  padding: 0 4px;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-.click-bead {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: var(--text-muted);
-  font-size: 9.5px;
-  font-weight: 700;
-  display: flex;
+.hud-sync-tri {
+  width: 12px;
+  height: 10px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s ease;
   flex-shrink: 0;
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+  transition:
+    opacity 0.14s ease-out,
+    scale 0.14s cubic-bezier(0.22, 1, 0.36, 1),
+    translate 0.14s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.click-bead.active {
-  background: #10b981;
-  border-color: #34d399;
-  color: #fff;
-  box-shadow: 0 0 10px rgba(52, 211, 153, 0.8);
-  transform: scale(1.15);
+.hud-sync-tri svg {
+  display: block;
+  width: 12px;
+  height: 10px;
 }
 
-.click-bead.beep {
-  background: var(--accent-cyan);
-  border-color: #67e8f9;
-  color: #000;
-  box-shadow: 0 0 10px rgba(103, 232, 249, 0.8);
-  transform: scale(1.15);
+.hud-sync-tri.tri-green {
+  color: #4ade80;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85)) drop-shadow(0 0 3px rgba(74, 222, 128, 0.6));
+}
+
+.hud-sync-tri.tri-red {
+  color: #ef4444;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85)) drop-shadow(0 0 3.5px rgba(239, 68, 68, 0.75));
+}
+
+@starting-style {
+  .hud-sync-tri[data-phase="sync"] {
+    opacity: 0;
+    scale: 0.72;
+    translate: 0 -4px;
+  }
+}
+
+.hud-sync-tri[data-closing] {
+  opacity: 0;
+  scale: 0.65;
+  translate: 0 -3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-sync-tri {
+    scale: 1;
+    translate: none;
+    transition: opacity 0.1s linear;
+  }
+
+  @starting-style {
+    .hud-sync-tri[data-phase="sync"] {
+      scale: 1;
+      translate: none;
+    }
+  }
+
+  .hud-sync-tri[data-closing] {
+    scale: 1;
+    translate: none;
+  }
 }
 
 .hud-right {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  margin-left: auto;
   gap: 5px;
-  flex-shrink: 0; /* CRITICAL: Never shrink Stop & Save button or push off screen */
+  flex-shrink: 0;
 }
 
 .btn-modal-log {
@@ -2381,29 +2401,6 @@ body.is-middle-panning * {
   flex-shrink: 0;
 }
 
-.btn-stop-rec {
-  background: #ef4444;
-  border: 1px solid #dc2626;
-  color: #fff;
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
-  white-space: nowrap;
-  box-shadow: 0 0 12px rgba(239, 68, 68, 0.45);
-}
-
-.btn-stop-rec:hover {
-  background: #dc2626;
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.7);
-}
-
 @media (max-width: 480px) {
   .recording-hud {
     top: max(6px, calc(env(safe-area-inset-top, 0px) + 6px));
@@ -2417,32 +2414,15 @@ body.is-middle-panning * {
   }
   .hud-timer {
     font-size: 12px;
+    min-width: 49px;
   }
-  .hud-instruction {
-    font-size: 10px;
+  .hud-triangles-strip {
+    gap: 5px;
   }
-  .click-bead {
-    width: 16px;
-    height: 16px;
-    font-size: 8.5px;
-  }
-  .click-beads-wrap {
-    gap: 4px;
-  }
-  .btn-stop-rec {
-    padding: 5px 8px;
-    font-size: 11px;
-    gap: 4px;
-  }
-}
-
-@media (max-width: 360px) {
-  .hud-rec-badge span#hudRecStatusText {
-    display: none; /* Just show the pulsing red dot on ultra-narrow screens */
-  }
-  .btn-stop-rec {
-    font-size: 10.5px;
-    padding: 5px 6px;
+  .hud-sync-tri,
+  .hud-sync-tri svg {
+    width: 11px;
+    height: 9px;
   }
 }
 
@@ -2576,33 +2556,10 @@ dialog::backdrop {
   gap: 9px;
 }
 
-/* Dynamic N-beat HUD beads & Early Missed-Peak Warning states */
-.click-beads-wrap {
-  flex-wrap: wrap;
-  max-width: 260px;
-}
-
-.click-beads-wrap[data-compact="true"] {
-  gap: 3px;
-}
-
-.click-beads-wrap[data-compact="true"] .click-bead {
-  width: 14px;
-  height: 14px;
-  font-size: 8px;
-}
-
-.click-bead.missed {
-  background: rgba(245, 158, 11, 0.24);
-  border-color: #f59e0b;
-  color: #fde68a;
-  box-shadow: 0 0 9px rgba(245, 158, 11, 0.75);
-  transform: scale(1.1);
-}
-
+/* HUD Early Missed-Peak Warning & Sync-Locked states */
 .recording-hud.sync-warning {
-  border-color: rgba(245, 158, 11, 0.92);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75), 0 0 22px rgba(245, 158, 11, 0.45);
+  border-color: rgba(239, 68, 68, 0.92);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75), 0 0 22px rgba(239, 68, 68, 0.45);
 }
 
 .recording-hud.sync-warning .hud-rec-badge {
@@ -2615,19 +2572,9 @@ dialog::backdrop {
   background: #f59e0b;
 }
 
-.recording-hud.sync-warning .hud-instruction {
-  color: #fde68a;
-  font-weight: 600;
-}
-
 .recording-hud.sync-locked {
   border-color: rgba(16, 185, 129, 0.75);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7), 0 0 18px rgba(16, 185, 129, 0.35);
-}
-
-.recording-hud.sync-locked .hud-instruction {
-  color: #6ee7b7;
-  font-weight: 600;
 }
 
 
