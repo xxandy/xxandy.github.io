@@ -1648,15 +1648,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=81', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=82', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=81');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=82');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=81');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=82');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -4241,7 +4241,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Maximum number of upside-down HUD sync triangles displayed horizontally (easy to adjust as HUD space evolves)
-  const MAX_HUD_SYNC_TRIANGLES = 8;
+  const MAX_HUD_SYNC_TRIANGLES = 12;
 
   function createHudTriangleElement(kind = 'green', phase = 'sync') {
     const span = document.createElement('span');

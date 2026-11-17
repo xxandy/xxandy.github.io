@@ -2417,12 +2417,32 @@ body.is-middle-panning * {
     min-width: 49px;
   }
   .hud-triangles-strip {
-    gap: 5px;
+    gap: 4px;
+    padding: 0 2px;
   }
   .hud-sync-tri,
   .hud-sync-tri svg {
-    width: 11px;
-    height: 9px;
+    width: 10px;
+    height: 8.5px;
+  }
+}
+
+@media (max-width: 359px) {
+  .recording-hud {
+    padding: 5px 6px;
+    gap: 4px;
+  }
+  .hud-left {
+    gap: 5px;
+  }
+  .hud-triangles-strip {
+    gap: 2.5px;
+    padding: 0 1px;
+  }
+  .hud-sync-tri,
+  .hud-sync-tri svg {
+    width: 9px;
+    height: 7.5px;
   }
 }
 
