@@ -136,6 +136,7 @@ class AudioEngine {
     this.loopEnd = 0;
 
     this.rafId = null;
+    this.drainTimerId = null;
     this.eventListeners = new Map();
     this.activeSources = new Set();
     this.playbackEpoch = 0;
@@ -210,6 +211,77 @@ class AudioEngine {
     }
   }
 
+  cancelPendingDrain() {
+    if (this.drainTimerId) {
+      clearTimeout(this.drainTimerId);
+      this.drainTimerId = null;
+    }
+  }
+
+  /**
+   * Estimate current system + Bluetooth output pipeline latency in seconds using Web Audio APIs.
+   * Used to keep the visible playhead aligned closer to audible output and to size buffer drain windows.
+   */
+  getEstimatedOutputLatencySec() {
+    const ctx = this.audioCtx;
+    if (!ctx) return 0;
+    let renderAheadSec = 0;
+    if (typeof ctx.getOutputTimestamp === 'function') {
+      try {
+        const ts = ctx.getOutputTimestamp();
+        if (ts && typeof ts.contextTime === 'number' && ts.contextTime > 0 && typeof ts.performanceTime === 'number' && ts.performanceTime > 0) {
+          const nowPerf = performance.now();
+          const projectedCtxTime = ts.contextTime + Math.max(0, (nowPerf - ts.performanceTime) / 1000);
+          renderAheadSec = Math.max(0, Math.min(1.0, ctx.currentTime - projectedCtxTime));
+        }
+      } catch (_) {}
+    }
+    const baseLat = (typeof ctx.baseLatency === 'number' && Number.isFinite(ctx.baseLatency) && ctx.baseLatency > 0) ? ctx.baseLatency : 0;
+    const outLat = (typeof ctx.outputLatency === 'number' && Number.isFinite(ctx.outputLatency) && ctx.outputLatency > 0) ? ctx.outputLatency : 0;
+    const totalLat = outLat + Math.max(baseLat, renderAheadSec);
+    return Math.max(0, Math.min(1.2, totalLat));
+  }
+
+  /**
+   * Exact Web Audio render-head position (ahead of audible output by output latency).
+   * Used internally for chunk lookahead scheduling so audio buffers never underrun.
+   */
+  getRenderPlayheadPosition() {
+    if (this.isPlaying && this.audioCtx) {
+      const elapsed = Math.max(0, this.audioCtx.currentTime - this.playbackStartTime);
+      return this.playbackStartOffset + elapsed;
+    }
+    return this.playheadPosition;
+  }
+
+  /**
+   * Stabilize WebKit / iOS CoreAudio WebAudio output volume after getUserMedia() configures or reconfigures
+   * AVAudioSessionCategoryPlayAndRecord (prevents WebKit Bug 218012 / 243897 attenuated Bluetooth playback).
+   */
+  async stabilizeOutputAfterCaptureInit() {
+    const ctx = this.getOrCreateAudioContext();
+    if (!ctx || this.isPlaying) return;
+    this.setPlayAndRecordAudioSession();
+    try {
+      if (ctx.state === 'running') {
+        await ctx.suspend();
+      }
+      if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+        await ctx.resume();
+      }
+    } catch (_) {}
+    if (this.masterGain) {
+      try {
+        this.masterGain.gain.cancelScheduledValues(0);
+        this.masterGain.gain.value = this.masterVolume;
+        if (ctx.state === 'running') {
+          this.masterGain.gain.setValueAtTime(this.masterVolume, ctx.currentTime);
+        }
+      } catch (_) {}
+    }
+    this.updateAllGains();
+  }
+
   initTouchUnlockListeners() {
     const unlockHandler = () => {
       if (this.isRecording || this.isRecordingMode) {
@@ -217,7 +289,11 @@ class AudioEngine {
       } else {
         this.setPlaybackAudioSession();
       }
-      this.ensureAudioContextUnlocked();
+      // Once the initial WebKit gesture unlock has succeeded, do NOT resume a stopped/suspended AudioContext
+      // on casual pointer/seek touches — prevents waking CoreAudio outside explicit play/record actions.
+      if (!this.silentBufferUnlocked || this.isPlaying || this.isRecording || this.isRecordingMode) {
+        this.ensureAudioContextUnlocked();
+      }
     };
 
     ['touchstart', 'touchend', 'pointerdown', 'mousedown', 'click', 'keydown'].forEach(evt => {
@@ -891,7 +967,7 @@ class AudioEngine {
 
         // If currently playing, seamlessly schedule this newly ready chunk only if within lookahead!
         if (this.isPlaying) {
-          const relTime = Math.max(0, this.playheadPosition - track.offset);
+          const relTime = Math.max(0, this.getRenderPlayheadPosition() - track.offset);
           const currentChunkIdx = this.getTrackChunkIndexAtTime(track, relTime);
           if (chunkIndex === currentChunkIdx || chunkIndex === currentChunkIdx + 1) {
             this.scheduleSingleChunk(track, chunk);
@@ -991,6 +1067,7 @@ class AudioEngine {
    * Start multitrack playback from current playhead position
    */
   play(when = null) {
+    this.cancelPendingDrain();
     this.setPlaybackAudioSession();
     this.ensureAudioContextUnlocked();
 
@@ -1001,11 +1078,12 @@ class AudioEngine {
       this.audioCtx.resume().catch(() => {});
     }
 
-    // Reconnect track audio nodes cleanly and restore master volume
+    // Reconnect track audio nodes cleanly and restore exact master volume (both direct property & AudioParam timeline)
     this.reconnectAllTrackNodes();
     if (this.masterGain) {
       try {
-        this.masterGain.gain.cancelScheduledValues(this.audioCtx.currentTime);
+        this.masterGain.gain.cancelScheduledValues(0);
+        this.masterGain.gain.value = this.masterVolume;
         this.masterGain.gain.setValueAtTime(this.masterVolume, this.audioCtx.currentTime);
       } catch (e) {}
     }
@@ -1046,7 +1124,7 @@ class AudioEngine {
 
     const chunkStart = track.offset + chunk.startTime;
     const chunkEnd = chunkStart + chunk.duration;
-    const currentPlayhead = this.playheadPosition;
+    const currentPlayhead = this.getRenderPlayheadPosition();
 
     if (currentPlayhead >= chunkEnd) return; // In the past
 
@@ -1063,6 +1141,7 @@ class AudioEngine {
 
       const audioNow = this.audioCtx.currentTime;
       const chunkAudioStartTime = this.playbackStartTime + (chunkStart - this.playbackStartOffset);
+      source._scheduledStartTime = chunkAudioStartTime;
 
       if (chunkAudioStartTime > audioNow) {
         // Scheduled in the future at the exact hardware timestamp
@@ -1139,8 +1218,11 @@ class AudioEngine {
 
           const audioRefTime = this.playbackStartTime;
           if (this.playheadPosition < offset) {
-            source.start(audioRefTime + (offset - this.playheadPosition), 0);
+            const startAt = audioRefTime + (offset - this.playheadPosition);
+            source._scheduledStartTime = startAt;
+            source.start(startAt, 0);
           } else {
+            source._scheduledStartTime = audioRefTime;
             source.start(audioRefTime, this.playheadPosition - offset);
           }
         }
@@ -1153,11 +1235,11 @@ class AudioEngine {
    */
   checkScheduleLookahead() {
     if (!this.isPlaying || !this.audioCtx) return;
-    const CHUNK_DURATION = 20.0;
+    const renderPos = this.getRenderPlayheadPosition();
 
     this.tracks.forEach(track => {
       if (!track || !track.chunks || !track.gainNode) return;
-      const relTime = Math.max(0, this.playheadPosition - track.offset);
+      const relTime = Math.max(0, renderPos - track.offset);
       const currentChunkIdx = this.getTrackChunkIndexAtTime(track, relTime);
 
       // Ensure current chunk is scheduled
@@ -1197,48 +1279,29 @@ class AudioEngine {
   }
 
   /**
-   * Complete hardware audio engine shutdown and voice reset without resetting playhead position
+   * Natural end-of-song stop: lets all already-enqueued OS / Bluetooth audio finish draining to speakers
+   * without chopping the tail or suspending AudioContext mid-drain (so zero buffered audio is trapped).
    */
-  stop() {
-    if (!this.isPlaying && (!this.audioCtx || this.audioCtx.state === 'suspended')) return;
+  finishPlaybackAtEnd(totalDur) {
+    if (!this.isPlaying) return;
+    this.cancelPendingDrain();
     this.isPlaying = false;
     this.playbackEpoch++;
     const currentEpoch = this.playbackEpoch;
 
-    // 1. Stop playhead tracker immediately so UI and timecode freeze on current position
     this.stopPlayheadTracker();
+    this.playheadPosition = totalDur;
+    this.state.setCurrentTime(totalDur);
+    this.emit('playback_stopped', { time: totalDur });
+    this.emit('time_update', { time: totalDur });
 
-    // 2. Preserve playhead position (do NOT reset to 0)
-    this.state.setCurrentTime(this.playheadPosition);
-    this.emit('playback_stopped', { time: this.playheadPosition });
-    this.emit('time_update', { time: this.playheadPosition });
+    // Keep AudioContext running (while finished sources naturally emit 0.0 silence) long enough for even
+    // unreported 400–600ms Bluetooth A2DP buffers to completely drain and flush with zeros before suspending!
+    const estLatSec = this.getEstimatedOutputLatencySec();
+    const drainMs = Math.round(Math.max(850, (estLatSec + 0.50) * 1000));
 
-    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
-      window.zoomProfiler.logEvent(window.PROFILER_STEP.AUDIO_PAUSE, {
-        opType: window.PROFILER_OP ? window.PROFILER_OP.TRANSPORT : 5,
-        extraData: Math.round(this.playheadPosition * 100)
-      });
-    }
-
-    // 3. Hardware-level smooth 20ms de-click ramp to zero so DAC never clicks
-    if (this.masterGain && this.audioCtx && this.audioCtx.state === 'running') {
-      try {
-        const now = this.audioCtx.currentTime;
-        this.masterGain.gain.cancelScheduledValues(now);
-        this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
-        this.masterGain.gain.linearRampToValueAtTime(0, now + 0.02);
-        // Schedule all playing sources to stop at now + 0.025 (when volume is already 0)
-        this.stopAllSources(now + 0.025);
-      } catch (e) {
-        this.stopAllSources(0);
-      }
-    } else {
-      this.stopAllSources(0);
-    }
-
-    // 4. Complete voice reset and suspend context after the 25ms de-click completes
-    setTimeout(() => {
-      // If user started playing again during the de-click fade, do NOT tear down!
+    this.drainTimerId = setTimeout(() => {
+      this.drainTimerId = null;
       if (this.isPlaying || this.playbackEpoch !== currentEpoch) return;
 
       this.stopAllSources(0);
@@ -1255,12 +1318,123 @@ class AudioEngine {
         }
       });
 
-      if (!this.isRecording && this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+      if (!this.isRecording && !this.isRecordingMode && this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
         try {
           this.audioCtx.suspend().catch(() => {});
         } catch (e) {}
       }
+    }, drainMs);
+  }
+
+  /**
+   * Manual Stop: immediately recalls all recallable future/active Web Audio sources, then keeps AudioContext
+   * pumping pure digital 0.0 silence until any un-recallable OS / Bluetooth output FIFO buffers fully drain.
+   * Guarantees zero leftover buffered audio can ever play unsolicited on a later seek or touch.
+   */
+  stop() {
+    if (!this.isPlaying && (!this.audioCtx || this.audioCtx.state === 'suspended')) return;
+    this.cancelPendingDrain();
+    this.isPlaying = false;
+    this.playbackEpoch++;
+    const currentEpoch = this.playbackEpoch;
+
+    // 1. Stop playhead tracker immediately so UI and timecode freeze on current audible position
+    this.stopPlayheadTracker();
+
+    // 2. Preserve playhead position (do NOT reset to 0)
+    this.state.setCurrentTime(this.playheadPosition);
+    this.emit('playback_stopped', { time: this.playheadPosition });
+    this.emit('time_update', { time: this.playheadPosition });
+
+    if (typeof window !== 'undefined' && window.zoomProfiler && window.zoomProfiler.logEvent && window.PROFILER_STEP) {
+      window.zoomProfiler.logEvent(window.PROFILER_STEP.AUDIO_PAUSE, {
+        opType: window.PROFILER_OP ? window.PROFILER_OP.TRANSPORT : 5,
+        extraData: Math.round(this.playheadPosition * 100)
+      });
+    }
+
+    // 3. Immediately recall any future scheduled lookahead sources before they emit a single sample,
+    //    and apply a fast 15ms anti-click ramp to 0 on currently-playing sources.
+    const estLatSec = this.getEstimatedOutputLatencySec();
+    if (this.masterGain && this.audioCtx && this.audioCtx.state === 'running') {
+      try {
+        const now = this.audioCtx.currentTime;
+        const recallFutureSource = (source) => {
+          if (source && typeof source._scheduledStartTime === 'number' && source._scheduledStartTime > now + 0.005) {
+            try {
+              source.onended = null;
+              source.stop(0);
+              source.disconnect();
+            } catch (_) {}
+            if (this.activeSources) this.activeSources.delete(source);
+            return true;
+          }
+          return false;
+        };
+        if (this.activeSources) {
+          for (const source of Array.from(this.activeSources)) {
+            recallFutureSource(source);
+          }
+        }
+        this.tracks.forEach(track => {
+          if (!track) return;
+          if (track.sourceNodes) {
+            for (const [idx, source] of Array.from(track.sourceNodes.entries())) {
+              if (recallFutureSource(source)) {
+                track.sourceNodes.delete(idx);
+              }
+            }
+          }
+          if (track.sourceNode && recallFutureSource(track.sourceNode)) {
+            track.sourceNode = null;
+          }
+        });
+        this.masterGain.gain.cancelScheduledValues(now);
+        this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
+        this.masterGain.gain.linearRampToValueAtTime(0, now + 0.015);
+        this.stopAllSources(now + 0.020);
+      } catch (e) {
+        this.stopAllSources(0);
+      }
+    } else {
+      this.stopAllSources(0);
+    }
+
+    // 4a. Disconnect all Web Audio source nodes right after the 20ms anti-click ramp so output is pure 0.0 silence
+    setTimeout(() => {
+      if (this.isPlaying || this.playbackEpoch !== currentEpoch) return;
+      this.stopAllSources(0);
+      if (this.masterGain) {
+        try { this.masterGain.gain.value = 0; } catch (_) {}
+      }
     }, 28);
+
+    // 4b. Keep AudioContext running pure digital silence until all un-recallable OS / Bluetooth FIFO buffers
+    //     have completely drained out to speakers, THEN disconnect idle track nodes and suspend AudioContext!
+    const drainMs = Math.round(Math.max(850, (estLatSec + 0.50) * 1000));
+    this.drainTimerId = setTimeout(() => {
+      this.drainTimerId = null;
+      if (this.isPlaying || this.playbackEpoch !== currentEpoch) return;
+
+      this.tracks.forEach(track => {
+        if (track) {
+          if (track.gainNode) {
+            try { track.gainNode.disconnect(); } catch (e) {}
+            track.gainNode = null;
+          }
+          if (track.analyserNode) {
+            try { track.analyserNode.disconnect(); } catch (e) {}
+            track.analyserNode = null;
+          }
+        }
+      });
+
+      if (!this.isRecording && !this.isRecordingMode && this.audioCtx && (this.audioCtx.state === 'running' || this.audioCtx.state === 'interrupted')) {
+        try {
+          this.audioCtx.suspend().catch(() => {});
+        } catch (e) {}
+      }
+    }, drainMs);
   }
 
   /**
@@ -1471,29 +1645,37 @@ class AudioEngine {
     const tick = () => {
       if (!this.isPlaying || !this.audioCtx) return;
 
-      const elapsed = Math.max(0, this.audioCtx.currentTime - this.playbackStartTime);
-      const currentPos = this.playbackStartOffset + elapsed;
-      this.playheadPosition = currentPos;
+      const rawElapsed = Math.max(0, this.audioCtx.currentTime - this.playbackStartTime);
+      const renderPos = this.playbackStartOffset + rawElapsed;
 
-      // Check loop / song end
+      // Offset visible playhead by system-reported output latency during normal playback so UI aligns closer to heard sound
+      const outputLatSec = this.isRecording ? 0 : this.getEstimatedOutputLatencySec();
+      const audibleElapsed = Math.max(0, rawElapsed - outputLatSec);
+      const audiblePos = this.playbackStartOffset + audibleElapsed;
+
       const totalDur = this.getTotalDuration();
       const endThreshold = this.isLooping ? this.loopEnd : totalDur;
 
-      if (currentPos >= endThreshold) {
-        if (this.isLooping) {
+      if (this.isLooping) {
+        if (renderPos >= endThreshold) {
           this.performSeamlessLoop();
-        } else {
-          this.playheadPosition = totalDur;
-          this.stop();
+          this.rafId = requestAnimationFrame(tick);
           return;
         }
+        this.playheadPosition = Math.min(endThreshold, audiblePos);
+      } else {
+        if (audiblePos >= endThreshold) {
+          this.finishPlaybackAtEnd(totalDur);
+          return;
+        }
+        this.playheadPosition = Math.min(totalDur, audiblePos);
       }
 
-      // Check lookahead scheduling
-      this.checkScheduleLookahead();
-
-      // Proactively prioritize decoding ahead of playhead
-      this.prioritizeSeek(this.playheadPosition + 15.0);
+      // Check lookahead scheduling using the Web Audio render head (only while renderPos is still inside project duration)
+      if (renderPos < totalDur) {
+        this.checkScheduleLookahead();
+        this.prioritizeSeek(renderPos + 15.0);
+      }
 
       this.emit('time_update', { time: this.playheadPosition });
       this.rafId = requestAnimationFrame(tick);

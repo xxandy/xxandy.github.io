@@ -136,6 +136,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     state.initProject(projectData, window.location.href, true);
     await audio.loadProjectTracks(projectData, window.location.href);
+    audio.seek(0);
+    if (timeline.scrollToStart) {
+      timeline.scrollToStart();
+    }
     setLoading(false);
     timeline.render();
     timeline.renderWaveforms();
@@ -902,13 +906,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!recordAutoGain) return;
     if (!autoGainUserOverridden) {
       const devInfo = classifyInputDeviceLabel(getSelectedDeviceRawLabel());
-      // Always disable OS Auto Gain by default for external USB audio interfaces (preserves hardware preamp gain & multi-channel streams)
-      const shouldEnable = isIOSorIPad() && !devInfo.isUsb;
-      recordAutoGain.checked = shouldEnable;
+      // Keep OS Auto Gain OFF by default on ALL platforms (including iPad/iOS, Android, and USB interfaces)
+      // so WebKit uses raw RemoteIO instead of VoiceProcessingIO (AUVoiceIO), which otherwise ducks playback volume!
+      recordAutoGain.checked = false;
       if (recordAutoGainBadge) {
-        recordAutoGainBadge.textContent = devInfo.isUsb
-          ? 'AUTO (USB OFF)'
-          : (shouldEnable ? 'AUTO (iPad ON)' : 'AUTO (Android OFF)');
+        recordAutoGainBadge.textContent = devInfo.isUsb ? 'AUTO (USB OFF)' : 'AUTO (OFF)';
       }
     }
   }
@@ -1695,15 +1697,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=85', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=86', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=85');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=86');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=85');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=86');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -3069,7 +3071,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // If device labels are blank, prompt briefly for mic permission
       if (audioInputs.length > 0 && !audioInputs[0].label) {
         const probeStart = performance.now();
-        const useAutoGain = recordAutoGain ? recordAutoGain.checked : isIOSorIPad();
+        const useAutoGain = recordAutoGain ? recordAutoGain.checked : false;
         const targetSampleRate = audio.audioCtx ? audio.audioCtx.sampleRate : undefined;
         const probeConstraints = {
           audio: {
@@ -3941,7 +3943,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const selectedOptionText = (recordDeviceSelect && recordDeviceSelect.selectedOptions && recordDeviceSelect.selectedOptions[0])
         ? recordDeviceSelect.selectedOptions[0].textContent
         : rawDeviceLabel;
-      const useAutoGain = recordAutoGain ? recordAutoGain.checked : (isIOSorIPad() && !classifyInputDeviceLabel(rawDeviceLabel).isUsb);
+      const useAutoGain = recordAutoGain ? recordAutoGain.checked : false;
       const vuCtx = audio.getOrCreateAudioContext();
       const targetSampleRate = vuCtx ? vuCtx.sampleRate : undefined;
 
@@ -4000,7 +4002,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         recDiag('REC_VU_NO_AUDIO_CTX', {}, { level: 'error', forcePersist: true });
         return;
       }
-      if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      if (isIOSorIPad() && typeof audio.stabilizeOutputAfterCaptureInit === 'function') {
+        const stabStart = performance.now();
+        await audio.stabilizeOutputAfterCaptureInit();
+        recDiag('REC_VU_IOS_OUTPUT_STABILIZED', {
+          durationMs: Number((performance.now() - stabStart).toFixed(2)),
+          ctxState: ctx.state
+        });
+      } else if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
         const resStart = performance.now();
         recDiag('REC_VU_CTX_RESUME_START', { stateBefore: ctx.state }, { forcePersist: true });
         try { await ctx.resume(); } catch (reErr) {
@@ -4021,7 +4030,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         vuSource.channelInterpretation = 'discrete';
       } catch (_) {}
 
-      const detectedStreamCh = Math.min(16, Math.max(1, getStreamActualChannels(vuStream), vuSource.channelCount || 1));
+      // Read actual stream channels from MediaStreamTrack settings (do NOT use vuSource.channelCount, which Web Audio
+      // defaults to 2 even on 1-channel mono built-in mics, causing false Stereo 1/2 options & iOS route reconfigs!)
+      const detectedStreamCh = Math.min(16, Math.max(1, getStreamActualChannels(vuStream)));
       const maxCapCh = Math.max(detectedStreamCh, getStreamMaxCapChannels(vuStream, rawDeviceLabel || selectedOptionText));
       const splitterCh = Math.max(2, detectedStreamCh);
 
@@ -5737,7 +5748,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const useNanodawSync = record2PassSync ? record2PassSync.checked : true;
     const isTrackGuide = guideModeTrack ? guideModeTrack.checked : false;
     const selectedGuideTrackIdx = syncGuideTrackSelect ? syncGuideTrackSelect.value : '';
-    let useAutoGain = recordAutoGain ? recordAutoGain.checked : (isIOSorIPad() && !classifyInputDeviceLabel(rawDeviceLabel || selectedOptionText).isUsb);
+    let useAutoGain = recordAutoGain ? recordAutoGain.checked : false;
     if (activeRecordingChannelConfig.neededChannels > 1 && useAutoGain) {
       // Never enable WebRTC AutoGain when capturing discrete multi-channel inputs (prevents mono downmixing on Android/Desktop)
       useAutoGain = false;
@@ -5838,9 +5849,17 @@ document.addEventListener('DOMContentLoaded', async () => {
           useAutoGain,
           channelSel: activeRecordingChannelConfig,
           targetSampleRate,
-          exactDevice: false,
+          exactDevice: Boolean(deviceId),
           diagPrefix: 'REC_FLOW_GUM'
         });
+        if (isIOSorIPad() && typeof audio.stabilizeOutputAfterCaptureInit === 'function') {
+          const stabStart = performance.now();
+          await audio.stabilizeOutputAfterCaptureInit();
+          recDiag('REC_FLOW_IOS_OUTPUT_STABILIZED', {
+            durationMs: Number((performance.now() - stabStart).toFixed(2)),
+            ctxState: recAudioCtx ? recAudioCtx.state : 'none'
+          }, { forcePersist: true });
+        }
       }
 
       // Attach track-level mute / unmute / ended listeners for live USB disconnect / route-change tracking

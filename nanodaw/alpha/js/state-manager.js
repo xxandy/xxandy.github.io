@@ -107,6 +107,7 @@ class StateManager {
     this.project = projectData;
     this.projectUrl = projectUrl;
     this.isNewProject = Boolean(isNew);
+    this.currentTime = 0;
 
     const tracks = projectData.tracks || [];
     this.tracksState = tracks.map((track, index) => ({
@@ -143,8 +144,8 @@ class StateManager {
 
     const params = new URLSearchParams(hash);
 
-    // 1. Playhead time
-    if (params.has('t')) {
+    // 1. Playhead time (ignored when starting/reloading a ?new session, which must always start at 0)
+    if (!this.isNewProject && params.has('t')) {
       const t = parseFloat(params.get('t'));
       if (!isNaN(t) && t >= 0) {
         this.currentTime = t;
