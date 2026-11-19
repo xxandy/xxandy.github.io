@@ -120,6 +120,10 @@ class AudioEngine {
     this.state = stateManager;
     this.audioCtx = null;
     this.masterGain = null;
+    this.recMonitorBoostGain = null;
+    this.recMonitorLimiter = null;
+    this.recMonitorCompensationActive = false;
+    this.recMonitorMakeupLinear = 2.5; // +8.0 dB clean makeup gain to counteract iOS AVAudioSessionModeVideoChat ducking
     this.masterAnalyser = null;
     this.masterVolume = 1.0;
     this.tracks = []; // Array of { index, name, url, offset, duration, buffer, gainNode, analyserNode, sourceNode, color }
@@ -377,19 +381,85 @@ class AudioEngine {
       this.masterGain = this.audioCtx.createGain();
       this.masterGain.gain.value = this.masterVolume;
 
+      this.recMonitorBoostGain = this.audioCtx.createGain();
+      this.recMonitorBoostGain.gain.value = 1.0;
+
+      if (typeof this.audioCtx.createDynamicsCompressor === 'function') {
+        this.recMonitorLimiter = this.audioCtx.createDynamicsCompressor();
+        try {
+          const t0 = this.audioCtx.currentTime || 0;
+          this.recMonitorLimiter.threshold.setValueAtTime(-1.5, t0);
+          this.recMonitorLimiter.knee.setValueAtTime(3.0, t0);
+          this.recMonitorLimiter.ratio.setValueAtTime(20.0, t0);
+          this.recMonitorLimiter.attack.setValueAtTime(0.001, t0);
+          this.recMonitorLimiter.release.setValueAtTime(0.060, t0);
+        } catch (_) {}
+      }
+
       this.masterAnalyser = this.audioCtx.createAnalyser();
       this.masterAnalyser.fftSize = 128;
       this.masterAnalyser.smoothingTimeConstant = 0.8;
 
-      // Direct parallel routing (masterGain -> destination, masterGain -> masterAnalyser)
-      this.masterGain.connect(this.audioCtx.destination);
+      // Apply clean output routing (bit-exact direct to destination unless iOS PlayAndRecord makeup is active)
       this.masterGain.connect(this.masterAnalyser);
+      this.applyRecordingMonitorRouting();
 
       // Connect any existing tracks to the new audio graph
       this.reconnectAllTrackNodes();
     }
 
     return this.audioCtx;
+  }
+
+  /**
+   * Wire masterGain either directly to destination (bit-exact 1.0 unity in normal playback & USB interfaces)
+   * or through the limiter-protected makeup stage on iOS non-USB routes during recording (counteracting
+   * WebKit's hardcoded AVAudioSessionModeVideoChat attenuation in MediaSessionManagerCocoa).
+   */
+  applyRecordingMonitorRouting() {
+    if (!this.audioCtx || !this.masterGain) return;
+    try { this.masterGain.disconnect(); } catch (_) {}
+    if (this.masterAnalyser) {
+      try { this.masterGain.connect(this.masterAnalyser); } catch (_) {}
+    }
+    if (this.recMonitorBoostGain) {
+      try { this.recMonitorBoostGain.disconnect(); } catch (_) {}
+    }
+    if (this.recMonitorLimiter) {
+      try { this.recMonitorLimiter.disconnect(); } catch (_) {}
+    }
+
+    if (this.recMonitorCompensationActive && this.recMonitorBoostGain) {
+      this.recMonitorBoostGain.gain.value = this.recMonitorMakeupLinear;
+      this.masterGain.connect(this.recMonitorBoostGain);
+      if (this.recMonitorLimiter) {
+        this.recMonitorBoostGain.connect(this.recMonitorLimiter);
+        this.recMonitorLimiter.connect(this.audioCtx.destination);
+      } else {
+        this.recMonitorBoostGain.connect(this.audioCtx.destination);
+      }
+    } else {
+      if (this.recMonitorBoostGain) {
+        this.recMonitorBoostGain.gain.value = 1.0;
+      }
+      this.masterGain.connect(this.audioCtx.destination);
+    }
+  }
+
+  setRecordingMonitorCompensation(enabled) {
+    const next = Boolean(enabled);
+    if (this.recMonitorCompensationActive === next) return;
+    this.recMonitorCompensationActive = next;
+    this.applyRecordingMonitorRouting();
+  }
+
+  getMonitorOutputNode() {
+    const ctx = this.getOrCreateAudioContext();
+    if (!ctx) return null;
+    if (this.recMonitorCompensationActive && this.recMonitorBoostGain) {
+      return this.recMonitorBoostGain;
+    }
+    return ctx.destination;
   }
 
   ensureAudioContextUnlocked() {
@@ -1407,6 +1477,9 @@ class AudioEngine {
       if (this.masterGain) {
         try { this.masterGain.gain.value = 0; } catch (_) {}
       }
+      if (!this.isRecording && this.recMonitorCompensationActive) {
+        this.setRecordingMonitorCompensation(false);
+      }
     }, 28);
 
     // 4b. Keep AudioContext running pure digital silence until all un-recallable OS / Bluetooth FIFO buffers
@@ -1450,6 +1523,8 @@ class AudioEngine {
       } catch (e) {}
       this.audioCtx = null;
       this.masterGain = null;
+      this.recMonitorBoostGain = null;
+      this.recMonitorLimiter = null;
       this.masterAnalyser = null;
       this.silentBufferUnlocked = false;
     }

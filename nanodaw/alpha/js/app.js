@@ -769,8 +769,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const CHANNEL_PREF_STORAGE_KEY = 'nanodaw_channel_sel_v1';
+  const BUILTIN_MIC_ID_STORAGE_KEY = 'nanodaw_builtin_mic_id_v1';
   const deviceRawLabelById = new Map();
   let userManuallySelectedDeviceId = null;
+
+  function loadCachedBuiltInMicId() {
+    try {
+      return localStorage.getItem(BUILTIN_MIC_ID_STORAGE_KEY) || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function saveCachedBuiltInMicId(deviceId) {
+    if (!deviceId) return;
+    try {
+      localStorage.setItem(BUILTIN_MIC_ID_STORAGE_KEY, String(deviceId));
+    } catch (_) {}
+  }
 
   function getSelectedDeviceRawLabel() {
     if (!recordDeviceSelect) return '';
@@ -1697,15 +1713,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     workletInitCtx = ctx;
     workletInitPromise = (async () => {
       const t0 = performance.now();
-      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=86', ctx: inspectAudioCtx(ctx) }, {
+      recDiag('REC_WORKLET_ADDMODULE_START', { url: 'js/recorder-worklet.js?v=87', ctx: inspectAudioCtx(ctx) }, {
         stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
         phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
         forcePersist: true
       });
       try {
-        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=86');
+        await ctx.audioWorklet.addModule('js/recorder-worklet.js?v=87');
         const dur = Number((performance.now() - t0).toFixed(2));
-        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=86');
+        console.log('[Recorder] AudioWorklet registered from js/recorder-worklet.js?v=87');
         recDiag('REC_WORKLET_ADDMODULE_OK', { source: 'external_file', durationMs: dur, ctxState: ctx.state }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_WORKLET_LOAD : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
@@ -3068,30 +3084,62 @@ document.addEventListener('DOMContentLoaded', async () => {
         lastKnownAudioInputSignature = buildAudioInputSignature(devices);
       }
 
-      // If device labels are blank, prompt briefly for mic permission
+      // If device labels are blank, prompt briefly for mic permission.
+      // CRITICAL ON iOS/iPadOS + BLUETOOTH: Pass cached built-in mic deviceId if available so Safari opens
+      // "iPad Microphone" directly and NEVER negotiates Bluetooth HFP Hands-Free Call Mode on the headset mic!
       if (audioInputs.length > 0 && !audioInputs[0].label) {
         const probeStart = performance.now();
         const useAutoGain = recordAutoGain ? recordAutoGain.checked : false;
         const targetSampleRate = audio.audioCtx ? audio.audioCtx.sampleRate : undefined;
+        const cachedBuiltInId = loadCachedBuiltInMicId();
         const probeConstraints = {
           audio: {
             sampleRate: targetSampleRate ? { ideal: targetSampleRate } : undefined,
+            channelCount: { ideal: 1 },
             echoCancellation: false,
             autoGainControl: useAutoGain,
             noiseSuppression: false
           }
         };
-        recDiag('REC_PERMISSION_PROBE_START', { constraints: probeConstraints }, {
+        if (cachedBuiltInId) {
+          probeConstraints.audio.deviceId = { ideal: cachedBuiltInId };
+        }
+        recDiag('REC_PERMISSION_PROBE_START', {
+          cachedBuiltInIdPrefix: cachedBuiltInId ? cachedBuiltInId.slice(0, 12) : null,
+          constraints: probeConstraints
+        }, {
           stepId: window.PROFILER_STEP ? window.PROFILER_STEP.REC_PERMISSION_PROBE : undefined,
           phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.START : 0,
           forcePersist: true
         });
+
+        const recoverFromBluetoothHfpProbe = async (probedLabel) => {
+          const flags = classifyInputDeviceLabel(probedLabel);
+          if (!isIOSorIPad() || flags.isInternal || flags.isUsb) return;
+          // An uncached first-time probe grabbed a Bluetooth headset mic (e.g. "💀skeletor"), which switches
+          // iPadOS Bluetooth from stereo A2DP into quiet 16kHz HFP Call Mode! Force CoreAudio back to A2DP
+          // by briefly leaving 'play-and-record' -> 'playback' while zero mic tracks are open!
+          try {
+            if (audio.audioCtx && audio.audioCtx.state === 'running') {
+              await audio.audioCtx.suspend();
+            }
+          } catch (_) {}
+          if (typeof navigator !== 'undefined' && navigator.audioSession) {
+            try { navigator.audioSession.type = 'auto'; } catch (_) {}
+            try { navigator.audioSession.type = 'playback'; } catch (_) {}
+          }
+          await new Promise(r => setTimeout(r, 220));
+          audio.setPlayAndRecordAudioSession();
+          recDiag('REC_PERMISSION_PROBE_BT_HFP_RECOVERED', { probedLabel }, { forcePersist: true });
+        };
+
         try {
           if (typeof navigator !== 'undefined' && navigator.audioSession) {
             try { navigator.audioSession.type = 'play-and-record'; } catch (_) {}
           }
           const tempStream = await navigator.mediaDevices.getUserMedia(probeConstraints);
           const probeSpec = inspectMediaStream(tempStream);
+          const probedLabel = tempStream.getAudioTracks?.()?.[0]?.label || '';
           tempStream.getTracks().forEach(t => t.stop());
           const probeDur = Number((performance.now() - probeStart).toFixed(2));
           recDiag('REC_PERMISSION_PROBE_OK', { durationMs: probeDur, stream: probeSpec }, {
@@ -3099,6 +3147,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
             duration: probeDur
           });
+          await recoverFromBluetoothHfpProbe(probedLabel);
           devices = await navigator.mediaDevices.enumerateDevices();
           audioInputs = devices.filter(d => d.kind === 'audioinput');
         } catch (e1) {
@@ -3110,6 +3159,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           try {
             const fallbackStream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const fbSpec = inspectMediaStream(fallbackStream);
+            const fbLabel = fallbackStream.getAudioTracks?.()?.[0]?.label || '';
             fallbackStream.getTracks().forEach(t => t.stop());
             const probeDur = Number((performance.now() - probeStart).toFixed(2));
             recDiag('REC_PERMISSION_PROBE_FALLBACK_OK', { durationMs: probeDur, stream: fbSpec }, {
@@ -3117,6 +3167,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               phase: window.PROFILER_PHASE ? window.PROFILER_PHASE.END : 1,
               duration: probeDur
             });
+            await recoverFromBluetoothHfpProbe(fbLabel);
             devices = await navigator.mediaDevices.enumerateDevices();
             audioInputs = devices.filter(d => d.kind === 'audioinput');
           } catch (e2) {
@@ -3165,6 +3216,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           const usbDevice = classified.find(c => c.isUsb);
           const builtIn = classified.find(c => c.isInternal) || classified.find(c => !c.isBt && !c.isUsb) || classified[0];
+          if (builtIn && builtIn.isInternal && builtIn.dev && builtIn.dev.deviceId) {
+            saveCachedBuiltInMicId(builtIn.dev.deviceId);
+          }
           const manualStillPresent = userManuallySelectedDeviceId
             ? classified.find(c => c.dev.deviceId === userManuallySelectedDeviceId)
             : null;
@@ -4922,7 +4976,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       g.gain.setValueAtTime(startGain, playTime);
       g.gain.exponentialRampToValueAtTime(0.0001, playTime + dur);
       osc.connect(g);
-      g.connect(destNode || recAudioCtx.destination);
+      const targetOut = destNode || (typeof audio.getMonitorOutputNode === 'function' ? audio.getMonitorOutputNode() : null) || recAudioCtx.destination;
+      g.connect(targetOut);
       osc.start(playTime);
       osc.stop(playTime + dur + 0.02);
       return osc;
@@ -5046,6 +5101,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     audio.isRecording = false;
     audio.isRecordingMode = false;
+    if (!audio.isPlaying && typeof audio.setRecordingMonitorCompensation === 'function') {
+      audio.setRecordingMonitorCompensation(false);
+    }
     audio.setPlaybackAudioSession();
   }
 
@@ -5881,6 +5939,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       isRecording = true;
+      const activeDevFlags = classifyInputDeviceLabel(rawDeviceLabel || selectedOptionText);
+      const enableIosRecMonitorBoost = Boolean(isIOSorIPad() && !activeDevFlags.isUsb);
+      if (typeof audio.setRecordingMonitorCompensation === 'function') {
+        audio.setRecordingMonitorCompensation(enableIosRecMonitorBoost);
+      }
+      recDiag('REC_MONITOR_COMPENSATION_STATE', {
+        enabled: enableIosRecMonitorBoost,
+        isUsb: activeDevFlags.isUsb,
+        deviceLabel: rawDeviceLabel || selectedOptionText
+      });
       setTransportRecordingUI(true);
       if (btnRecord) btnRecord.classList.add('recording');
       if (recordingHUD) {
